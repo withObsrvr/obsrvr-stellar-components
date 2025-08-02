@@ -1,0 +1,407 @@
+# Alert rules for obsrvr-stellar-components
+groups:
+  - name: stellar.critical
+    interval: 30s
+    rules:
+      # Component availability alerts
+      - alert: StellarSourceDown
+        expr: up{job="stellar-arrow-source"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: stellar-arrow-source
+          region: "{{ $labels.region }}"
+        annotations:
+          summary: "Stellar Arrow Source is down"
+          description: "Stellar Arrow Source instance {{ $labels.instance }} in region {{ $labels.region }} has been down for more than 2 minutes."
+          runbook_url: "https://runbooks.obsrvr.com/stellar-source-down"
+
+      - alert: TTPProcessorDown
+        expr: up{job="ttp-arrow-processor"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: ttp-arrow-processor
+          region: "{{ $labels.region }}"
+        annotations:
+          summary: "TTP Arrow Processor is down"
+          description: "TTP Arrow Processor instance {{ $labels.instance }} in region {{ $labels.region }} has been down for more than 2 minutes."
+          runbook_url: "https://runbooks.obsrvr.com/ttp-processor-down"
+
+      - alert: AnalyticsSinkDown
+        expr: up{job="arrow-analytics-sink"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: arrow-analytics-sink
+          region: "{{ $labels.region }}"
+        annotations:
+          summary: "Arrow Analytics Sink is down"
+          description: "Arrow Analytics Sink instance {{ $labels.instance }} in region {{ $labels.region }} has been down for more than 2 minutes."
+          runbook_url: "https://runbooks.obsrvr.com/analytics-sink-down"
+
+      # High error rate alerts
+      - alert: HighErrorRate
+        expr: |
+          (
+            sum(rate(stellar_requests_total{status=~"5.."}[5m])) by (service, region) /
+            sum(rate(stellar_requests_total[5m])) by (service, region)
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          alert_type: error_rate
+        annotations:
+          summary: "High error rate detected"
+          description: "Error rate for {{ $labels.service }} in {{ $labels.region }} is {{ $value | humanizePercentage }} (>5%) over the last 5 minutes."
+          runbook_url: "https://runbooks.obsrvr.com/high-error-rate"
+
+      # Latency alerts
+      - alert: HighLatency
+        expr: |
+          histogram_quantile(0.95, 
+            sum(rate(stellar_request_duration_seconds_bucket[5m])) by (service, region, le)
+          ) > 10
+        for: 10m
+        labels:
+          severity: critical
+          alert_type: latency
+        annotations:
+          summary: "High latency detected"
+          description: "95th percentile latency for {{ $labels.service }} in {{ $labels.region }} is {{ $value }}s (>10s) over the last 10 minutes."
+          runbook_url: "https://runbooks.obsrvr.com/high-latency"
+
+      # Circuit breaker alerts
+      - alert: CircuitBreakerOpen
+        expr: stellar_circuit_breaker_state{state="open"} == 1
+        for: 1m
+        labels:
+          severity: critical
+          alert_type: circuit_breaker
+        annotations:
+          summary: "Circuit breaker is open"
+          description: "Circuit breaker {{ $labels.name }} in {{ $labels.service }} is open, indicating repeated failures."
+          runbook_url: "https://runbooks.obsrvr.com/circuit-breaker-open"
+
+      # Data processing alerts
+      - alert: LedgerProcessingStalled
+        expr: |
+          increase(stellar_ledgers_processed_total[10m]) == 0
+        for: 10m
+        labels:
+          severity: critical
+          alert_type: processing_stalled
+        annotations:
+          summary: "Ledger processing has stalled"
+          description: "No ledgers have been processed in the last 10 minutes on {{ $labels.instance }}."
+          runbook_url: "https://runbooks.obsrvr.com/processing-stalled"
+
+      # Storage alerts
+      - alert: HighMemoryUsage
+        expr: |
+          (
+            container_memory_working_set_bytes{pod=~".*stellar.*"} /
+            container_spec_memory_limit_bytes{pod=~".*stellar.*"}
+          ) > 0.9
+        for: 5m
+        labels:
+          severity: critical
+          alert_type: memory
+        annotations:
+          summary: "High memory usage"
+          description: "Memory usage for {{ $labels.pod }} is {{ $value | humanizePercentage }} (>90%) of limit."
+          runbook_url: "https://runbooks.obsrvr.com/high-memory-usage"
+
+      - alert: HighCPUUsage
+        expr: |
+          (
+            rate(container_cpu_usage_seconds_total{pod=~".*stellar.*"}[5m]) /
+            container_spec_cpu_quota{pod=~".*stellar.*"} * container_spec_cpu_period{pod=~".*stellar.*"}
+          ) > 0.8
+        for: 10m
+        labels:
+          severity: critical
+          alert_type: cpu
+        annotations:
+          summary: "High CPU usage"
+          description: "CPU usage for {{ $labels.pod }} is {{ $value | humanizePercentage }} (>80%) of limit."
+          runbook_url: "https://runbooks.obsrvr.com/high-cpu-usage"
+
+      # Storage space alerts
+      - alert: LowDiskSpace
+        expr: |
+          (
+            node_filesystem_avail_bytes{mountpoint="/data"} /
+            node_filesystem_size_bytes{mountpoint="/data"}
+          ) < 0.1
+        for: 5m
+        labels:
+          severity: critical
+          alert_type: disk_space
+        annotations:
+          summary: "Low disk space"
+          description: "Disk space on {{ $labels.instance }} is {{ $value | humanizePercentage }} available (<10%)."
+          runbook_url: "https://runbooks.obsrvr.com/low-disk-space"
+
+  - name: stellar.warning
+    interval: 60s
+    rules:
+      # Performance degradation
+      - alert: ModerateLatencyIncrease
+        expr: |
+          histogram_quantile(0.95, 
+            sum(rate(stellar_request_duration_seconds_bucket[10m])) by (service, region, le)
+          ) > 5
+        for: 15m
+        labels:
+          severity: warning
+          alert_type: latency
+        annotations:
+          summary: "Moderate latency increase"
+          description: "95th percentile latency for {{ $labels.service }} in {{ $labels.region }} is {{ $value }}s (>5s)."
+          runbook_url: "https://runbooks.obsrvr.com/moderate-latency"
+
+      # Processing rate warnings
+      - alert: LowProcessingRate
+        expr: |
+          rate(stellar_ledgers_processed_total[10m]) < 10
+        for: 15m
+        labels:
+          severity: warning
+          alert_type: processing_rate
+        annotations:
+          summary: "Low ledger processing rate"
+          description: "Ledger processing rate on {{ $labels.instance }} is {{ $value }} ledgers/sec (<10/sec)."
+          runbook_url: "https://runbooks.obsrvr.com/low-processing-rate"
+
+      # Connection warnings
+      - alert: HighWebSocketConnections
+        expr: stellar_websocket_active_connections > 4000
+        for: 10m
+        labels:
+          severity: warning
+          alert_type: connections
+        annotations:
+          summary: "High WebSocket connection count"
+          description: "WebSocket connections on {{ $labels.instance }} is {{ $value }} (>4000)."
+          runbook_url: "https://runbooks.obsrvr.com/high-websocket-connections"
+
+      # Data quality warnings
+      - alert: HighXDRValidationFailures
+        expr: |
+          rate(stellar_xdr_validation_failures_total[10m]) > 1
+        for: 10m
+        labels:
+          severity: warning
+          alert_type: data_quality
+        annotations:
+          summary: "High XDR validation failure rate"
+          description: "XDR validation failures on {{ $labels.instance }} is {{ $value }} failures/sec (>1/sec)."
+          runbook_url: "https://runbooks.obsrvr.com/xdr-validation-failures"
+
+      # Resource utilization warnings
+      - alert: ModerateMemoryUsage
+        expr: |
+          (
+            container_memory_working_set_bytes{pod=~".*stellar.*"} /
+            container_spec_memory_limit_bytes{pod=~".*stellar.*"}
+          ) > 0.7
+        for: 15m
+        labels:
+          severity: warning
+          alert_type: memory
+        annotations:
+          summary: "Moderate memory usage"
+          description: "Memory usage for {{ $labels.pod }} is {{ $value | humanizePercentage }} (>70%) of limit."
+          runbook_url: "https://runbooks.obsrvr.com/moderate-memory-usage"
+
+      # File system alerts
+      - alert: HighParquetFileCreationRate
+        expr: |
+          rate(stellar_parquet_files_created_total[10m]) > 100
+        for: 10m
+        labels:
+          severity: warning
+          alert_type: file_creation
+        annotations:
+          summary: "High Parquet file creation rate"
+          description: "Parquet file creation rate on {{ $labels.instance }} is {{ $value }} files/sec (>100/sec)."
+          runbook_url: "https://runbooks.obsrvr.com/high-file-creation-rate"
+
+  - name: stellar.kubernetes
+    interval: 60s
+    rules:
+      # Kubernetes resource alerts
+      - alert: PodCrashLooping
+        expr: |
+          rate(kube_pod_container_status_restarts_total{namespace="obsrvr-stellar"}[15m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+          alert_type: pod_crash
+        annotations:
+          summary: "Pod is crash looping"
+          description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} is crash looping."
+          runbook_url: "https://runbooks.obsrvr.com/pod-crash-looping"
+
+      - alert: PodNotReady
+        expr: |
+          kube_pod_status_ready{condition="false", namespace="obsrvr-stellar"} == 1
+        for: 10m
+        labels:
+          severity: warning
+          alert_type: pod_not_ready
+        annotations:
+          summary: "Pod not ready"
+          description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has been not ready for more than 10 minutes."
+          runbook_url: "https://runbooks.obsrvr.com/pod-not-ready"
+
+      - alert: DeploymentReplicasMismatch
+        expr: |
+          kube_deployment_spec_replicas{namespace="obsrvr-stellar"} != kube_deployment_status_replicas_available{namespace="obsrvr-stellar"}
+        for: 15m
+        labels:
+          severity: warning
+          alert_type: deployment
+        annotations:
+          summary: "Deployment replicas mismatch"
+          description: "Deployment {{ $labels.deployment }} in namespace {{ $labels.namespace }} has {{ $labels.spec_replicas }} desired but {{ $labels.available_replicas }} available replicas."
+          runbook_url: "https://runbooks.obsrvr.com/deployment-replicas-mismatch"
+
+      # HPA alerts
+      - alert: HPAScalingIssue
+        expr: |
+          kube_hpa_status_condition{condition="AbleToScale", status="false", namespace="obsrvr-stellar"} == 1
+        for: 10m
+        labels:
+          severity: warning
+          alert_type: hpa
+        annotations:
+          summary: "HPA scaling issue"
+          description: "HPA {{ $labels.hpa }} in namespace {{ $labels.namespace }} is unable to scale."
+          runbook_url: "https://runbooks.obsrvr.com/hpa-scaling-issue"
+
+      - alert: HPAMaxReplicasReached
+        expr: |
+          kube_hpa_status_current_replicas{namespace="obsrvr-stellar"} == kube_hpa_spec_max_replicas{namespace="obsrvr-stellar"}
+        for: 30m
+        labels:
+          severity: warning
+          alert_type: hpa
+        annotations:
+          summary: "HPA max replicas reached"
+          description: "HPA {{ $labels.hpa }} in namespace {{ $labels.namespace }} has reached maximum replicas ({{ $value }}) and may need capacity adjustment."
+          runbook_url: "https://runbooks.obsrvr.com/hpa-max-replicas"
+
+  - name: stellar.external
+    interval: 120s
+    rules:
+      # External service monitoring
+      - alert: StellarNetworkUnreachable
+        expr: probe_success{job="blackbox", instance=~".*stellar.org.*"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          alert_type: external_service
+        annotations:
+          summary: "Stellar network unreachable"
+          description: "Unable to reach Stellar network endpoint {{ $labels.instance }} for more than 5 minutes."
+          runbook_url: "https://runbooks.obsrvr.com/stellar-network-unreachable"
+
+      # DNS and endpoint monitoring
+      - alert: WebSocketEndpointDown
+        expr: probe_success{job="websocket-endpoints"} == 0
+        for: 3m
+        labels:
+          severity: critical
+          alert_type: websocket
+        annotations:
+          summary: "WebSocket endpoint down"
+          description: "WebSocket endpoint {{ $labels.instance }} has been down for more than 3 minutes."
+          runbook_url: "https://runbooks.obsrvr.com/websocket-endpoint-down"
+
+      - alert: HighWebSocketLatency
+        expr: probe_duration_seconds{job="websocket-endpoints"} > 2
+        for: 10m
+        labels:
+          severity: warning
+          alert_type: websocket_latency
+        annotations:
+          summary: "High WebSocket connection latency"
+          description: "WebSocket connection latency to {{ $labels.instance }} is {{ $value }}s (>2s)."
+          runbook_url: "https://runbooks.obsrvr.com/high-websocket-latency"
+
+  - name: stellar.data_quality
+    interval: 300s
+    rules:
+      # Data consistency alerts
+      - alert: DataSyncLag
+        expr: |
+          stellar_region_sync_lag_seconds > 300
+        for: 10m
+        labels:
+          severity: warning
+          alert_type: data_sync
+        annotations:
+          summary: "High data synchronization lag"
+          description: "Data sync lag between regions is {{ $value }}s (>5 minutes) for {{ $labels.source_region }} -> {{ $labels.target_region }}."
+          runbook_url: "https://runbooks.obsrvr.com/data-sync-lag"
+
+      - alert: MissingLedgerData
+        expr: |
+          increase(stellar_missing_ledgers_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          alert_type: data_integrity
+        annotations:
+          summary: "Missing ledger data detected"
+          description: "{{ $value }} missing ledgers detected in the last hour on {{ $labels.instance }}."
+          runbook_url: "https://runbooks.obsrvr.com/missing-ledger-data"
+
+      # Schema evolution alerts
+      - alert: SchemaEvolutionIssue
+        expr: |
+          rate(stellar_schema_evolution_failures_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          alert_type: schema
+        annotations:
+          summary: "Schema evolution issue"
+          description: "Schema evolution failures detected on {{ $labels.instance }}: {{ $value }} failures/sec."
+          runbook_url: "https://runbooks.obsrvr.com/schema-evolution-issue"
+
+  - name: stellar.business_metrics
+    interval: 300s
+    rules:
+      # Business metric alerts
+      - alert: LowTTPEventDetectionRate
+        expr: |
+          (
+            rate(stellar_ttp_events_detected_total[1h]) /
+            rate(stellar_transactions_processed_total[1h])
+          ) < 0.1
+        for: 30m
+        labels:
+          severity: warning
+          alert_type: business_metric
+        annotations:
+          summary: "Low TTP event detection rate"
+          description: "TTP event detection rate is {{ $value | humanizePercentage }} (<10%) over the last hour."
+          runbook_url: "https://runbooks.obsrvr.com/low-ttp-detection-rate"
+
+      - alert: UnusualAssetDistribution
+        expr: |
+          (
+            rate(stellar_ttp_events_total{asset_code="XLM"}[4h]) /
+            rate(stellar_ttp_events_total[4h])
+          ) < 0.3
+        for: 1h
+        labels:
+          severity: info
+          alert_type: asset_distribution
+        annotations:
+          summary: "Unusual asset distribution"
+          description: "XLM represents only {{ $value | humanizePercentage }} of TTP events (<30%) over the last 4 hours."
+          runbook_url: "https://runbooks.obsrvr.com/unusual-asset-distribution"

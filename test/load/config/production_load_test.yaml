@@ -1,0 +1,146 @@
+# Production Load Test Configuration
+test_duration: 30m
+warmup_duration: 5m
+cooldown_duration: 2m
+
+# Load parameters
+max_concurrent_users: 1000
+ramp_up_time: 10m
+ramp_down_time: 5m
+requests_per_second: 100.0
+
+# Component endpoints
+stellar_source_endpoint: "stellar-arrow-source.obsrvr-stellar.svc.cluster.local:8815"
+ttp_processor_endpoint: "ttp-arrow-processor.obsrvr-stellar.svc.cluster.local:8816"
+analytics_sink_endpoint: "arrow-analytics-sink.obsrvr-stellar.svc.cluster.local:8817"
+websocket_endpoint: "ws://arrow-analytics-sink.obsrvr-stellar.svc.cluster.local:8080/ws"
+rest_api_endpoint: "http://arrow-analytics-sink.obsrvr-stellar.svc.cluster.local:8081"
+
+# Test scenarios
+scenarios:
+  - name: "high_throughput_streaming"
+    description: "Test high-throughput Arrow Flight streaming"
+    weight: 0.4
+    duration: 25m
+    concurrent_users: 400
+    enabled: true
+    operations:
+      - type: "arrow_flight_stream"
+        endpoint: "stellar-arrow-source.obsrvr-stellar.svc.cluster.local:8815"
+        method: "GET_FLIGHT_INFO"
+        frequency: 1.0
+        timeout: 30s
+        validation:
+          status_code: 200
+          max_response_time: 5s
+          min_record_count: 100
+      - type: "arrow_flight_stream"
+        endpoint: "ttp-arrow-processor.obsrvr-stellar.svc.cluster.local:8816"
+        method: "DO_GET"
+        frequency: 0.8
+        timeout: 45s
+        validation:
+          status_code: 200
+          max_response_time: 10s
+          min_record_count: 50
+
+  - name: "websocket_real_time"
+    description: "Test real-time WebSocket streaming under load"
+    weight: 0.3
+    duration: 20m
+    concurrent_users: 300
+    enabled: true
+    operations:
+      - type: "websocket_connection"
+        endpoint: "ws://arrow-analytics-sink.obsrvr-stellar.svc.cluster.local:8080/ws"
+        method: "CONNECT"
+        frequency: 1.0
+        timeout: 10s
+        validation:
+          status_code: 101
+          max_response_time: 2s
+      - type: "websocket_subscription"
+        endpoint: "ws://arrow-analytics-sink.obsrvr-stellar.svc.cluster.local:8080/ws"
+        method: "SUBSCRIBE"
+        frequency: 0.9
+        timeout: 5s
+        payload:
+          type: "subscribe"
+          subscription_type: "payment_events"
+          filters:
+            asset_code: "XLM"
+            min_amount: 1000000
+
+  - name: "analytics_export"
+    description: "Test analytics export performance"
+    weight: 0.2
+    duration: 15m
+    concurrent_users: 200
+    enabled: true
+    operations:
+      - type: "parquet_write"
+        endpoint: "arrow-analytics-sink.obsrvr-stellar.svc.cluster.local:8817"
+        method: "WRITE_BATCH"
+        frequency: 0.5
+        timeout: 60s
+        validation:
+          status_code: 200
+          max_response_time: 30s
+      - type: "rest_api_request"
+        endpoint: "http://arrow-analytics-sink.obsrvr-stellar.svc.cluster.local:8081/api/v1/export"
+        method: "POST"
+        frequency: 0.3
+        timeout: 120s
+        payload:
+          format: "parquet"
+          filters:
+            start_time: "2024-01-01T00:00:00Z"
+            end_time: "2024-01-02T00:00:00Z"
+
+  - name: "mixed_workload"
+    description: "Mixed workload simulating production usage"
+    weight: 0.1
+    duration: 30m
+    concurrent_users: 100
+    enabled: true
+    operations:
+      - type: "arrow_flight_stream"
+        endpoint: "stellar-arrow-source.obsrvr-stellar.svc.cluster.local:8815"
+        method: "LIST_FLIGHTS"
+        frequency: 0.1
+        timeout: 10s
+      - type: "websocket_connection"
+        endpoint: "ws://arrow-analytics-sink.obsrvr-stellar.svc.cluster.local:8080/ws"
+        method: "PING"
+        frequency: 0.2
+        timeout: 5s
+      - type: "rest_api_request"
+        endpoint: "http://arrow-analytics-sink.obsrvr-stellar.svc.cluster.local:8081/api/v1/health"
+        method: "GET"
+        frequency: 0.3
+        timeout: 5s
+
+# Data generation configuration
+data_generation:
+  ledger_count: 10000
+  transactions_per_ledger: 50
+  ttp_event_ratio: 0.3
+  asset_distribution:
+    XLM: 0.6
+    USDC: 0.25
+    USDT: 0.1
+    BTC: 0.03
+    ETH: 0.02
+  amount_range:
+    min: 1000000    # 0.1 XLM
+    max: 1000000000 # 100 XLM
+  account_pool: 10000
+
+# Performance targets
+performance_targets:
+  max_latency_p95: 10s
+  max_latency_p99: 30s
+  min_throughput: 50.0  # requests per second
+  max_error_rate: 0.01  # 1% error rate
+  max_memory_usage_mb: 8192
+  max_cpu_usage_percent: 80.0

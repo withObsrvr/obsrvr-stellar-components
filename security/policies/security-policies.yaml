@@ -1,0 +1,401 @@
+# Security policies for obsrvr-stellar-components
+# Pod Security Standards
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: obsrvr-stellar
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    name: obsrvr-stellar
+    environment: production
+    security.obsrvr.com/classification: internal
+---
+# Open Policy Agent Gatekeeper Constraints
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: stellarcontainersecurity
+spec:
+  crd:
+    spec:
+      names:
+        kind: StellarContainerSecurity
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            allowedImages:
+              type: array
+              items:
+                type: string
+            requiredSecurityContext:
+              type: object
+              properties:
+                runAsNonRoot:
+                  type: boolean
+                readOnlyRootFilesystem:
+                  type: boolean
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package stellarcontainersecurity
+        
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not starts_with(container.image, "obsrvr/")
+          not allowed_image(container.image)
+          msg := sprintf("Container image '%v' is not from allowed registry", [container.image])
+        }
+        
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not container.securityContext.runAsNonRoot
+          msg := "Container must run as non-root user"
+        }
+        
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not container.securityContext.readOnlyRootFilesystem
+          msg := "Container must have read-only root filesystem"
+        }
+        
+        allowed_image(image) {
+          allowed := input.parameters.allowedImages[_]
+          startswith(image, allowed)
+        }
+---
+apiVersion: config.gatekeeper.sh/v1alpha1
+kind: StellarContainerSecurity
+metadata:
+  name: stellar-container-security
+spec:
+  match:
+    - apiGroups: ["apps"]
+      kinds: ["Deployment", "StatefulSet", "DaemonSet"]
+      namespaces: ["obsrvr-stellar"]
+  parameters:
+    allowedImages:
+      - "obsrvr/stellar-arrow-source"
+      - "obsrvr/ttp-arrow-processor"
+      - "obsrvr/arrow-analytics-sink"
+      - "prometheus/prometheus"
+      - "grafana/grafana"
+      - "prom/alertmanager"
+    requiredSecurityContext:
+      runAsNonRoot: true
+      readOnlyRootFilesystem: true
+---
+# Resource Quotas
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: stellar-compute-quota
+  namespace: obsrvr-stellar
+spec:
+  hard:
+    requests.cpu: "50"
+    requests.memory: 100Gi
+    limits.cpu: "100"
+    limits.memory: 200Gi
+    persistentvolumeclaims: "20"
+    requests.storage: 2Ti
+    count/deployments.apps: "10"
+    count/services: "20"
+    count/secrets: "50"
+    count/configmaps: "50"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: stellar-limits
+  namespace: obsrvr-stellar
+spec:
+  limits:
+  - default:
+      memory: "4Gi"
+      cpu: "2"
+    defaultRequest:
+      memory: "1Gi"
+      cpu: "500m"
+    max:
+      memory: "32Gi"
+      cpu: "16"
+    min:
+      memory: "256Mi"
+      cpu: "100m"
+    type: Container
+  - max:
+      storage: 1Ti
+    min:
+      storage: 10Gi
+    type: PersistentVolumeClaim
+---
+# Admission Controller Webhook for Custom Validations
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionWebhook
+metadata:
+  name: stellar-security-validator
+webhooks:
+- name: stellar-pod-validator.obsrvr.com
+  clientConfig:
+    service:
+      name: stellar-admission-webhook
+      namespace: obsrvr-stellar
+      path: "/validate"
+  rules:
+  - operations: ["CREATE", "UPDATE"]
+    apiGroups: ["", "apps", "extensions"]
+    apiVersions: ["v1", "v1beta1"]
+    resources: ["pods", "deployments", "statefulsets", "daemonsets"]
+  admissionReviewVersions: ["v1", "v1beta1"]
+  sideEffects: None
+  failurePolicy: Fail
+  namespaceSelector:
+    matchLabels:
+      name: obsrvr-stellar
+---
+# Falco Security Rules
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: falco-stellar-rules
+  namespace: obsrvr-stellar
+data:
+  stellar_rules.yaml: |
+    # Stellar-specific security rules
+    - rule: Stellar Unauthorized Process
+      desc: Detect unauthorized processes in stellar containers
+      condition: >
+        container and
+        k8s.ns.name = "obsrvr-stellar" and
+        not proc.name in (stellar-arrow-source, ttp-arrow-processor, arrow-analytics-sink, prometheus, grafana) and
+        not proc.name in (sh, bash, env, id, whoami)
+      output: >
+        Unauthorized process in stellar container (user=%user.name proc=%proc.name
+        container=%container.name image=%container.image.repository:%container.image.tag)
+      priority: WARNING
+    
+    - rule: Stellar Sensitive File Access
+      desc: Detect access to sensitive files in stellar namespace
+      condition: >
+        open_read and
+        k8s.ns.name = "obsrvr-stellar" and
+        (fd.name contains "/etc/ssl" or
+         fd.name contains "/etc/secrets" or
+         fd.name contains "/var/run/secrets" or
+         fd.name contains ".key" or
+         fd.name contains ".pem")
+      output: >
+        Sensitive file access in stellar namespace (user=%user.name proc=%proc.name
+        file=%fd.name container=%container.name)
+      priority: WARNING
+    
+    - rule: Stellar Network Connection
+      desc: Monitor network connections from stellar containers
+      condition: >
+        outbound and
+        k8s.ns.name = "obsrvr-stellar" and
+        not fd.net.proto = "tcp" and
+        not (fd.rip in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")) and
+        not fd.rip in (horizon.stellar.org, horizon-testnet.stellar.org)
+      output: >
+        Unexpected network connection from stellar container (user=%user.name proc=%proc.name
+        connection=%fd.rip:%fd.rport container=%container.name)
+      priority: INFO
+    
+    - rule: Stellar Container Privilege Escalation
+      desc: Detect privilege escalation attempts in stellar containers
+      condition: >
+        container and
+        k8s.ns.name = "obsrvr-stellar" and
+        (proc.name in (sudo, su, passwd, chsh, chfn, chroot) or
+         spawned_process and proc.args contains "sudo" or
+         spawned_process and proc.args contains "su -")
+      output: >
+        Privilege escalation attempt in stellar container (user=%user.name proc=%proc.name
+        args=%proc.args container=%container.name)
+      priority: CRITICAL
+---
+# Admission Controller Service
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stellar-admission-webhook
+  namespace: obsrvr-stellar
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: stellar-admission-webhook
+  template:
+    metadata:
+      labels:
+        app: stellar-admission-webhook
+    spec:
+      serviceAccountName: stellar-admission-webhook
+      containers:
+      - name: webhook
+        image: obsrvr/stellar-admission-webhook:latest
+        ports:
+        - containerPort: 8443
+          name: webhook-api
+        env:
+        - name: TLS_CERT_FILE
+          value: /etc/certs/tls.crt
+        - name: TLS_PRIVATE_KEY_FILE
+          value: /etc/certs/tls.key
+        volumeMounts:
+        - name: webhook-certs
+          mountPath: /etc/certs
+          readOnly: true
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: webhook-certs
+        secret:
+          secretName: stellar-admission-webhook-certs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stellar-admission-webhook
+  namespace: obsrvr-stellar
+spec:
+  selector:
+    app: stellar-admission-webhook
+  ports:
+  - name: webhook-api
+    port: 443
+    targetPort: webhook-api
+    protocol: TCP
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: stellar-admission-webhook
+  namespace: obsrvr-stellar
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: stellar-admission-webhook
+rules:
+- apiGroups: ["", "apps", "extensions"]
+  resources: ["*"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: stellar-admission-webhook
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: stellar-admission-webhook
+subjects:
+- kind: ServiceAccount
+  name: stellar-admission-webhook
+  namespace: obsrvr-stellar
+---
+# Security Scanning CronJob
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: stellar-security-scan
+  namespace: obsrvr-stellar
+spec:
+  schedule: "0 2 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: stellar-security-scanner
+          containers:
+          - name: security-scanner
+            image: obsrvr/security-scanner:latest
+            env:
+            - name: NAMESPACE
+              value: "obsrvr-stellar"
+            - name: SLACK_WEBHOOK
+              valueFrom:
+                secretKeyRef:
+                  name: monitoring-secrets
+                  key: slack_webhook_url
+            command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Starting security scan..."
+              # Scan for vulnerabilities in running containers
+              kubectl get pods -n obsrvr-stellar -o json | \
+                jq -r '.items[] | .spec.containers[] | .image' | \
+                sort -u | \
+                while read image; do
+                  echo "Scanning $image..."
+                  trivy image --severity HIGH,CRITICAL --format json $image > /tmp/scan-results.json
+                  if [ $(jq '.Results[].Vulnerabilities | length' /tmp/scan-results.json) -gt 0 ]; then
+                    echo "Vulnerabilities found in $image"
+                    # Send to monitoring system
+                  fi
+                done
+              echo "Security scan completed"
+            resources:
+              requests:
+                memory: "256Mi"
+                cpu: "200m"
+              limits:
+                memory: "512Mi"
+                cpu: "500m"
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: 1000
+              readOnlyRootFilesystem: true
+          restartPolicy: OnFailure
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: stellar-security-scanner
+  namespace: obsrvr-stellar
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: obsrvr-stellar
+  name: stellar-security-scanner
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: stellar-security-scanner
+  namespace: obsrvr-stellar
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: stellar-security-scanner
+subjects:
+- kind: ServiceAccount
+  name: stellar-security-scanner
+  namespace: obsrvr-stellar

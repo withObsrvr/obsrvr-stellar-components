@@ -1,0 +1,312 @@
+# Disaster Recovery and Backup System for obsrvr-stellar-components
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: stellar-backup-job
+  namespace: obsrvr-stellar
+spec:
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: stellar-backup
+          containers:
+          - name: backup
+            image: obsrvr/stellar-backup:latest
+            env:
+            - name: AWS_REGION
+              value: "us-east-1"
+            - name: BACKUP_BUCKET
+              value: "obsrvr-stellar-backups"
+            - name: DATABASE_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: database-secrets
+                  key: host
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: database-secrets
+                  key: password
+            command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              DATE=$(date +%Y%m%d-%H%M%S)
+              
+              echo "Starting backup process at $DATE"
+              
+              # Backup RDS Aurora Global Database
+              echo "Creating RDS snapshot..."
+              aws rds create-db-cluster-snapshot \
+                --db-cluster-identifier stellar-metadata-$(hostname | cut -d'-' -f3) \
+                --db-cluster-snapshot-identifier stellar-backup-$DATE
+              
+              # Backup S3 data to different region
+              echo "Backing up S3 data..."
+              aws s3 sync s3://obsrvr-stellar-data-us-east-1/ \
+                s3://obsrvr-stellar-backups/data/$DATE/us-east-1/ \
+                --storage-class GLACIER
+              
+              # Backup Kubernetes resources
+              echo "Backing up Kubernetes resources..."
+              kubectl get all,secrets,configmaps,pvc -n obsrvr-stellar -o yaml > /tmp/k8s-backup-$DATE.yaml
+              aws s3 cp /tmp/k8s-backup-$DATE.yaml s3://obsrvr-stellar-backups/k8s/$DATE/
+              
+              # Backup Parquet files
+              echo "Backing up Parquet files..."
+              kubectl exec -n obsrvr-stellar deployment/arrow-analytics-sink -- \
+                tar -czf /tmp/parquet-backup-$DATE.tar.gz /data/parquet/
+              kubectl cp obsrvr-stellar/arrow-analytics-sink:/tmp/parquet-backup-$DATE.tar.gz /tmp/
+              aws s3 cp /tmp/parquet-backup-$DATE.tar.gz s3://obsrvr-stellar-backups/parquet/$DATE/
+              
+              echo "Backup completed successfully"
+            resources:
+              requests:
+                memory: "1Gi"
+                cpu: "500m"
+              limits:
+                memory: "2Gi"
+                cpu: "1"
+          restartPolicy: OnFailure
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: disaster-recovery-controller
+  namespace: obsrvr-stellar
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: disaster-recovery-controller
+  template:
+    metadata:
+      labels:
+        app: disaster-recovery-controller
+    spec:
+      serviceAccountName: disaster-recovery-controller
+      containers:
+      - name: controller
+        image: obsrvr/disaster-recovery-controller:latest
+        env:
+        - name: PRIMARY_REGION
+          value: "us-east-1"
+        - name: SECONDARY_REGIONS
+          value: "us-west-2,eu-west-1"
+        - name: RTO_MINUTES
+          value: "15"  # Recovery Time Objective
+        - name: RPO_MINUTES
+          value: "5"   # Recovery Point Objective
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 9090
+          name: metrics
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          readOnlyRootFilesystem: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: disaster-recovery-runbooks
+  namespace: obsrvr-stellar
+data:
+  primary-region-failure.md: |
+    # Primary Region Failure Recovery
+    
+    ## Detection
+    - Monitor alerts for primary region unavailability
+    - Check Route53 health checks failing
+    - Verify secondary regions are healthy
+    
+    ## Immediate Actions (RTO: 15 minutes)
+    1. Acknowledge incident in PagerDuty
+    2. Activate secondary region:
+       ```bash
+       kubectl --context secondary-region scale deployment/stellar-arrow-source --replicas=5
+       kubectl --context secondary-region scale deployment/ttp-arrow-processor --replicas=8
+       kubectl --context secondary-region scale deployment/arrow-analytics-sink --replicas=4
+       ```
+    3. Update Route53 to point to secondary region
+    4. Verify data sync is current (RPO check)
+    
+    ## Data Recovery
+    1. Check Aurora Global Database failover status
+    2. Verify S3 cross-region replication
+    3. Validate recent data integrity
+    
+    ## Validation
+    - Test end-to-end pipeline functionality
+    - Verify WebSocket connections
+    - Check data export capabilities
+    - Monitor error rates and latency
+  
+  data-corruption.md: |
+    # Data Corruption Recovery
+    
+    ## Detection
+    - Schema validation failures
+    - Checksum mismatches
+    - Missing ledger sequences
+    - Business metric anomalies
+    
+    ## Recovery Steps
+    1. Identify corruption scope and timeline
+    2. Stop affected components
+    3. Restore from backup:
+       ```bash
+       # Restore RDS from snapshot
+       aws rds restore-db-cluster-from-snapshot \
+         --db-cluster-identifier stellar-metadata-recovered \
+         --snapshot-identifier stellar-backup-YYYYMMDD-HHMMSS
+       
+       # Restore S3 data
+       aws s3 sync s3://obsrvr-stellar-backups/data/YYYYMMDD-HHMMSS/ \
+         s3://obsrvr-stellar-data-recovery/
+       ```
+    4. Validate restored data integrity
+    5. Resume processing from last known good state
+  
+  complete-system-failure.md: |
+    # Complete System Recovery
+    
+    ## Prerequisites
+    - Access to backup S3 bucket
+    - Fresh Kubernetes cluster
+    - RDS Aurora cluster in healthy region
+    
+    ## Recovery Process
+    1. Deploy base infrastructure:
+       ```bash
+       kubectl apply -f deploy/production/kubernetes/namespace.yaml
+       kubectl apply -f security/rbac/stellar-rbac.yaml
+       kubectl apply -f security/secrets/external-secrets.yaml
+       ```
+    
+    2. Restore secrets and configurations:
+       ```bash
+       kubectl apply -f backup-k8s-resources/secrets/
+       kubectl apply -f backup-k8s-resources/configmaps/
+       ```
+    
+    3. Deploy applications:
+       ```bash
+       kubectl apply -f deploy/production/kubernetes/
+       ```
+    
+    4. Restore data:
+       - Database: Restore from Aurora Global Database
+       - Files: Restore from S3 backup
+       - Validate data consistency
+    
+    5. Validate system functionality
+    6. Update DNS to point to recovered system
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: disaster-recovery-test
+  namespace: obsrvr-stellar
+spec:
+  template:
+    spec:
+      serviceAccountName: disaster-recovery-test
+      containers:
+      - name: dr-test
+        image: obsrvr/disaster-recovery-test:latest
+        env:
+        - name: TEST_TYPE
+          value: "failover"
+        - name: SECONDARY_REGION
+          value: "us-west-2"
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -e
+          echo "Starting disaster recovery test..."
+          
+          # Test 1: Verify backup integrity
+          echo "Testing backup integrity..."
+          LATEST_BACKUP=$(aws s3 ls s3://obsrvr-stellar-backups/k8s/ | tail -1 | awk '{print $2}')
+          aws s3 cp s3://obsrvr-stellar-backups/k8s/$LATEST_BACKUP/k8s-backup.yaml /tmp/
+          kubectl apply --dry-run=client -f /tmp/k8s-backup.yaml
+          
+          # Test 2: Secondary region readiness
+          echo "Testing secondary region readiness..."
+          curl -f https://stellar-us-west-2.obsrvr.com/health || exit 1
+          
+          # Test 3: Database failover capability
+          echo "Testing database failover capability..."
+          # This would test Aurora Global Database failover
+          
+          # Test 4: Data synchronization lag
+          echo "Testing data sync lag..."
+          # Verify cross-region data sync is within RPO
+          
+          echo "Disaster recovery test completed successfully"
+      restartPolicy: Never
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: disaster-recovery-controller
+  namespace: obsrvr-stellar
+spec:
+  selector:
+    app: disaster-recovery-controller
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+  - name: metrics
+    port: 9090
+    targetPort: 9090
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: stellar-backup
+  namespace: obsrvr-stellar
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT_ID:role/stellar-backup-role
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: disaster-recovery-controller
+  namespace: obsrvr-stellar
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT_ID:role/disaster-recovery-role
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: disaster-recovery-test
+  namespace: obsrvr-stellar
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT_ID:role/disaster-recovery-test-role

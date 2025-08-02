@@ -1,0 +1,333 @@
+# Network policies for obsrvr-stellar-components
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: stellar-source-network-policy
+  namespace: obsrvr-stellar
+spec:
+  podSelector:
+    matchLabels:
+      app: stellar-arrow-source
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow Arrow Flight connections from TTP processor
+  - from:
+    - podSelector:
+        matchLabels:
+          app: ttp-arrow-processor
+    ports:
+    - protocol: TCP
+      port: 8815
+  # Allow health checks from monitoring
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    ports:
+    - protocol: TCP
+      port: 8088
+  # Allow metrics scraping from Prometheus
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    - podSelector:
+        matchLabels:
+          app: prometheus
+    ports:
+    - protocol: TCP
+      port: 9090
+  # Allow ingress controller
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 8815
+    - protocol: TCP
+      port: 8088
+  egress:
+  # Allow DNS resolution
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  # Allow Stellar network access
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 80
+  # Allow AWS services
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+  # Allow database connections
+  - to:
+    - podSelector:
+        matchLabels:
+          app: postgresql
+    ports:
+    - protocol: TCP
+      port: 5432
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ttp-processor-network-policy
+  namespace: obsrvr-stellar
+spec:
+  podSelector:
+    matchLabels:
+      app: ttp-arrow-processor
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow Arrow Flight connections from analytics sink
+  - from:
+    - podSelector:
+        matchLabels:
+          app: arrow-analytics-sink
+    ports:
+    - protocol: TCP
+      port: 8816
+  # Allow health checks and metrics
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    ports:
+    - protocol: TCP
+      port: 8088
+    - protocol: TCP
+      port: 9090
+  # Allow ingress controller
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 8816
+  egress:
+  # Allow DNS resolution
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  # Allow connections to stellar source
+  - to:
+    - podSelector:
+        matchLabels:
+          app: stellar-arrow-source
+    ports:
+    - protocol: TCP
+      port: 8815
+  # Allow AWS services
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+  # Allow database connections
+  - to:
+    - podSelector:
+        matchLabels:
+          app: postgresql
+    ports:
+    - protocol: TCP
+      port: 5432
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: analytics-sink-network-policy
+  namespace: obsrvr-stellar
+spec:
+  podSelector:
+    matchLabels:
+      app: arrow-analytics-sink
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow WebSocket connections from anywhere (public)
+  - from: []
+    ports:
+    - protocol: TCP
+      port: 8080
+  # Allow REST API connections from anywhere (public)
+  - from: []
+    ports:
+    - protocol: TCP
+      port: 8081
+  # Allow Arrow Flight from internal services only
+  - from:
+    - podSelector:
+        matchLabels:
+          app: ttp-arrow-processor
+    - namespaceSelector:
+        matchLabels:
+          name: obsrvr-stellar
+    ports:
+    - protocol: TCP
+      port: 8817
+  # Allow health checks and metrics
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    ports:
+    - protocol: TCP
+      port: 8088
+    - protocol: TCP
+      port: 9090
+  # Allow ingress controller
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 8080
+    - protocol: TCP
+      port: 8081
+    - protocol: TCP
+      port: 8817
+  egress:
+  # Allow DNS resolution
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  # Allow connections to TTP processor
+  - to:
+    - podSelector:
+        matchLabels:
+          app: ttp-arrow-processor
+    ports:
+    - protocol: TCP
+      port: 8816
+  # Allow AWS services (S3, etc.)
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+  # Allow database connections
+  - to:
+    - podSelector:
+        matchLabels:
+          app: postgresql
+    ports:
+    - protocol: TCP
+      port: 5432
+  # Allow SMTP for notifications
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 587
+    - protocol: TCP
+      port: 25
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: monitoring-access-policy
+  namespace: obsrvr-stellar
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  ingress:
+  # Allow Prometheus to scrape metrics from all pods
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    - podSelector:
+        matchLabels:
+          app: prometheus
+    ports:
+    - protocol: TCP
+      port: 9090
+  # Allow health checks from monitoring tools
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    ports:
+    - protocol: TCP
+      port: 8088
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all-default
+  namespace: obsrvr-stellar
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  # This policy denies all traffic by default
+  # Specific policies above will allow necessary traffic
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-same-namespace
+  namespace: obsrvr-stellar
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow traffic from pods in the same namespace
+  - from:
+    - podSelector: {}
+  egress:
+  # Allow traffic to pods in the same namespace
+  - to:
+    - podSelector: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: external-secrets-policy
+  namespace: obsrvr-stellar
+spec:
+  podSelector:
+    matchLabels:
+      app: external-secrets
+  policyTypes:
+  - Egress
+  egress:
+  # Allow DNS resolution
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  # Allow AWS Secrets Manager access
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+  # Allow Kubernetes API server access
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 6443

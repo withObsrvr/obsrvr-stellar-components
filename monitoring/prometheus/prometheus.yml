@@ -1,0 +1,324 @@
+# Prometheus configuration for obsrvr-stellar-components
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'obsrvr-stellar'
+    environment: 'production'
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - alertmanager:9093
+      path_prefix: /
+      scheme: http
+      timeout: 10s
+      api_version: v2
+
+# Load alerting rules
+rule_files:
+  - "rules/*.yml"
+  - "alerts/*.yml"
+
+# Remote write configuration for long-term storage
+remote_write:
+  - url: "https://prometheus-remote-write.obsrvr.com/api/v1/write"
+    basic_auth:
+      username: "obsrvr-stellar"
+      password_file: /etc/prometheus/remote_write_password
+    write_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'stellar_.*|arrow_.*|flight_.*|websocket_.*'
+        target_label: __tmp_keep
+        replacement: 'yes'
+      - source_labels: [__tmp_keep]
+        regex: 'yes'
+        action: keep
+    queue_config:
+      capacity: 10000
+      max_shards: 50
+      min_shards: 1
+      max_samples_per_send: 2000
+      batch_send_deadline: 5s
+      min_backoff: 30ms
+      max_backoff: 100ms
+
+# Scrape configurations
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+    scrape_interval: 30s
+
+  # Stellar Arrow Source components
+  - job_name: 'stellar-arrow-source'
+    kubernetes_sd_configs:
+      - role: endpoints
+        namespaces:
+          names:
+            - obsrvr-stellar
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_service_name]
+        action: keep
+        regex: stellar-arrow-source
+      - source_labels: [__meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: metrics
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: instance
+      - source_labels: [__meta_kubernetes_pod_node_name]
+        target_label: node
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_service_name]
+        target_label: service
+    scrape_interval: 15s
+    metrics_path: /metrics
+    honor_labels: true
+
+  # TTP Arrow Processor components
+  - job_name: 'ttp-arrow-processor'
+    kubernetes_sd_configs:
+      - role: endpoints
+        namespaces:
+          names:
+            - obsrvr-stellar
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_service_name]
+        action: keep
+        regex: ttp-arrow-processor
+      - source_labels: [__meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: metrics
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: instance
+      - source_labels: [__meta_kubernetes_pod_node_name]
+        target_label: node
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_service_name]
+        target_label: service
+    scrape_interval: 15s
+    metrics_path: /metrics
+
+  # Arrow Analytics Sink components
+  - job_name: 'arrow-analytics-sink'
+    kubernetes_sd_configs:
+      - role: endpoints
+        namespaces:
+          names:
+            - obsrvr-stellar
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_service_name]
+        action: keep
+        regex: arrow-analytics-sink
+      - source_labels: [__meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: metrics
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: instance
+      - source_labels: [__meta_kubernetes_pod_node_name]
+        target_label: node
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_service_name]
+        target_label: service
+    scrape_interval: 15s
+    metrics_path: /metrics
+
+  # Kubernetes cluster monitoring
+  - job_name: 'kubernetes-nodes'
+    kubernetes_sd_configs:
+      - role: node
+    relabel_configs:
+      - action: labelmap
+        regex: __meta_kubernetes_node_label_(.+)
+      - target_label: __address__
+        replacement: kubernetes.default.svc:443
+      - source_labels: [__meta_kubernetes_node_name]
+        regex: (.+)
+        target_label: __metrics_path__
+        replacement: /api/v1/nodes/${1}/proxy/metrics
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      insecure_skip_verify: true
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+
+  - job_name: 'kubernetes-cadvisor'
+    kubernetes_sd_configs:
+      - role: node
+    relabel_configs:
+      - action: labelmap
+        regex: __meta_kubernetes_node_label_(.+)
+      - target_label: __address__
+        replacement: kubernetes.default.svc:443
+      - source_labels: [__meta_kubernetes_node_name]
+        regex: (.+)
+        target_label: __metrics_path__
+        replacement: /api/v1/nodes/${1}/proxy/metrics/cadvisor
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      insecure_skip_verify: true
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'container_.*'
+        action: keep
+      - source_labels: [container]
+        regex: 'POD|'
+        action: drop
+
+  - job_name: 'kubernetes-pods'
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names:
+            - obsrvr-stellar
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: true
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: replace
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      - action: labelmap
+        regex: __meta_kubernetes_pod_label_(.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: kubernetes_namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        action: replace
+        target_label: kubernetes_pod_name
+
+  # NGINX Ingress Controller
+  - job_name: 'nginx-ingress'
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names:
+            - ingress-nginx
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+        action: keep
+        regex: ingress-nginx
+      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+        action: keep
+        regex: controller
+      - source_labels: [__address__]
+        action: replace
+        regex: ([^:]+)(?::\d+)?
+        replacement: $1:10254
+        target_label: __address__
+    scrape_interval: 30s
+    metrics_path: /metrics
+
+  # Cert-manager
+  - job_name: 'cert-manager'
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names:
+            - cert-manager
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        action: keep
+        regex: cert-manager
+      - source_labels: [__address__]
+        action: replace
+        regex: ([^:]+)(?::\d+)?
+        replacement: $1:9402
+        target_label: __address__
+    scrape_interval: 60s
+
+  # External services
+  - job_name: 'stellar-network'
+    static_configs:
+      - targets:
+          - 'horizon.stellar.org:443'
+          - 'horizon-testnet.stellar.org:443'
+    metrics_path: /metrics
+    scheme: https
+    scrape_interval: 60s
+    scrape_timeout: 30s
+    honor_labels: true
+
+  # AWS CloudWatch Exporter
+  - job_name: 'cloudwatch-exporter'
+    static_configs:
+      - targets: ['cloudwatch-exporter:9106']
+    scrape_interval: 60s
+    honor_labels: true
+
+  # Blackbox exporter for endpoint monitoring
+  - job_name: 'blackbox'
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - https://stellar.obsrvr.com/health
+          - https://stellar-us-east-1.obsrvr.com/health
+          - https://stellar-us-west-2.obsrvr.com/health
+          - https://stellar-eu-west-1.obsrvr.com/health
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+
+  # WebSocket endpoint monitoring
+  - job_name: 'websocket-endpoints'
+    metrics_path: /probe
+    params:
+      module: [websocket]
+    static_configs:
+      - targets:
+          - wss://stellar.obsrvr.com/ws
+          - wss://stellar-us-east-1.obsrvr.com/ws
+          - wss://stellar-us-west-2.obsrvr.com/ws
+          - wss://stellar-eu-west-1.obsrvr.com/ws
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+
+  # PagerDuty webhook receiver (for monitoring alerting pipeline)
+  - job_name: 'pagerduty-webhook'
+    static_configs:
+      - targets: ['pagerduty-webhook:8080']
+    scrape_interval: 30s
+    metrics_path: /metrics
+
+# Storage configuration
+storage:
+  tsdb:
+    path: /prometheus/data
+    retention.time: 30d
+    retention.size: 100GB
+    wal-compression: true
+    no-lockfile: false
+
+# Feature flags
+feature_flags:
+  - remote-write-receiver
+  - exemplars-storage
+  - expand-external-labels
+  - memory-snapshot-on-shutdown
+  - promql-at-modifier
+  - promql-negative-offset

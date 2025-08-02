@@ -1,0 +1,110 @@
+# Production configuration for ttp-arrow-processor component
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ttp-arrow-processor-config
+  namespace: obsrvr-stellar
+  labels:
+    app: ttp-arrow-processor
+    environment: production
+    version: "1.0.0"
+data:
+  config.yaml: |
+    # Input/Output endpoints
+    source_endpoint: "stellar-arrow-source.obsrvr-stellar.svc.cluster.local:8815"
+    output_endpoint: "0.0.0.0:8816"
+    
+    # Processing configuration
+    batch_size: 200  # Increased for production
+    processing_workers: 16  # More workers for production
+    buffer_size: 10000  # Larger buffer
+    processing_timeout: "45s"
+    
+    # Arrow Flight server
+    flight_port: 8816
+    health_port: 8088
+    metrics_port: 9090
+    
+    # TTP event filtering
+    event_types:
+      - "payment"
+      - "path_payment_strict_receive"
+      - "path_payment_strict_send"
+      - "create_claimable_balance"
+      - "claim_claimable_balance"
+      - "create_account"
+      - "account_merge"
+    
+    # Asset filtering
+    include_assets:
+      - "XLM"   # Native Stellar lumens
+      - "USDC"  # USD Coin
+      - "USDT"  # Tether
+      - "BTC"   # Bitcoin anchor
+      - "ETH"   # Ethereum anchor
+    
+    # Advanced filtering
+    filters:
+      min_amount: 1000000  # 0.1 XLM minimum
+      max_amount: 0        # 0 = no maximum
+      include_failed: false
+      include_test_accounts: false
+      
+    # Compute engine configuration
+    compute:
+      cache_enabled: true
+      cache_max_size: 50000
+      cache_ttl: "10m"
+      parallelism_level: 8
+      batch_size: 1000
+      use_simd: true
+      memory_limit_mb: 4096
+      spill_to_disk: true
+      spill_directory: "/tmp/compute-spill"
+    
+    # Security configuration
+    security:
+      tls_enabled: true
+      cert_file: "/etc/ssl/certs/ttp-processor.crt"
+      key_file: "/etc/ssl/private/ttp-processor.key"
+      ca_file: "/etc/ssl/certs/ca.crt"
+      auth_enabled: true
+      auth_type: "api_key"
+      authz_enabled: true
+      
+    # Resilience configuration
+    resilience:
+      circuit_breaker_enabled: true
+      circuit_breaker_threshold: 15
+      circuit_breaker_timeout: "45s"
+      retry_enabled: true
+      retry_max_attempts: 3
+      bulkhead_enabled: true
+      rate_limit_enabled: true
+      rate_limit_requests_per_second: 200
+    
+    # Monitoring and logging
+    logging:
+      level: "info"
+      format: "json"
+      enable_sampling: true
+      sample_rate: 0.05
+    
+    monitoring:
+      prometheus_enabled: true
+      health_check_interval: "30s"
+      metrics_collection_interval: "10s"
+    
+    # Performance tuning
+    performance:
+      memory_limit_mb: 4096
+      cpu_limit_cores: 8
+      gc_target_percentage: 60
+      connection_pool_size: 50
+      
+    # Data validation
+    validation:
+      validate_schemas: true
+      validate_amounts: true
+      validate_accounts: true
+      strict_type_checking: true

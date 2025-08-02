@@ -1,0 +1,170 @@
+# Production configuration for arrow-analytics-sink component
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arrow-analytics-sink-config
+  namespace: obsrvr-stellar
+  labels:
+    app: arrow-analytics-sink
+    environment: production
+    version: "1.0.0"
+data:
+  config.yaml: |
+    # Input endpoint
+    source_endpoint: "ttp-arrow-processor.obsrvr-stellar.svc.cluster.local:8816"
+    
+    # Export paths (using persistent volumes in production)
+    parquet_path: "/data/parquet"
+    json_path: "/data/json"
+    csv_path: "/data/csv"
+    archive_path: "/data/archive"
+    temp_path: "/tmp/analytics"
+    
+    # Parquet configuration
+    parquet_batch_size: 5000  # Larger batches for production
+    parquet_compression: "snappy"  # Best balance of speed/compression
+    partition_by:
+      - "date"
+      - "hour"
+      - "asset_code"
+    parquet_file_size_mb: 128  # Target file size
+    
+    # WebSocket streaming configuration
+    websocket:
+      port: 8080
+      host: "0.0.0.0"
+      path: "/ws"
+      max_connections: 5000  # Increased for production
+      max_connections_per_ip: 50
+      connection_timeout: "30s"
+      idle_timeout: "10m"
+      max_message_size: 1048576  # 1MB
+      write_timeout: "10s"
+      read_timeout: "60s"
+      ping_interval: "30s"
+      pong_timeout: "10s"
+      write_buffer_size: 4096
+      read_buffer_size: 4096
+      broadcast_buffer_size: 10000
+      enable_compression: true
+      compression_level: 6
+      compression_threshold: 1024
+      require_auth: true
+      auth_timeout: "30s"
+      rate_limit_enabled: true
+      messages_per_second: 100.0
+      burst_size: 200
+      tls_enabled: true
+      cert_file: "/etc/ssl/certs/websocket.crt"
+      key_file: "/etc/ssl/private/websocket.key"
+    
+    # REST API configuration
+    rest_api:
+      port: 8081
+      host: "0.0.0.0"
+      read_timeout: "30s"
+      write_timeout: "30s"
+      idle_timeout: "120s"
+      max_header_bytes: 1048576
+      tls_enabled: true
+      cert_file: "/etc/ssl/certs/rest-api.crt"
+      key_file: "/etc/ssl/private/rest-api.key"
+    
+    # Arrow Flight server
+    flight_port: 8817
+    health_port: 8088
+    metrics_port: 9090
+    
+    # Export formats
+    export_formats:
+      - "parquet"
+      - "json"
+      - "csv"
+    
+    # Data lifecycle management
+    data_lifecycle:
+      enabled: true
+      check_interval: "1h"
+      concurrent_workers: 4
+      data_paths:
+        - "/data/parquet"
+        - "/data/json"
+        - "/data/csv"
+      archive_path: "/data/archive"
+      temp_path: "/tmp/lifecycle"
+      default_retention_days: 90
+      default_archival_days: 180
+      cleanup_empty_dirs: true
+      min_free_space_percent: 15.0
+      max_storage_gb: 1000
+      enable_compression: true
+      compression_type: "gzip"
+      compression_level: 6
+      notify_on_cleanup: true
+      notify_on_archive: true
+      notify_on_error: true
+    
+    # Security configuration
+    security:
+      tls_enabled: true
+      cert_file: "/etc/ssl/certs/analytics-sink.crt"
+      key_file: "/etc/ssl/private/analytics-sink.key"
+      ca_file: "/etc/ssl/certs/ca.crt"
+      auth_enabled: true
+      auth_type: "api_key"
+      authz_enabled: true
+      cors_enabled: true
+      cors_origins:
+        - "https://dashboard.obsrvr.com"
+        - "https://analytics.obsrvr.com"
+    
+    # Resilience configuration
+    resilience:
+      circuit_breaker_enabled: true
+      retry_enabled: true
+      bulkhead_enabled: true
+      rate_limit_enabled: true
+      rate_limit_requests_per_second: 500
+    
+    # Monitoring and logging
+    logging:
+      level: "info"
+      format: "json"
+      enable_sampling: true
+      sample_rate: 0.1
+    
+    monitoring:
+      prometheus_enabled: true
+      health_check_interval: "30s"
+      metrics_collection_interval: "10s"
+    
+    # Performance tuning
+    performance:
+      memory_limit_mb: 8192  # Higher for analytics workloads
+      cpu_limit_cores: 8
+      gc_target_percentage: 70
+      write_buffer_size: 65536
+      batch_flush_interval: "5s"
+      max_concurrent_writes: 10
+    
+    # Advanced analytics features
+    analytics:
+      real_time_enabled: true
+      aggregation_window: "5m"
+      metrics_retention: "24h"
+      enable_statistical_analysis: true
+      enable_anomaly_detection: false  # Future feature
+      
+    # Notification configuration
+    notifications:
+      enabled: true
+      webhook_url: "https://hooks.obsrvr.com/analytics"
+      slack_webhook: ""  # Set via secret
+      email_enabled: false
+      
+    # Advanced features
+    features:
+      streaming_analytics: true
+      real_time_dashboards: true
+      export_scheduling: true
+      data_quality_checks: true

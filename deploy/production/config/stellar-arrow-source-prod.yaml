@@ -1,0 +1,121 @@
+# Production configuration for stellar-arrow-source component
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: stellar-arrow-source-config
+  namespace: obsrvr-stellar
+  labels:
+    app: stellar-arrow-source
+    environment: production
+    version: "1.0.0"
+data:
+  config.yaml: |
+    # Data source configuration
+    source_type: "rpc"  # or "datalake"
+    rpc_endpoint: "https://horizon.stellar.org"
+    network_passphrase: "Public Global Stellar Network ; September 2015"
+    start_ledger: 0  # 0 for latest
+    end_ledger: 0    # 0 for continuous processing
+    batch_size: 100  # Increased for production throughput
+    buffer_size: 5000  # Larger buffer for production
+    
+    # Arrow Flight server
+    flight_port: 8815
+    health_port: 8088
+    metrics_port: 9090
+    
+    # Processing configuration
+    concurrent_readers: 8  # Increased for production
+    processing_timeout: "60s"  # Longer timeout for production
+    max_retry_attempts: 5
+    retry_delay: "5s"
+    
+    # AWS S3 (for datalake mode)
+    aws_region: "us-east-1"
+    s3_bucket: "obsrvr-stellar-data-prod"
+    s3_prefix: "ledgers/"
+    
+    # Security configuration
+    security:
+      tls_enabled: true
+      cert_file: "/etc/ssl/certs/stellar-source.crt"
+      key_file: "/etc/ssl/private/stellar-source.key"
+      ca_file: "/etc/ssl/certs/ca.crt"
+      auth_enabled: true
+      auth_type: "api_key"
+      authz_enabled: true
+      cors_enabled: true
+      cors_origins:
+        - "https://dashboard.obsrvr.com"
+        - "https://api.obsrvr.com"
+      security_headers:
+        hsts_enabled: true
+        csp_enabled: true
+        xss_protection: true
+    
+    # Resilience configuration
+    resilience:
+      circuit_breaker_enabled: true
+      circuit_breaker_threshold: 10
+      circuit_breaker_timeout: "30s"
+      circuit_breaker_max_requests: 5
+      
+      retry_enabled: true
+      retry_max_attempts: 5
+      retry_initial_delay: "1s"
+      retry_max_delay: "30s"
+      retry_multiplier: 2.0
+      
+      bulkhead_enabled: true
+      bulkhead_max_concurrent: 20
+      bulkhead_max_queue: 100
+      
+      rate_limit_enabled: true
+      rate_limit_requests_per_second: 100
+      rate_limit_burst: 200
+    
+    # Monitoring and logging
+    logging:
+      level: "info"
+      format: "json"
+      output: "stdout"
+      enable_sampling: true
+      sample_rate: 0.1
+    
+    monitoring:
+      prometheus_enabled: true
+      prometheus_path: "/metrics"
+      health_check_interval: "30s"
+      metrics_collection_interval: "10s"
+    
+    # Performance tuning
+    performance:
+      memory_limit_mb: 2048
+      cpu_limit_cores: 4
+      gc_target_percentage: 50
+      max_idle_connections: 100
+      idle_connection_timeout: "90s"
+      keep_alive_timeout: "30s"
+    
+    # Data quality and validation
+    validation:
+      strict_validation: true
+      validate_network: true
+      validate_signatures: false  # Optional for performance
+      validate_sequences: true
+      max_sequence_gap: 10
+    
+    # Caching configuration
+    cache:
+      enabled: true
+      max_size: 10000
+      ttl: "5m"
+      cleanup_interval: "1m"
+      
+    # Advanced features
+    features:
+      schema_evolution_enabled: true
+      compression_enabled: true
+      compression_type: "snappy"
+      connection_pooling_enabled: true
+      adaptive_batching_enabled: true
