@@ -1,0 +1,499 @@
+apiVersion: component.flowctl.io/v1
+kind: ComponentSpec
+metadata:
+  name: arrow-analytics-sink
+  version: v1.0.0
+  namespace: obsrvr
+  description: "Multi-format analytics sink for Arrow data with real-time streaming support"
+  author: "Obsrvr"
+  homepage: "https://github.com/withobsrvr/obsrvr-stellar-components"
+  repository: "https://github.com/withobsrvr/obsrvr-stellar-components"
+  license: "Apache-2.0"
+  tags:
+    - stellar
+    - blockchain
+    - arrow
+    - sink
+    - analytics
+    - parquet
+    - websocket
+    - real-time
+
+spec:
+  type: sink
+  
+  # Execution modes
+  execution:
+    modes: [container, native]
+    default: native
+    
+  # Multi-language support (Go primary)
+  languages:
+    - name: go
+      version: "1.23"
+      main: src/main.go
+      build:
+        # Native build for in-process execution
+        native:
+          command: ["go", "build", "-o", "arrow-analytics-sink", "./src"]
+          binary: "arrow-analytics-sink"
+          environment:
+            - CGO_ENABLED=1
+            - GOOS=linux
+          dependencies:
+            - libssl-dev
+            - libcrypto-dev
+        # Container build
+        container:
+          dockerfile: |
+            FROM golang:1.23-alpine AS builder
+            
+            # Install build dependencies
+            RUN apk add --no-cache gcc musl-dev openssl-dev
+            
+            WORKDIR /app
+            COPY . .
+            
+            # Download dependencies
+            RUN go mod download
+            
+            # Build binary
+            RUN CGO_ENABLED=1 go build -a -installsuffix cgo -o arrow-analytics-sink ./src
+            
+            # Runtime stage
+            FROM alpine:latest
+            
+            # Install runtime dependencies
+            RUN apk --no-cache add ca-certificates openssl curl
+            
+            WORKDIR /root/
+            
+            # Copy binary
+            COPY --from=builder /app/arrow-analytics-sink .
+            
+            # Create data directory
+            RUN mkdir -p /data
+            
+            # Health check
+            HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+              CMD curl -f http://localhost:8088/health || exit 1
+            
+            EXPOSE 8817 8088 8080
+            
+            ENTRYPOINT ["./arrow-analytics-sink"]
+            
+  # Component interface
+  interface:
+    inputEventTypes:
+      - ttp.event
+      
+    inputSchemas:
+      - name: ttp_event
+        version: "1.0.0"
+        description: "Token Transfer Protocol events"
+        
+    communication:
+      protocol: arrow-flight
+      port: 8817
+      
+      # Input streams
+      consumes:
+        - name: ttp_events
+          schema: ttp_event
+          source: ttp-arrow-processor
+          port: 8816
+          description: "Consumes TTP events"
+          
+      endpoints:
+        - path: /health
+          method: GET
+          description: "Component health status"
+          response_type: application/json
+        - path: /metrics
+          method: GET
+          description: "Prometheus metrics"
+          response_type: text/plain
+        - path: /schema
+          method: GET
+          description: "Input Arrow schema information"
+          response_type: application/json
+        - path: /stats
+          method: GET
+          description: "Processing statistics"
+          response_type: application/json
+        - path: /ws
+          method: WebSocket
+          description: "Real-time event stream WebSocket"
+          response_type: application/json
+        - path: /api/events
+          method: GET
+          description: "REST API for recent events"
+          response_type: application/json
+          
+    config:
+      # Source connection configuration
+      processor_endpoint:
+        type: string
+        required: true
+        description: "Arrow Flight endpoint for TTP processor"
+        default: "localhost:8816"
+        examples:
+          - "localhost:8816"
+          - "ttp-arrow-processor:8816"
+        validation:
+          pattern: "^[a-zA-Z0-9.-]+:[0-9]+$"
+          
+      # Output format configuration
+      output_formats:
+        type: array
+        items:
+          type: string
+          enum: [parquet, json, csv, websocket, api]
+        required: true
+        default: [parquet, json]
+        description: "Output formats to generate"
+        
+      # Parquet output configuration
+      parquet_path:
+        type: string
+        required: false
+        default: "./data/ttp_events"
+        description: "Base path for Parquet files"
+        condition: "output_formats contains 'parquet'"
+        
+      parquet_compression:
+        type: string
+        required: false
+        default: "snappy"
+        enum: [none, snappy, gzip, lz4, zstd, brotli]
+        description: "Parquet compression algorithm"
+        condition: "output_formats contains 'parquet'"
+        
+      partition_by:
+        type: array
+        items:
+          type: string
+          enum: [date, hour, asset_code, event_type]
+        required: false
+        default: [date]
+        description: "Partition strategy for Parquet files"
+        condition: "output_formats contains 'parquet'"
+        
+      parquet_batch_size:
+        type: integer
+        required: false
+        default: 10000
+        minimum: 1000
+        maximum: 100000
+        description: "Batch size for Parquet writes"
+        condition: "output_formats contains 'parquet'"
+        
+      # JSON output configuration
+      json_path:
+        type: string
+        required: false
+        default: "./data/json"
+        description: "Path for JSON output files"
+        condition: "output_formats contains 'json'"
+        
+      json_format:
+        type: string
+        required: false
+        default: "jsonl"
+        enum: [json, jsonl, pretty]
+        description: "JSON output format"
+        condition: "output_formats contains 'json'"
+        
+      # CSV output configuration
+      csv_path:
+        type: string
+        required: false
+        default: "./data/csv"
+        description: "Path for CSV output files"
+        condition: "output_formats contains 'csv'"
+        
+      csv_delimiter:
+        type: string
+        required: false
+        default: ","
+        description: "CSV field delimiter"
+        condition: "output_formats contains 'csv'"
+        
+      # WebSocket configuration
+      websocket_port:
+        type: integer
+        required: false
+        default: 8080
+        minimum: 1024
+        maximum: 65535
+        description: "WebSocket server port"
+        condition: "output_formats contains 'websocket'"
+        
+      websocket_path:
+        type: string
+        required: false
+        default: "/ws"
+        description: "WebSocket endpoint path"
+        condition: "output_formats contains 'websocket'"
+        
+      max_websocket_connections:
+        type: integer
+        required: false
+        default: 1000
+        minimum: 10
+        maximum: 10000
+        description: "Maximum WebSocket connections"
+        condition: "output_formats contains 'websocket'"
+        
+      # API configuration
+      api_port:
+        type: integer
+        required: false
+        default: 8080
+        minimum: 1024
+        maximum: 65535
+        description: "REST API server port"
+        condition: "output_formats contains 'api'"
+        
+      api_cache_size:
+        type: integer
+        required: false
+        default: 100000
+        minimum: 1000
+        maximum: 1000000
+        description: "Number of recent events to cache for API"
+        condition: "output_formats contains 'api'"
+        
+      # Performance configuration
+      buffer_size:
+        type: integer
+        required: false
+        default: 10000
+        minimum: 1000
+        maximum: 100000
+        description: "Internal buffer size"
+        
+      writer_threads:
+        type: integer
+        required: false
+        default: 4
+        minimum: 1
+        maximum: 16
+        description: "Number of writer threads"
+        
+      flush_interval:
+        type: string
+        required: false
+        default: "30s"
+        description: "Data flush interval"
+        validation:
+          pattern: "^[0-9]+[smh]$"
+          
+      # Real-time processing
+      real_time_analytics:
+        type: boolean
+        required: false
+        default: false
+        description: "Enable real-time analytics features"
+        
+      analytics_window:
+        type: string
+        required: false
+        default: "1m"
+        description: "Time window for real-time analytics"
+        condition: "real_time_analytics == true"
+        validation:
+          pattern: "^[0-9]+[smh]$"
+          
+      # Data retention
+      retention_policy:
+        type: object
+        properties:
+          enabled:
+            type: boolean
+            default: false
+          max_age:
+            type: string
+            description: "Maximum age of data files"
+            validation:
+              pattern: "^[0-9]+[dwy]$"
+          max_size:
+            type: string
+            description: "Maximum total size of data"
+            validation:
+              pattern: "^[0-9]+[KMGT]B$"
+        required: false
+        description: "Data retention configuration"
+        
+      # Monitoring configuration
+      health_port:
+        type: integer
+        required: false
+        default: 8088
+        minimum: 1024
+        maximum: 65535
+        description: "Health check endpoint port"
+        
+      metrics_enabled:
+        type: boolean
+        required: false
+        default: true
+        description: "Enable Prometheus metrics"
+        
+      log_level:
+        type: string
+        required: false
+        default: "info"
+        enum: [debug, info, warn, error]
+        description: "Logging level"
+
+  # Resource requirements
+  resources:
+    requests:
+      cpu: "300m"
+      memory: "256Mi"
+      storage: "10Gi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+      storage: "1Ti"
+      
+  # Health check configuration
+  health:
+    readiness:
+      path: /health
+      port: 8088
+      initial_delay: 10
+      period: 30
+      timeout: 5
+      failure_threshold: 3
+      
+    liveness:
+      path: /health
+      port: 8088
+      initial_delay: 30
+      period: 30
+      timeout: 10
+      failure_threshold: 3
+
+  # Security configuration
+  security:
+    run_as_user: 1000
+    run_as_group: 1000
+    read_only_root_filesystem: false # Need write access for data files
+    allow_privilege_escalation: false
+    drop_capabilities: ["ALL"]
+    
+  # Platform support
+  platforms:
+    - linux/amd64
+    - linux/arm64
+    - darwin/amd64
+    - darwin/arm64
+    
+  # Dependencies
+  dependencies:
+    runtime:
+      - ca-certificates
+      - openssl
+      - curl
+    build:
+      - gcc
+      - musl-dev
+      - openssl-dev
+      
+  # Environment variables
+  environment:
+    - name: ARROW_ANALYTICS_SINK_PORT
+      description: "Arrow Flight server port"
+      default: "8817"
+    - name: ARROW_ANALYTICS_SINK_HEALTH_PORT
+      description: "Health check port"
+      default: "8088"
+    - name: ARROW_ANALYTICS_SINK_WEBSOCKET_PORT
+      description: "WebSocket server port"
+      default: "8080"
+    - name: ARROW_ANALYTICS_SINK_LOG_LEVEL
+      description: "Logging level"
+      default: "info"
+    - name: ARROW_ANALYTICS_SINK_DATA_PATH
+      description: "Data output path"
+      default: "/data"
+      
+  # Volumes
+  volumes:
+    - name: data
+      path: /data
+      description: "Data output volume"
+      size: 1Ti
+      access_modes: [ReadWriteOnce]
+    - name: config
+      path: /config
+      description: "Configuration volume"
+      size: 1Gi
+      access_modes: [ReadOnlyMany]
+    - name: temp
+      path: /tmp
+      description: "Temporary processing volume"
+      size: 10Gi
+      access_modes: [ReadWriteOnce]
+      
+  # Examples
+  examples:
+    - name: parquet-only
+      description: "Output to Parquet files only"
+      config:
+        processor_endpoint: "localhost:8816"
+        output_formats: [parquet]
+        parquet_path: "./data/ttp_events"
+        parquet_compression: "snappy"
+        partition_by: [date, asset_code]
+        parquet_batch_size: 10000
+        
+    - name: real-time-websocket
+      description: "Real-time WebSocket streaming"
+      config:
+        processor_endpoint: "localhost:8816"
+        output_formats: [parquet, websocket]
+        parquet_path: "./data/ttp_events"
+        websocket_port: 8080
+        max_websocket_connections: 100
+        real_time_analytics: true
+        analytics_window: "5m"
+        
+    - name: multi-format
+      description: "Multiple output formats"
+      config:
+        processor_endpoint: "localhost:8816"
+        output_formats: [parquet, json, csv, api]
+        parquet_path: "./data/parquet"
+        json_path: "./data/json"
+        csv_path: "./data/csv"
+        api_port: 8080
+        api_cache_size: 50000
+        writer_threads: 6
+        
+    - name: high-throughput
+      description: "High-throughput configuration"
+      config:
+        processor_endpoint: "localhost:8816"
+        output_formats: [parquet]
+        parquet_path: "./data/ttp_events"
+        parquet_compression: "lz4"
+        partition_by: [date, hour]
+        parquet_batch_size: 50000
+        buffer_size: 50000
+        writer_threads: 8
+        flush_interval: "10s"
+        
+    - name: with-retention
+      description: "Configuration with data retention"
+      config:
+        processor_endpoint: "localhost:8816"
+        output_formats: [parquet, json]
+        parquet_path: "./data/parquet"
+        json_path: "./data/json"
+        retention_policy:
+          enabled: true
+          max_age: "30d"
+          max_size: "100GB"

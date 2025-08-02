@@ -1,0 +1,372 @@
+apiVersion: component.flowctl.io/v1
+kind: ComponentSpec
+metadata:
+  name: stellar-arrow-source
+  version: v1.0.0
+  namespace: obsrvr
+  description: "Arrow-native Stellar ledger data source supporting RPC and data lake ingestion"
+  author: "Obsrvr"
+  homepage: "https://github.com/withobsrvr/obsrvr-stellar-components"
+  repository: "https://github.com/withobsrvr/obsrvr-stellar-components"
+  license: "Apache-2.0"
+  tags:
+    - stellar
+    - blockchain
+    - arrow
+    - source
+    - ledger
+    - rpc
+    - datalake
+
+spec:
+  type: source
+  
+  # Execution modes
+  execution:
+    modes: [container, native]
+    default: native
+    
+  # Multi-language support (Go primary)
+  languages:
+    - name: go
+      version: "1.23"
+      main: src/main.go
+      build:
+        # Native build for in-process execution
+        native:
+          command: ["go", "build", "-o", "stellar-arrow-source", "./src"]
+          binary: "stellar-arrow-source"
+          environment:
+            - CGO_ENABLED=1
+            - GOOS=linux
+          dependencies:
+            - libssl-dev
+            - libcrypto-dev
+        # Container build
+        container:
+          dockerfile: |
+            FROM golang:1.23-alpine AS builder
+            
+            # Install build dependencies
+            RUN apk add --no-cache gcc musl-dev openssl-dev
+            
+            WORKDIR /app
+            COPY . .
+            
+            # Download dependencies
+            RUN go mod download
+            
+            # Build binary
+            RUN CGO_ENABLED=1 go build -a -installsuffix cgo -o stellar-arrow-source ./src
+            
+            # Runtime stage
+            FROM alpine:latest
+            
+            # Install runtime dependencies
+            RUN apk --no-cache add ca-certificates openssl
+            
+            WORKDIR /root/
+            
+            # Copy binary
+            COPY --from=builder /app/stellar-arrow-source .
+            
+            # Create data directory
+            RUN mkdir -p /data
+            
+            # Health check
+            HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+              CMD curl -f http://localhost:8088/health || exit 1
+            
+            EXPOSE 8815 8088
+            
+            ENTRYPOINT ["./stellar-arrow-source"]
+            
+  # Component interface
+  interface:
+    outputEventTypes: 
+      - stellar.ledger
+      
+    outputSchemas:
+      - name: stellar_ledger
+        version: "1.0.0"
+        description: "Stellar ledger data with Arrow format"
+        
+    communication:
+      protocol: arrow-flight
+      port: 8815
+      streams:
+        - name: stellar_ledgers
+          schema: stellar_ledger
+          description: "Stream of Stellar ledger data"
+          qos: at_least_once
+          
+      endpoints:
+        - path: /health
+          method: GET
+          description: "Component health status"
+          response_type: application/json
+        - path: /metrics
+          method: GET
+          description: "Prometheus metrics"
+          response_type: text/plain
+        - path: /schema
+          method: GET
+          description: "Arrow schema information"
+          response_type: application/json
+          
+    config:
+      # Data source configuration
+      source_type:
+        type: string
+        required: true
+        enum: [rpc, datalake]
+        description: "Type of data source"
+        examples:
+          - rpc
+          - datalake
+          
+      # RPC source configuration
+      rpc_endpoint:
+        type: string
+        required: false
+        description: "Stellar RPC endpoint URL"
+        condition: "source_type == 'rpc'"
+        examples:
+          - "https://horizon.stellar.org"
+          - "https://soroban-testnet.stellar.org"
+        validation:
+          pattern: "^https?://.+"
+          
+      network_passphrase:
+        type: string
+        required: true
+        description: "Stellar network passphrase"
+        examples:
+          - "Public Global Stellar Network ; September 2015"
+          - "Test SDF Network ; September 2015"
+          
+      # Data lake source configuration
+      storage_backend:
+        type: string
+        required: false
+        enum: [s3, gcs, filesystem]
+        description: "Storage backend for data lake source"
+        condition: "source_type == 'datalake'"
+        
+      bucket_name:
+        type: string
+        required: false
+        description: "Storage bucket name"
+        condition: "source_type == 'datalake' && storage_backend != 'filesystem'"
+        
+      aws_region:
+        type: string
+        required: false
+        description: "AWS region for S3 storage"
+        condition: "storage_backend == 's3'"
+        default: "us-west-2"
+        
+      gcp_project:
+        type: string
+        required: false
+        description: "GCP project ID for GCS storage"
+        condition: "storage_backend == 'gcs'"
+        
+      storage_path:
+        type: string
+        required: false
+        description: "Storage path for filesystem backend"
+        condition: "storage_backend == 'filesystem'"
+        default: "./data/ledgers"
+        
+      # Processing configuration
+      start_ledger:
+        type: integer
+        required: false
+        default: 0
+        minimum: 0
+        description: "Starting ledger sequence (0 = latest)"
+        
+      end_ledger:
+        type: integer
+        required: false
+        default: 0
+        minimum: 0
+        description: "Ending ledger sequence (0 = continuous)"
+        
+      batch_size:
+        type: integer
+        required: false
+        default: 1000
+        minimum: 100
+        maximum: 10000
+        description: "Number of ledgers per Arrow batch"
+        
+      # Performance configuration
+      buffer_size:
+        type: integer
+        required: false
+        default: 10000
+        minimum: 1000
+        maximum: 100000
+        description: "Internal buffer size for ledger processing"
+        
+      concurrent_readers:
+        type: integer
+        required: false
+        default: 4
+        minimum: 1
+        maximum: 32
+        description: "Number of concurrent readers for data lake mode"
+        condition: "source_type == 'datalake'"
+        
+      # Arrow-specific configuration
+      arrow_memory_pool:
+        type: string
+        required: false
+        default: "default"
+        enum: [default, jemalloc, system]
+        description: "Arrow memory allocator type"
+        
+      compression:
+        type: string
+        required: false
+        default: "none"
+        enum: [none, lz4, zstd, snappy]
+        description: "Arrow IPC compression"
+        
+      # Monitoring configuration
+      health_port:
+        type: integer
+        required: false
+        default: 8088
+        minimum: 1024
+        maximum: 65535
+        description: "Health check endpoint port"
+        
+      metrics_enabled:
+        type: boolean
+        required: false
+        default: true
+        description: "Enable Prometheus metrics"
+        
+      log_level:
+        type: string
+        required: false
+        default: "info"
+        enum: [debug, info, warn, error]
+        description: "Logging level"
+
+  # Resource requirements
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "256Mi"
+      storage: "1Gi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+      storage: "100Gi"
+      
+  # Health check configuration
+  health:
+    readiness:
+      path: /health
+      port: 8088
+      initial_delay: 10
+      period: 30
+      timeout: 5
+      failure_threshold: 3
+      
+    liveness:
+      path: /health
+      port: 8088
+      initial_delay: 30
+      period: 30
+      timeout: 10
+      failure_threshold: 3
+
+  # Security configuration
+  security:
+    run_as_user: 1000
+    run_as_group: 1000
+    read_only_root_filesystem: true
+    allow_privilege_escalation: false
+    drop_capabilities: ["ALL"]
+    
+  # Platform support
+  platforms:
+    - linux/amd64
+    - linux/arm64
+    - darwin/amd64
+    - darwin/arm64
+    
+  # Dependencies
+  dependencies:
+    runtime:
+      - ca-certificates
+      - openssl
+    build:
+      - gcc
+      - musl-dev
+      - openssl-dev
+      
+  # Environment variables
+  environment:
+    - name: STELLAR_ARROW_SOURCE_PORT
+      description: "Arrow Flight server port"
+      default: "8815"
+    - name: STELLAR_ARROW_SOURCE_HEALTH_PORT
+      description: "Health check port"
+      default: "8088"
+    - name: STELLAR_ARROW_SOURCE_LOG_LEVEL
+      description: "Logging level"
+      default: "info"
+    - name: STELLAR_ARROW_SOURCE_BATCH_SIZE
+      description: "Arrow batch size"
+      default: "1000"
+      
+  # Volumes
+  volumes:
+    - name: data
+      path: /data
+      description: "Data storage volume"
+      size: 100Gi
+      access_modes: [ReadWriteOnce]
+    - name: config
+      path: /config
+      description: "Configuration volume"
+      size: 1Gi
+      access_modes: [ReadOnlyMany]
+      
+  # Examples
+  examples:
+    - name: rpc-mainnet
+      description: "Connect to Stellar mainnet via RPC"
+      config:
+        source_type: rpc
+        rpc_endpoint: "https://horizon.stellar.org"
+        network_passphrase: "Public Global Stellar Network ; September 2015"
+        start_ledger: 0
+        batch_size: 1000
+        
+    - name: rpc-testnet  
+      description: "Connect to Stellar testnet via RPC"
+      config:
+        source_type: rpc
+        rpc_endpoint: "https://soroban-testnet.stellar.org"
+        network_passphrase: "Test SDF Network ; September 2015"
+        start_ledger: 0
+        batch_size: 500
+        
+    - name: datalake-s3
+      description: "Read from S3 data lake"
+      config:
+        source_type: datalake
+        storage_backend: s3
+        bucket_name: "stellar-ledger-archive"
+        aws_region: "us-west-2"
+        start_ledger: 1000000
+        end_ledger: 1001000
+        batch_size: 2000
+        concurrent_readers: 8

@@ -1,0 +1,281 @@
+apiVersion: flowctl/v1
+kind: Pipeline
+metadata:
+  name: stellar-rpc-pipeline
+  description: "Process TTP events from Stellar RPC endpoints in real-time"
+  version: v1.0.0
+  labels:
+    component-bundle: obsrvr/obsrvr-stellar-suite
+    template: rpc-pipeline
+    network: "${STELLAR_NETWORK:-testnet}"
+    
+spec:
+  # Execution configuration
+  execution:
+    mode: ${EXECUTION_MODE:-native}
+    
+  # Pipeline configuration
+  config:
+    # Stellar network configuration
+    stellar:
+      network: ${STELLAR_NETWORK:-testnet}
+      rpc_endpoint: ${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}
+      network_passphrase: ${NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}
+      
+    # Processing configuration
+    processing:
+      start_ledger: ${START_LEDGER:-0}
+      batch_size: ${BATCH_SIZE:-1000}
+      processor_threads: ${PROCESSOR_THREADS:-4}
+      event_types: ${EVENT_TYPES:-payment,path_payment_strict_receive,path_payment_strict_send}
+      
+    # Output configuration
+    output:
+      formats: ${OUTPUT_FORMATS:-parquet,json,websocket}
+      data_dir: ${DATA_DIR:-./data}
+      websocket_port: ${WEBSOCKET_PORT:-8080}
+      
+    # Performance tuning
+    performance:
+      buffer_size: ${BUFFER_SIZE:-10000}
+      flush_interval: ${FLUSH_INTERVAL:-30s}
+      
+  # Component definitions
+  sources:
+    - name: stellar-rpc-source
+      component: obsrvr/stellar-arrow-source@v1.0.0
+      config:
+        # Source configuration
+        source_type: rpc
+        rpc_endpoint: ${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}
+        network_passphrase: ${NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}
+        start_ledger: ${START_LEDGER:-0}
+        
+        # Performance configuration
+        batch_size: ${BATCH_SIZE:-1000}
+        buffer_size: ${BUFFER_SIZE:-10000}
+        
+        # Arrow configuration
+        arrow_memory_pool: default
+        compression: none
+        
+        # Monitoring
+        health_port: 8088
+        metrics_enabled: true
+        log_level: ${LOG_LEVEL:-info}
+        
+      # Resource allocation
+      resources:
+        requests:
+          cpu: 200m
+          memory: 256Mi
+        limits:
+          cpu: 1000m
+          memory: 1Gi
+          
+      # Health checks
+      health:
+        readiness:
+          path: /health
+          port: 8088
+          initial_delay: 10s
+          
+  processors:
+    - name: ttp-processor
+      component: obsrvr/ttp-arrow-processor@v1.0.0
+      inputs: [stellar-rpc-source]
+      config:
+        # Source connection
+        source_endpoint: localhost:8815
+        
+        # Processing configuration
+        event_types: 
+          - payment
+          - path_payment_strict_receive
+          - path_payment_strict_send
+        processor_threads: ${PROCESSOR_THREADS:-4}
+        batch_size: ${BATCH_SIZE:-1000}
+        buffer_size: ${BUFFER_SIZE:-10000}
+        
+        # Output options
+        include_transaction_details: true
+        deduplicate_events: true
+        
+        # Arrow compute configuration
+        compute_threads: 0 # Auto-detect
+        memory_pool: default
+        
+        # Monitoring
+        health_port: 8088
+        metrics_enabled: true
+        stats_interval: 30s
+        log_level: ${LOG_LEVEL:-info}
+        
+      # Resource allocation
+      resources:
+        requests:
+          cpu: 500m
+          memory: 512Mi
+        limits:
+          cpu: 2000m
+          memory: 2Gi
+          
+      # Health checks
+      health:
+        readiness:
+          path: /health
+          port: 8088
+          initial_delay: 15s
+          
+  sinks:
+    - name: analytics-sink
+      component: obsrvr/arrow-analytics-sink@v1.0.0
+      inputs: [ttp-processor]
+      config:
+        # Source connection
+        processor_endpoint: localhost:8816
+        
+        # Output formats
+        output_formats:
+          - parquet
+          - json
+          - websocket
+          
+        # Parquet configuration
+        parquet_path: ${DATA_DIR:-./data}/ttp_events
+        parquet_compression: snappy
+        partition_by: [date]
+        parquet_batch_size: 10000
+        
+        # JSON configuration
+        json_path: ${DATA_DIR:-./data}/json
+        json_format: jsonl
+        
+        # WebSocket configuration
+        websocket_port: ${WEBSOCKET_PORT:-8080}
+        websocket_path: /ws
+        max_websocket_connections: 1000
+        
+        # Performance configuration
+        buffer_size: ${BUFFER_SIZE:-10000}
+        writer_threads: 4
+        flush_interval: ${FLUSH_INTERVAL:-30s}
+        
+        # Real-time features
+        real_time_analytics: true
+        analytics_window: 5m
+        
+        # Monitoring
+        health_port: 8088
+        metrics_enabled: true
+        log_level: ${LOG_LEVEL:-info}
+        
+      # Resource allocation  
+      resources:
+        requests:
+          cpu: 300m
+          memory: 256Mi
+          storage: 10Gi
+        limits:
+          cpu: 1000m
+          memory: 1Gi
+          storage: 1Ti
+          
+      # Health checks
+      health:
+        readiness:
+          path: /health
+          port: 8088
+          initial_delay: 10s
+          
+  # Pipeline-level monitoring
+  monitoring:
+    metrics:
+      enabled: true
+      port: 9090
+      path: /metrics
+      
+    logging:
+      level: ${LOG_LEVEL:-info}
+      format: json
+      
+    tracing:
+      enabled: false
+      
+  # Networking configuration
+  networking:
+    ports:
+      stellar-rpc-source: 8815
+      ttp-processor: 8816
+      analytics-sink: 8817
+      websocket: ${WEBSOCKET_PORT:-8080}
+      health: 8088
+      metrics: 9090
+      
+    endpoints:
+      - name: websocket
+        component: analytics-sink
+        port: ${WEBSOCKET_PORT:-8080}
+        path: /ws
+        public: true
+        
+      - name: health
+        port: 8088
+        path: /health
+        public: false
+        
+  # Environment-specific overrides
+  environments:
+    development:
+      config:
+        stellar:
+          network: testnet
+          rpc_endpoint: https://soroban-testnet.stellar.org
+        processing:
+          batch_size: 500
+          processor_threads: 2
+        output:
+          formats: [json, websocket]
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: 500m
+          memory: 512Mi
+          
+    staging:
+      config:
+        stellar:
+          network: testnet
+          rpc_endpoint: https://soroban-testnet.stellar.org
+        processing:
+          batch_size: 1000
+          processor_threads: 4
+        output:
+          formats: [parquet, json, websocket]
+      resources:
+        requests:
+          cpu: 200m
+          memory: 256Mi
+        limits:
+          cpu: 1000m
+          memory: 1Gi
+          
+    production:
+      config:
+        stellar:
+          network: mainnet
+          rpc_endpoint: https://horizon.stellar.org
+        processing:
+          batch_size: 2000
+          processor_threads: 8
+        output:
+          formats: [parquet, websocket]
+      resources:
+        requests:
+          cpu: 500m
+          memory: 512Mi
+        limits:
+          cpu: 4000m
+          memory: 4Gi

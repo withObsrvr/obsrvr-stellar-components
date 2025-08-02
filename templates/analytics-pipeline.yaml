@@ -1,0 +1,433 @@
+apiVersion: flowctl/v1
+kind: Pipeline
+metadata:
+  name: stellar-analytics-pipeline
+  description: "Advanced real-time TTP analytics with multiple outputs and dashboards"
+  version: v1.0.0
+  labels:
+    component-bundle: obsrvr/obsrvr-stellar-suite
+    template: analytics-pipeline
+    mode: real-time
+    analytics: advanced
+    
+spec:
+  # Execution configuration
+  execution:
+    mode: ${EXECUTION_MODE:-native}
+    
+  # Pipeline configuration
+  config:
+    # Stellar network configuration
+    stellar:
+      network: ${STELLAR_NETWORK:-mainnet}
+      rpc_endpoint: ${STELLAR_RPC_URL:-https://horizon.stellar.org}
+      network_passphrase: ${NETWORK_PASSPHRASE:-Public Global Stellar Network ; September 2015}
+      
+    # Analytics configuration
+    analytics:
+      real_time: true
+      time_windows: [1m, 5m, 15m, 1h, 24h]
+      metrics: [volume, count, avg_amount, asset_distribution, account_activity]
+      dashboards: ${ENABLE_DASHBOARDS:-true}
+      
+    # Processing configuration
+    processing:
+      start_ledger: ${START_LEDGER:-0}
+      batch_size: ${BATCH_SIZE:-1000}
+      processor_threads: ${PROCESSOR_THREADS:-8}
+      event_types: ${EVENT_TYPES:-payment,path_payment_strict_receive,path_payment_strict_send,create_account}
+      
+    # Output configuration
+    output:
+      formats: ${OUTPUT_FORMATS:-parquet,websocket,json,api}
+      data_dir: ${DATA_DIR:-./data}
+      websocket_port: ${WEBSOCKET_PORT:-8080}
+      api_port: ${API_PORT:-8081}
+      
+    # Performance tuning
+    performance:
+      buffer_size: ${BUFFER_SIZE:-10000}
+      flush_interval: ${FLUSH_INTERVAL:-10s}
+      
+  # Component definitions
+  sources:
+    - name: stellar-analytics-source
+      component: obsrvr/stellar-arrow-source@v1.0.0
+      config:
+        # Source configuration
+        source_type: rpc
+        rpc_endpoint: ${STELLAR_RPC_URL:-https://horizon.stellar.org}
+        network_passphrase: ${NETWORK_PASSPHRASE:-Public Global Stellar Network ; September 2015}
+        start_ledger: ${START_LEDGER:-0}
+        
+        # Performance configuration for real-time
+        batch_size: ${BATCH_SIZE:-1000}
+        buffer_size: ${BUFFER_SIZE:-10000}
+        
+        # Arrow configuration optimized for analytics
+        arrow_memory_pool: jemalloc
+        compression: lz4
+        
+        # Monitoring
+        health_port: 8088
+        metrics_enabled: true
+        log_level: ${LOG_LEVEL:-info}
+        
+      # Resource allocation for sustained real-time processing
+      resources:
+        requests:
+          cpu: 300m
+          memory: 512Mi
+        limits:
+          cpu: 1500m
+          memory: 2Gi
+          
+      # Health checks optimized for real-time
+      health:
+        readiness:
+          path: /health
+          port: 8088
+          initial_delay: 10s
+          period: 15s
+          
+  processors:
+    - name: ttp-analytics-processor
+      component: obsrvr/ttp-arrow-processor@v1.0.0
+      inputs: [stellar-analytics-source]
+      config:
+        # Source connection
+        source_endpoint: localhost:8815
+        
+        # Processing configuration for analytics
+        event_types: 
+          - payment
+          - path_payment_strict_receive
+          - path_payment_strict_send
+          - create_account
+          - account_merge
+        processor_threads: ${PROCESSOR_THREADS:-8}
+        batch_size: ${BATCH_SIZE:-1000}
+        buffer_size: ${BUFFER_SIZE:-10000}
+        
+        # Analytics-focused output
+        include_raw_xdr: false
+        include_transaction_details: true
+        deduplicate_events: true
+        
+        # Asset filtering for analytics
+        asset_filters:
+          - asset_code: "" # Native XLM
+          - asset_code: "USDC"
+            asset_issuer: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+          - asset_code: "USDT"
+            asset_issuer: "GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V"
+        
+        # Arrow compute configuration
+        compute_threads: 0 # Auto-detect
+        memory_pool: jemalloc
+        
+        # Enhanced monitoring for analytics
+        health_port: 8088
+        metrics_enabled: true
+        stats_interval: 15s
+        log_level: ${LOG_LEVEL:-info}
+        
+      # Resource allocation for intensive analytics processing
+      resources:
+        requests:
+          cpu: 1000m
+          memory: 1Gi
+        limits:
+          cpu: 3000m
+          memory: 4Gi
+          
+      # Health checks
+      health:
+        readiness:
+          path: /health
+          port: 8088
+          initial_delay: 15s
+          period: 20s
+          
+  sinks:
+    - name: multi-format-analytics-sink
+      component: obsrvr/arrow-analytics-sink@v1.0.0
+      inputs: [ttp-analytics-processor]
+      config:
+        # Source connection
+        processor_endpoint: localhost:8816
+        
+        # Comprehensive output formats for analytics
+        output_formats:
+          - parquet
+          - websocket
+          - json
+          - api
+          
+        # Parquet configuration for time-series analytics
+        parquet_path: ${DATA_DIR:-./data}/ttp_events
+        parquet_compression: snappy
+        partition_by: [date, hour, asset_code]
+        parquet_batch_size: 10000
+        
+        # JSON configuration for streaming analytics
+        json_path: ${DATA_DIR:-./data}/json
+        json_format: jsonl
+        
+        # WebSocket configuration for real-time dashboards
+        websocket_port: ${WEBSOCKET_PORT:-8080}
+        websocket_path: /ws
+        max_websocket_connections: 5000
+        
+        # REST API configuration for dashboard queries
+        api_port: ${API_PORT:-8081}
+        api_cache_size: 100000
+        
+        # Performance configuration for real-time analytics
+        buffer_size: ${BUFFER_SIZE:-10000}
+        writer_threads: 6
+        flush_interval: ${FLUSH_INTERVAL:-10s}
+        
+        # Advanced real-time analytics features
+        real_time_analytics: true
+        analytics_window: 1m
+        
+        # Data retention for historical analytics
+        retention_policy:
+          enabled: true
+          max_age: 90d
+          max_size: 500GB
+        
+        # Monitoring
+        health_port: 8088
+        metrics_enabled: true
+        log_level: ${LOG_LEVEL:-info}
+        
+      # Resource allocation for multi-format output
+      resources:
+        requests:
+          cpu: 500m
+          memory: 1Gi
+          storage: 50Gi
+        limits:
+          cpu: 2000m
+          memory: 4Gi
+          storage: 5Ti
+          
+      # Health checks
+      health:
+        readiness:
+          path: /health
+          port: 8088
+          initial_delay: 15s
+          period: 20s
+          
+  # Pipeline-level monitoring and analytics
+  monitoring:
+    metrics:
+      enabled: true
+      port: 9090
+      path: /metrics
+      
+    logging:
+      level: ${LOG_LEVEL:-info}
+      format: json
+      
+    # Advanced analytics monitoring
+    analytics_metrics:
+      enabled: true
+      dashboards: true
+      custom_metrics:
+        - name: ttp_volume_by_asset
+          description: "TTP volume grouped by asset"
+          type: gauge
+          labels: [asset_code, asset_issuer]
+          
+        - name: ttp_transaction_count
+          description: "Number of TTP transactions per minute"
+          type: counter
+          
+        - name: ttp_average_amount
+          description: "Average TTP transaction amount"
+          type: histogram
+          buckets: [1, 10, 100, 1000, 10000, 100000]
+          
+        - name: active_accounts
+          description: "Number of active accounts"
+          type: gauge
+          
+        - name: new_accounts_created
+          description: "New accounts created"
+          type: counter
+          
+    # Real-time alerting
+    alerts:
+      enabled: ${ENABLE_ALERTS:-false}
+      webhook_url: ${ALERT_WEBHOOK_URL}
+      rules:
+        - name: high_volume_spike
+          description: "Alert on transaction volume spikes"
+          condition: "ttp_transaction_count > 1000 per minute"
+          severity: warning
+          
+        - name: large_transaction
+          description: "Alert on very large transactions"
+          condition: "ttp_amount > 1000000 XLM"
+          severity: info
+          
+        - name: processing_lag
+          description: "Alert on processing delays"
+          condition: "processing_latency > 30s"
+          severity: critical
+          
+  # Networking configuration
+  networking:
+    ports:
+      stellar-analytics-source: 8815
+      ttp-analytics-processor: 8816
+      multi-format-analytics-sink: 8817
+      websocket: ${WEBSOCKET_PORT:-8080}
+      api: ${API_PORT:-8081}
+      health: 8088
+      metrics: 9090
+      
+    endpoints:
+      - name: websocket
+        component: multi-format-analytics-sink
+        port: ${WEBSOCKET_PORT:-8080}
+        path: /ws
+        public: true
+        description: "Real-time event stream"
+        
+      - name: api
+        component: multi-format-analytics-sink
+        port: ${API_PORT:-8081}
+        path: /api
+        public: true
+        description: "REST API for analytics queries"
+        
+      - name: health
+        port: 8088
+        path: /health
+        public: false
+        
+      - name: metrics
+        port: 9090
+        path: /metrics
+        public: false
+        
+  # Dashboard configuration
+  dashboards:
+    enabled: ${ENABLE_DASHBOARDS:-true}
+    
+    grafana:
+      enabled: ${ENABLE_GRAFANA:-false}
+      url: ${GRAFANA_URL}
+      dashboards:
+        - name: stellar-ttp-overview
+          path: dashboards/ttp-overview.json
+        - name: stellar-network-health
+          path: dashboards/network-health.json
+        - name: stellar-asset-analytics
+          path: dashboards/asset-analytics.json
+          
+    custom_dashboard:
+      enabled: true
+      port: 3000
+      title: "Stellar TTP Analytics"
+      
+  # Real-time analytics configuration
+  analytics:
+    streaming:
+      enabled: true
+      window_size: 60s
+      aggregations:
+        - name: volume_by_asset
+          type: sum
+          field: amount_raw
+          group_by: [asset_code, asset_issuer]
+          
+        - name: transaction_count
+          type: count
+          group_by: [event_type]
+          
+        - name: active_accounts
+          type: distinct_count
+          field: from_account
+          
+        - name: average_amount
+          type: avg
+          field: amount_raw
+          group_by: [asset_code]
+          
+    machine_learning:
+      enabled: ${ENABLE_ML:-false}
+      models:
+        - name: anomaly_detection
+          type: isolation_forest
+          features: [amount_raw, transaction_frequency]
+          
+        - name: trend_prediction
+          type: time_series
+          target: volume_by_asset
+          
+  # Environment-specific overrides
+  environments:
+    development:
+      config:
+        stellar:
+          network: testnet
+          rpc_endpoint: https://soroban-testnet.stellar.org
+        analytics:
+          time_windows: [1m, 5m]
+          metrics: [volume, count]
+        output:
+          formats: [json, websocket]
+      resources:
+        requests:
+          cpu: 200m
+          memory: 256Mi
+        limits:
+          cpu: 1000m
+          memory: 1Gi
+          
+    staging:
+      config:
+        stellar:
+          network: testnet
+          rpc_endpoint: https://horizon-testnet.stellar.org
+        analytics:
+          time_windows: [1m, 5m, 15m]
+          metrics: [volume, count, avg_amount]
+        output:
+          formats: [parquet, json, websocket, api]
+      resources:
+        requests:
+          cpu: 500m
+          memory: 512Mi
+        limits:
+          cpu: 2000m
+          memory: 2Gi
+          
+    production:
+      config:
+        stellar:
+          network: mainnet
+          rpc_endpoint: https://horizon.stellar.org
+        analytics:
+          time_windows: [1m, 5m, 15m, 1h, 24h]
+          metrics: [volume, count, avg_amount, asset_distribution, account_activity]
+          dashboards: true
+          real_time: true
+        monitoring:
+          alerts:
+            enabled: true
+        output:
+          formats: [parquet, websocket, api]
+      resources:
+        requests:
+          cpu: 1000m
+          memory: 2Gi
+        limits:
+          cpu: 6000m
+          memory: 8Gi

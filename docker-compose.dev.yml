@@ -1,0 +1,226 @@
+version: '3.8'
+
+# Development Docker Compose for obsrvr-stellar-components
+# This setup provides a complete development environment with all components
+
+services:
+  # Stellar Arrow Source - RPC mode for development
+  stellar-arrow-source:
+    build:
+      context: .
+      dockerfile: components/stellar-arrow-source/Dockerfile
+      args:
+        GO_VERSION: 1.23
+        ARROW_VERSION: 17.0.0
+    container_name: stellar-arrow-source-dev
+    ports:
+      - "8815:8815"  # Arrow Flight
+      - "8088:8088"  # Health check
+    environment:
+      - SOURCE_TYPE=rpc
+      - RPC_ENDPOINT=${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}
+      - NETWORK_PASSPHRASE=${NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}
+      - START_LEDGER=${START_LEDGER:-0}
+      - BATCH_SIZE=${BATCH_SIZE:-1000}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - HEALTH_PORT=8088
+      - METRICS_ENABLED=true
+    volumes:
+      - ./data:/data
+      - ./logs:/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - stellar-network
+
+  # TTP Arrow Processor
+  ttp-arrow-processor:
+    build:
+      context: .
+      dockerfile: components/ttp-arrow-processor/Dockerfile
+      args:
+        GO_VERSION: 1.23
+        ARROW_VERSION: 17.0.0
+    container_name: ttp-arrow-processor-dev
+    ports:
+      - "8816:8816"  # Arrow Flight
+      - "8089:8088"  # Health check (different port to avoid conflicts)
+    environment:
+      - SOURCE_ENDPOINT=stellar-arrow-source:8815
+      - EVENT_TYPES=${EVENT_TYPES:-payment,path_payment_strict_receive,path_payment_strict_send}
+      - PROCESSOR_THREADS=${PROCESSOR_THREADS:-4}
+      - BATCH_SIZE=${BATCH_SIZE:-1000}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - HEALTH_PORT=8088
+      - METRICS_ENABLED=true
+    volumes:
+      - ./data:/data
+      - ./logs:/logs
+    depends_on:
+      stellar-arrow-source:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    networks:
+      - stellar-network
+
+  # Arrow Analytics Sink
+  arrow-analytics-sink:
+    build:
+      context: .
+      dockerfile: components/arrow-analytics-sink/Dockerfile
+      args:
+        GO_VERSION: 1.23
+        ARROW_VERSION: 17.0.0
+    container_name: arrow-analytics-sink-dev
+    ports:
+      - "8817:8817"  # Arrow Flight
+      - "8080:8080"  # WebSocket
+      - "8081:8081"  # REST API
+      - "8090:8088"  # Health check (different port to avoid conflicts)
+    environment:
+      - PROCESSOR_ENDPOINT=ttp-arrow-processor:8816
+      - OUTPUT_FORMATS=${OUTPUT_FORMATS:-parquet,json,websocket}
+      - PARQUET_PATH=/data/ttp_events
+      - WEBSOCKET_PORT=8080
+      - API_PORT=8081
+      - WRITER_THREADS=${WRITER_THREADS:-4}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - HEALTH_PORT=8088
+      - METRICS_ENABLED=true
+      - REAL_TIME_ANALYTICS=true
+    volumes:
+      - ./data:/data
+      - ./logs:/logs
+    depends_on:
+      ttp-arrow-processor:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - stellar-network
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus-dev
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - stellar-network
+    restart: unless-stopped
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana-dev
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      - stellar-network
+    restart: unless-stopped
+
+  # Redis for caching (optional)
+  redis:
+    image: redis:7-alpine
+    container_name: redis-dev
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    networks:
+      - stellar-network
+    restart: unless-stopped
+
+  # MinIO for S3-compatible storage (optional)
+  minio:
+    image: minio/minio:latest
+    container_name: minio-dev
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_PASSWORD:-minioadmin}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    networks:
+      - stellar-network
+    restart: unless-stopped
+
+  # Development utilities container
+  dev-tools:
+    image: alpine:latest
+    container_name: dev-tools
+    command: tail -f /dev/null  # Keep container running
+    environment:
+      - STELLAR_NETWORK=${STELLAR_NETWORK:-testnet}
+    volumes:
+      - ./:/workspace
+      - ./data:/data
+      - ./scripts:/scripts
+    working_dir: /workspace
+    networks:
+      - stellar-network
+    restart: unless-stopped
+
+networks:
+  stellar-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+  redis-data:
+    driver: local
+  minio-data:
+    driver: local
+
+# Health check for the entire stack
+x-healthcheck-depends: &healthcheck-depends
+  depends_on:
+    stellar-arrow-source:
+      condition: service_healthy
+    ttp-arrow-processor:
+      condition: service_healthy
+    arrow-analytics-sink:
+      condition: service_healthy

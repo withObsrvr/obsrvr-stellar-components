@@ -1,0 +1,103 @@
+# Prometheus configuration for obsrvr-stellar-components
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - "alert_rules.yml"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - alertmanager:9093
+
+scrape_configs:
+  # Stellar Arrow Source
+  - job_name: 'stellar-arrow-source'
+    static_configs:
+      - targets: ['stellar-arrow-source:9090', 'localhost:9090']
+    metrics_path: /metrics
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    honor_labels: true
+    params:
+      format: ['prometheus']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: stellar-arrow-source:9090
+      - target_label: component
+        replacement: stellar-arrow-source
+
+  # TTP Arrow Processor
+  - job_name: 'ttp-arrow-processor'
+    static_configs:
+      - targets: ['ttp-arrow-processor:9090', 'localhost:9091']
+    metrics_path: /metrics
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    honor_labels: true
+    relabel_configs:
+      - target_label: component
+        replacement: ttp-arrow-processor
+
+  # Arrow Analytics Sink
+  - job_name: 'arrow-analytics-sink'
+    static_configs:
+      - targets: ['arrow-analytics-sink:9090', 'localhost:9092']
+    metrics_path: /metrics
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    honor_labels: true
+    relabel_configs:
+      - target_label: component
+        replacement: arrow-analytics-sink
+
+  # Component Health Checks
+  - job_name: 'component-health'
+    static_configs:
+      - targets: 
+        - 'stellar-arrow-source:8088'
+        - 'ttp-arrow-processor:8088'
+        - 'arrow-analytics-sink:8088'
+        - 'localhost:8088'
+        - 'localhost:8089'
+        - 'localhost:8090'
+    metrics_path: /health
+    scrape_interval: 15s
+    scrape_timeout: 5s
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: '(.+):8088'
+        target_label: component
+        replacement: '${1}'
+      - target_label: check_type
+        replacement: health
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Node Exporter (if available)
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100', 'localhost:9100']
+    scrape_interval: 30s
+
+  # Docker containers (if using cAdvisor)
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+    scrape_interval: 30s
+
+  # Redis (if used)
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis:6379']
+    scrape_interval: 30s

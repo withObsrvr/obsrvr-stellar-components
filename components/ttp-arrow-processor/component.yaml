@@ -1,0 +1,413 @@
+apiVersion: component.flowctl.io/v1
+kind: ComponentSpec
+metadata:
+  name: ttp-arrow-processor
+  version: v1.0.0
+  namespace: obsrvr
+  description: "Arrow-native Token Transfer Protocol event extraction processor"
+  author: "Obsrvr"
+  homepage: "https://github.com/withobsrvr/obsrvr-stellar-components"
+  repository: "https://github.com/withobsrvr/obsrvr-stellar-components"
+  license: "Apache-2.0"
+  tags:
+    - stellar
+    - blockchain
+    - arrow
+    - processor
+    - ttp
+    - payments
+    - analytics
+
+spec:
+  type: processor
+  
+  # Execution modes
+  execution:
+    modes: [container, native]
+    default: native
+    
+  # Multi-language support (Go primary)
+  languages:
+    - name: go
+      version: "1.23"
+      main: src/main.go
+      build:
+        # Native build for in-process execution
+        native:
+          command: ["go", "build", "-o", "ttp-arrow-processor", "./src"]
+          binary: "ttp-arrow-processor"
+          environment:
+            - CGO_ENABLED=1
+            - GOOS=linux
+          dependencies:
+            - libssl-dev
+            - libcrypto-dev
+        # Container build
+        container:
+          dockerfile: |
+            FROM golang:1.23-alpine AS builder
+            
+            # Install build dependencies
+            RUN apk add --no-cache gcc musl-dev openssl-dev
+            
+            WORKDIR /app
+            COPY . .
+            
+            # Download dependencies
+            RUN go mod download
+            
+            # Build binary
+            RUN CGO_ENABLED=1 go build -a -installsuffix cgo -o ttp-arrow-processor ./src
+            
+            # Runtime stage
+            FROM alpine:latest
+            
+            # Install runtime dependencies
+            RUN apk --no-cache add ca-certificates openssl
+            
+            WORKDIR /root/
+            
+            # Copy binary
+            COPY --from=builder /app/ttp-arrow-processor .
+            
+            # Create data directory
+            RUN mkdir -p /data
+            
+            # Health check
+            HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+              CMD curl -f http://localhost:8088/health || exit 1
+            
+            EXPOSE 8816 8088
+            
+            ENTRYPOINT ["./ttp-arrow-processor"]
+            
+  # Component interface
+  interface:
+    inputEventTypes:
+      - stellar.ledger
+      
+    outputEventTypes: 
+      - ttp.event
+      
+    inputSchemas:
+      - name: stellar_ledger
+        version: "1.0.0"
+        description: "Stellar ledger data input"
+        
+    outputSchemas:
+      - name: ttp_event
+        version: "1.0.0"
+        description: "Token Transfer Protocol events"
+        
+    communication:
+      protocol: arrow-flight
+      port: 8816
+      
+      # Input streams
+      consumes:
+        - name: stellar_ledgers
+          schema: stellar_ledger
+          source: stellar-arrow-source
+          port: 8815
+          description: "Consumes Stellar ledger data"
+          
+      # Output streams  
+      streams:
+        - name: ttp_events
+          schema: ttp_event
+          description: "Stream of TTP events"
+          qos: at_least_once
+          
+      endpoints:
+        - path: /health
+          method: GET
+          description: "Component health status"
+          response_type: application/json
+        - path: /metrics
+          method: GET
+          description: "Prometheus metrics"
+          response_type: text/plain
+        - path: /schema/input
+          method: GET
+          description: "Input Arrow schema information"
+          response_type: application/json
+        - path: /schema/output
+          method: GET
+          description: "Output Arrow schema information"
+          response_type: application/json
+        - path: /stats
+          method: GET
+          description: "Processing statistics"
+          response_type: application/json
+          
+    config:
+      # Source connection configuration
+      source_endpoint:
+        type: string
+        required: true
+        description: "Arrow Flight endpoint for ledger source"
+        default: "localhost:8815"
+        examples:
+          - "localhost:8815"
+          - "stellar-arrow-source:8815"
+        validation:
+          pattern: "^[a-zA-Z0-9.-]+:[0-9]+$"
+          
+      # Processing configuration
+      event_types:
+        type: array
+        items:
+          type: string
+          enum: [payment, path_payment_strict_receive, path_payment_strict_send, create_account, account_merge]
+        required: false
+        default: [payment, path_payment_strict_receive, path_payment_strict_send]
+        description: "Types of operations to process as TTP events"
+        
+      asset_filters:
+        type: array
+        items:
+          type: object
+          properties:
+            asset_code:
+              type: string
+              description: "Asset code filter (empty for native XLM)"
+            asset_issuer:
+              type: string
+              description: "Asset issuer filter"
+        required: false
+        description: "Filter events by asset (empty = all assets)"
+        
+      amount_filters:
+        type: object
+        properties:
+          min_amount:
+            type: string
+            description: "Minimum amount filter (in asset units)"
+          max_amount:
+            type: string
+            description: "Maximum amount filter (in asset units)"
+        required: false
+        description: "Filter events by amount range"
+        
+      # Performance configuration
+      processor_threads:
+        type: integer
+        required: false
+        default: 4
+        minimum: 1
+        maximum: 32
+        description: "Number of processing threads"
+        
+      batch_size:
+        type: integer
+        required: false
+        default: 1000
+        minimum: 100
+        maximum: 10000
+        description: "Arrow batch size for processing"
+        
+      buffer_size:
+        type: integer
+        required: false
+        default: 10000
+        minimum: 1000
+        maximum: 100000
+        description: "Internal buffer size"
+        
+      # Arrow compute configuration
+      compute_threads:
+        type: integer
+        required: false
+        default: 0
+        minimum: 0
+        maximum: 32
+        description: "Arrow compute threads (0 = auto-detect)"
+        
+      memory_pool:
+        type: string
+        required: false
+        default: "default"
+        enum: [default, jemalloc, system]
+        description: "Arrow memory allocator"
+        
+      # Output configuration
+      include_raw_xdr:
+        type: boolean
+        required: false
+        default: false
+        description: "Include raw XDR data in output events"
+        
+      include_transaction_details:
+        type: boolean
+        required: false
+        default: true
+        description: "Include full transaction details"
+        
+      deduplicate_events:
+        type: boolean
+        required: false
+        default: true
+        description: "Remove duplicate events"
+        
+      # Monitoring configuration
+      health_port:
+        type: integer
+        required: false
+        default: 8088
+        minimum: 1024
+        maximum: 65535
+        description: "Health check endpoint port"
+        
+      metrics_enabled:
+        type: boolean
+        required: false
+        default: true
+        description: "Enable Prometheus metrics"
+        
+      stats_interval:
+        type: string
+        required: false
+        default: "30s"
+        description: "Statistics reporting interval"
+        validation:
+          pattern: "^[0-9]+[smh]$"
+          
+      log_level:
+        type: string
+        required: false
+        default: "info"
+        enum: [debug, info, warn, error]
+        description: "Logging level"
+
+  # Resource requirements
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+      storage: "1Gi"
+    limits:
+      cpu: "2000m"
+      memory: "2Gi"
+      storage: "10Gi"
+      
+  # Health check configuration
+  health:
+    readiness:
+      path: /health
+      port: 8088
+      initial_delay: 15
+      period: 30
+      timeout: 5
+      failure_threshold: 3
+      
+    liveness:
+      path: /health
+      port: 8088
+      initial_delay: 30
+      period: 30
+      timeout: 10
+      failure_threshold: 3
+
+  # Security configuration
+  security:
+    run_as_user: 1000
+    run_as_group: 1000
+    read_only_root_filesystem: true
+    allow_privilege_escalation: false
+    drop_capabilities: ["ALL"]
+    
+  # Platform support
+  platforms:
+    - linux/amd64
+    - linux/arm64
+    - darwin/amd64
+    - darwin/arm64
+    
+  # Dependencies
+  dependencies:
+    runtime:
+      - ca-certificates
+      - openssl
+    build:
+      - gcc
+      - musl-dev
+      - openssl-dev
+      
+  # Environment variables
+  environment:
+    - name: TTP_ARROW_PROCESSOR_PORT
+      description: "Arrow Flight server port"
+      default: "8816"
+    - name: TTP_ARROW_PROCESSOR_HEALTH_PORT
+      description: "Health check port"
+      default: "8088"
+    - name: TTP_ARROW_PROCESSOR_LOG_LEVEL
+      description: "Logging level"
+      default: "info"
+    - name: TTP_ARROW_PROCESSOR_THREADS
+      description: "Processing threads"
+      default: "4"
+    - name: TTP_ARROW_PROCESSOR_SOURCE_ENDPOINT
+      description: "Source endpoint"
+      default: "localhost:8815"
+      
+  # Volumes
+  volumes:
+    - name: data
+      path: /data
+      description: "Data storage volume"
+      size: 10Gi
+      access_modes: [ReadWriteOnce]
+    - name: config
+      path: /config
+      description: "Configuration volume"
+      size: 1Gi
+      access_modes: [ReadOnlyMany]
+    - name: temp
+      path: /tmp
+      description: "Temporary processing volume"
+      size: 5Gi
+      access_modes: [ReadWriteOnce]
+      
+  # Examples
+  examples:
+    - name: basic-ttp-processing
+      description: "Basic TTP event processing"
+      config:
+        source_endpoint: "localhost:8815"
+        event_types: [payment, path_payment_strict_receive, path_payment_strict_send]
+        processor_threads: 4
+        batch_size: 1000
+        
+    - name: high-throughput
+      description: "High-throughput processing configuration"
+      config:
+        source_endpoint: "localhost:8815"
+        event_types: [payment, path_payment_strict_receive, path_payment_strict_send]
+        processor_threads: 8  
+        batch_size: 2000
+        buffer_size: 20000
+        compute_threads: 8
+        
+    - name: filtered-assets
+      description: "Process only specific assets"
+      config:
+        source_endpoint: "localhost:8815"
+        event_types: [payment]
+        asset_filters:
+          - asset_code: "USDC"
+            asset_issuer: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+          - asset_code: ""  # Native XLM
+        amount_filters:
+          min_amount: "10.0"
+        processor_threads: 4
+        
+    - name: detailed-output
+      description: "Include detailed transaction information"
+      config:
+        source_endpoint: "localhost:8815"
+        event_types: [payment, path_payment_strict_receive, path_payment_strict_send, create_account]
+        include_raw_xdr: true
+        include_transaction_details: true
+        deduplicate_events: false
+        processor_threads: 6
