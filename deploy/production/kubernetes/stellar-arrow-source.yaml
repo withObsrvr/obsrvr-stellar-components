@@ -1,0 +1,204 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stellar-arrow-source
+  namespace: obsrvr-stellar
+  labels:
+    app: stellar-arrow-source
+    component: source
+    environment: production
+    version: "1.0.0"
+spec:
+  replicas: 3  # High availability
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: stellar-arrow-source
+  template:
+    metadata:
+      labels:
+        app: stellar-arrow-source
+        component: source
+        environment: production
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: stellar-arrow-source
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
+      containers:
+      - name: stellar-arrow-source
+        image: obsrvr/stellar-arrow-source:1.0.0
+        imagePullPolicy: Always
+        ports:
+        - name: flight
+          containerPort: 8815
+          protocol: TCP
+        - name: health
+          containerPort: 8088
+          protocol: TCP
+        - name: metrics
+          containerPort: 9090
+          protocol: TCP
+        env:
+        - name: CONFIG_FILE
+          value: "/etc/config/config.yaml"
+        - name: LOG_LEVEL
+          value: "info"
+        - name: STELLAR_NETWORK
+          value: "mainnet"
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: health
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: health
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /health/live
+            port: health
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+        volumeMounts:
+        - name: config
+          mountPath: /etc/config
+          readOnly: true
+        - name: tls-certs
+          mountPath: /etc/ssl/certs
+          readOnly: true
+        - name: tls-keys
+          mountPath: /etc/ssl/private
+          readOnly: true
+        - name: data
+          mountPath: /data
+        - name: tmp
+          mountPath: /tmp
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: config
+        configMap:
+          name: stellar-arrow-source-config
+      - name: tls-certs
+        secret:
+          secretName: stellar-source-tls-certs
+      - name: tls-keys
+        secret:
+          secretName: stellar-source-tls-keys
+          defaultMode: 0400
+      - name: data
+        persistentVolumeClaim:
+          claimName: stellar-source-data
+      - name: tmp
+        emptyDir:
+          sizeLimit: 1Gi
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - stellar-arrow-source
+              topologyKey: kubernetes.io/hostname
+      tolerations:
+      - key: "obsrvr.com/stellar-workload"
+        operator: "Equal"
+        value: "true"
+        effect: "NoSchedule"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stellar-arrow-source
+  namespace: obsrvr-stellar
+  labels:
+    app: stellar-arrow-source
+    component: source
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: nlb
+    service.beta.kubernetes.io/aws-load-balancer-internal: "true"
+spec:
+  type: LoadBalancer
+  ports:
+  - name: flight
+    port: 8815
+    targetPort: flight
+    protocol: TCP
+  - name: health
+    port: 8088
+    targetPort: health
+    protocol: TCP
+  selector:
+    app: stellar-arrow-source
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: stellar-arrow-source
+  namespace: obsrvr-stellar
+  labels:
+    app: stellar-arrow-source
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT_ID:role/stellar-source-role
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: stellar-source-data
+  namespace: obsrvr-stellar
+  labels:
+    app: stellar-arrow-source
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: gp3
+  resources:
+    requests:
+      storage: 100Gi

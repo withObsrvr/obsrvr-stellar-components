@@ -4,7 +4,7 @@ go 1.23
 
 require (
 	github.com/apache/arrow/go/v17 v17.0.0
-	github.com/stellar/go v0.0.0-20241201193725-e3081dbdc0b7
+	github.com/stellar/go v0.15.0
 	google.golang.org/grpc v1.65.0
 	github.com/prometheus/client_golang v1.19.1
 	github.com/gorilla/mux v1.8.1

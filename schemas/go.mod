@@ -4,7 +4,7 @@ go 1.23
 
 require (
 	github.com/apache/arrow/go/v17 v17.0.0
-	github.com/stellar/go v0.0.0-20241220000000-000000000000
+	github.com/stellar/go v0.15.0
 )
 
 require (

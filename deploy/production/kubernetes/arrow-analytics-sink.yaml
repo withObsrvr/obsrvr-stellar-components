@@ -1,0 +1,294 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: arrow-analytics-sink
+  namespace: obsrvr-stellar
+  labels:
+    app: arrow-analytics-sink
+    component: sink
+    environment: production
+    version: "1.0.0"
+spec:
+  replicas: 4  # High availability for analytics
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: arrow-analytics-sink
+  template:
+    metadata:
+      labels:
+        app: arrow-analytics-sink
+        component: sink
+        environment: production
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: arrow-analytics-sink
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
+      containers:
+      - name: arrow-analytics-sink
+        image: obsrvr/arrow-analytics-sink:1.0.0
+        imagePullPolicy: Always
+        ports:
+        - name: flight
+          containerPort: 8817
+          protocol: TCP
+        - name: websocket
+          containerPort: 8080
+          protocol: TCP
+        - name: rest-api
+          containerPort: 8081
+          protocol: TCP
+        - name: health
+          containerPort: 8088
+          protocol: TCP
+        - name: metrics
+          containerPort: 9090
+          protocol: TCP
+        env:
+        - name: CONFIG_FILE
+          value: "/etc/config/config.yaml"
+        - name: LOG_LEVEL
+          value: "info"
+        - name: SOURCE_ENDPOINT
+          value: "ttp-arrow-processor.obsrvr-stellar.svc.cluster.local:8816"
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2"
+          limits:
+            memory: "16Gi"
+            cpu: "8"
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: health
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: health
+          initialDelaySeconds: 15
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /health/live
+            port: health
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+        volumeMounts:
+        - name: config
+          mountPath: /etc/config
+          readOnly: true
+        - name: tls-certs
+          mountPath: /etc/ssl/certs
+          readOnly: true
+        - name: tls-keys
+          mountPath: /etc/ssl/private
+          readOnly: true
+        - name: data
+          mountPath: /data
+        - name: archive
+          mountPath: /data/archive
+        - name: tmp
+          mountPath: /tmp
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: config
+        configMap:
+          name: arrow-analytics-sink-config
+      - name: tls-certs
+        secret:
+          secretName: analytics-sink-tls-certs
+      - name: tls-keys
+        secret:
+          secretName: analytics-sink-tls-keys
+          defaultMode: 0400
+      - name: data
+        persistentVolumeClaim:
+          claimName: analytics-sink-data
+      - name: archive
+        persistentVolumeClaim:
+          claimName: analytics-sink-archive
+      - name: tmp
+        emptyDir:
+          sizeLimit: 5Gi
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - arrow-analytics-sink
+              topologyKey: kubernetes.io/hostname
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+              - key: node-type
+                operator: In
+                values:
+                - storage-optimized
+      tolerations:
+      - key: "obsrvr.com/stellar-workload"
+        operator: "Equal"
+        value: "true"
+        effect: "NoSchedule"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: arrow-analytics-sink
+  namespace: obsrvr-stellar
+  labels:
+    app: arrow-analytics-sink
+    component: sink
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: nlb
+    service.beta.kubernetes.io/aws-load-balancer-internal: "false"  # Public for WebSocket access
+spec:
+  type: LoadBalancer
+  ports:
+  - name: flight
+    port: 8817
+    targetPort: flight
+    protocol: TCP
+  - name: websocket
+    port: 8080
+    targetPort: websocket
+    protocol: TCP
+  - name: rest-api
+    port: 8081
+    targetPort: rest-api
+    protocol: TCP
+  - name: health
+    port: 8088
+    targetPort: health
+    protocol: TCP
+  selector:
+    app: arrow-analytics-sink
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: arrow-analytics-sink-internal
+  namespace: obsrvr-stellar
+  labels:
+    app: arrow-analytics-sink
+    component: sink
+    type: internal
+spec:
+  type: ClusterIP
+  ports:
+  - name: flight
+    port: 8817
+    targetPort: flight
+    protocol: TCP
+  - name: health
+    port: 8088
+    targetPort: health
+    protocol: TCP
+  selector:
+    app: arrow-analytics-sink
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: arrow-analytics-sink-hpa
+  namespace: obsrvr-stellar
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: arrow-analytics-sink
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: arrow-analytics-sink
+  namespace: obsrvr-stellar
+  labels:
+    app: arrow-analytics-sink
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT_ID:role/analytics-sink-role
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: analytics-sink-data
+  namespace: obsrvr-stellar
+  labels:
+    app: arrow-analytics-sink
+    type: data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: gp3
+  resources:
+    requests:
+      storage: 500Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: analytics-sink-archive
+  namespace: obsrvr-stellar
+  labels:
+    app: arrow-analytics-sink
+    type: archive
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: gp3
+  resources:
+    requests:
+      storage: 1Ti

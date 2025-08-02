@@ -1,0 +1,327 @@
+# Alertmanager configuration for obsrvr-stellar-components
+global:
+  smtp_smarthost: 'smtp.gmail.com:587'
+  smtp_from: 'alerts@obsrvr.com'
+  smtp_auth_username: 'alerts@obsrvr.com'
+  smtp_auth_password_file: '/etc/alertmanager/smtp_password'
+  pagerduty_url: 'https://events.pagerduty.com/v2/enqueue'
+  slack_api_url_file: '/etc/alertmanager/slack_url'
+  resolve_timeout: 5m
+
+# Routing configuration
+route:
+  group_by: ['alertname', 'cluster', 'region', 'service']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 12h
+  receiver: 'default'
+  routes:
+    # Critical alerts go to PagerDuty immediately
+    - match:
+        severity: critical
+      receiver: 'pagerduty-critical'
+      group_wait: 10s
+      repeat_interval: 1h
+      routes:
+        # Component down alerts
+        - match_re:
+            alertname: '.*Down'
+          receiver: 'pagerduty-component-down'
+          group_wait: 0s
+          repeat_interval: 30m
+        
+        # High error rate alerts
+        - match:
+            alert_type: error_rate
+          receiver: 'pagerduty-error-rate'
+          group_wait: 5s
+          repeat_interval: 2h
+        
+        # Circuit breaker alerts
+        - match:
+            alert_type: circuit_breaker
+          receiver: 'pagerduty-circuit-breaker'
+          group_wait: 0s
+          repeat_interval: 30m
+        
+        # Data integrity alerts
+        - match:
+            alert_type: data_integrity
+          receiver: 'pagerduty-data-integrity'
+          group_wait: 0s
+          repeat_interval: 15m
+    
+    # Warning alerts go to Slack
+    - match:
+        severity: warning
+      receiver: 'slack-warnings'
+      group_wait: 2m
+      repeat_interval: 6h
+      routes:
+        # Performance warnings
+        - match:
+            alert_type: latency
+          receiver: 'slack-performance'
+        
+        # Resource warnings
+        - match_re:
+            alert_type: '(memory|cpu|disk_space)'
+          receiver: 'slack-resources'
+        
+        # Kubernetes warnings
+        - match_re:
+            alert_type: '(pod_.*|deployment|hpa)'
+          receiver: 'slack-kubernetes'
+    
+    # Info alerts go to general channel
+    - match:
+        severity: info
+      receiver: 'slack-info'
+      group_wait: 10m
+      repeat_interval: 24h
+    
+    # Business metric alerts
+    - match:
+        alert_type: business_metric
+      receiver: 'business-metrics'
+      group_wait: 5m
+      repeat_interval: 12h
+    
+    # External service alerts
+    - match:
+        alert_type: external_service
+      receiver: 'external-services'
+      group_wait: 2m
+      repeat_interval: 4h
+    
+    # Maintenance mode - silence all alerts during maintenance
+    - match:
+        maintenance: 'true'
+      receiver: 'null'
+
+# Inhibition rules to reduce noise
+inhibit_rules:
+  # Inhibit warning alerts when critical alerts are firing
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'cluster', 'service', 'region']
+  
+  # Inhibit individual component alerts when the whole service is down
+  - source_match_re:
+      alertname: '.*Down'
+    target_match_re:
+      alertname: '(High.*|Low.*)'
+    equal: ['service', 'region']
+  
+  # Inhibit memory alerts when pod is crash looping
+  - source_match:
+      alertname: 'PodCrashLooping'
+    target_match:
+      alert_type: 'memory'
+    equal: ['pod', 'namespace']
+  
+  # Inhibit HPA alerts when deployment has issues
+  - source_match:
+      alert_type: 'deployment'
+    target_match:
+      alert_type: 'hpa'
+    equal: ['deployment', 'namespace']
+
+# Receivers configuration
+receivers:
+  # Default receiver
+  - name: 'default'
+    email_configs:
+      - to: 'sre-team@obsrvr.com'
+        subject: '[OBSRVR-STELLAR] {{ .GroupLabels.alertname }}'
+        body: |
+          {{ range .Alerts }}
+          Alert: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          Service: {{ .Labels.service }}
+          Region: {{ .Labels.region }}
+          Severity: {{ .Labels.severity }}
+          
+          {{ if .Annotations.runbook_url }}
+          Runbook: {{ .Annotations.runbook_url }}
+          {{ end }}
+          {{ end }}
+  
+  # PagerDuty receivers for critical alerts
+  - name: 'pagerduty-critical'
+    pagerduty_configs:
+      - service_key_file: '/etc/alertmanager/pagerduty_service_key'
+        description: '{{ .GroupLabels.alertname }} - {{ .GroupLabels.service }} in {{ .GroupLabels.region }}'
+        incident_key: '{{ .GroupLabels.alertname }}/{{ .GroupLabels.service }}/{{ .GroupLabels.region }}'
+        details:
+          firing: '{{ .Alerts.Firing | len }}'
+          resolved: '{{ .Alerts.Resolved | len }}'
+          service: '{{ .GroupLabels.service }}'
+          region: '{{ .GroupLabels.region }}'
+          cluster: '{{ .GroupLabels.cluster }}'
+        links:
+          - href: 'https://grafana.obsrvr.com/d/stellar-overview'
+            text: 'Stellar Overview Dashboard'
+          - href: '{{ .CommonAnnotations.runbook_url }}'
+            text: 'Runbook'
+  
+  - name: 'pagerduty-component-down'
+    pagerduty_configs:
+      - service_key_file: '/etc/alertmanager/pagerduty_service_key_high'
+        description: 'COMPONENT DOWN: {{ .GroupLabels.alertname }} - {{ .GroupLabels.service }}'
+        incident_key: '{{ .GroupLabels.alertname }}/{{ .GroupLabels.service }}'
+        severity: 'critical'
+        details:
+          component: '{{ .GroupLabels.component }}'
+          service: '{{ .GroupLabels.service }}'
+          region: '{{ .GroupLabels.region }}'
+          instances_affected: '{{ .Alerts.Firing | len }}'
+  
+  - name: 'pagerduty-error-rate'
+    pagerduty_configs:
+      - service_key_file: '/etc/alertmanager/pagerduty_service_key'
+        description: 'HIGH ERROR RATE: {{ .GroupLabels.service }} in {{ .GroupLabels.region }}'
+        incident_key: 'error-rate/{{ .GroupLabels.service }}/{{ .GroupLabels.region }}'
+        severity: 'error'
+  
+  - name: 'pagerduty-circuit-breaker'
+    pagerduty_configs:
+      - service_key_file: '/etc/alertmanager/pagerduty_service_key'
+        description: 'CIRCUIT BREAKER OPEN: {{ .GroupLabels.service }}'
+        incident_key: 'circuit-breaker/{{ .GroupLabels.service }}'
+        severity: 'warning'
+  
+  - name: 'pagerduty-data-integrity'
+    pagerduty_configs:
+      - service_key_file: '/etc/alertmanager/pagerduty_service_key_high'
+        description: 'DATA INTEGRITY ISSUE: {{ .GroupLabels.alertname }}'
+        incident_key: 'data-integrity/{{ .GroupLabels.alertname }}'
+        severity: 'critical'
+  
+  # Slack receivers for warnings and info
+  - name: 'slack-warnings'
+    slack_configs:
+      - api_url_file: '/etc/alertmanager/slack_url_warnings'
+        channel: '#stellar-alerts'
+        username: 'AlertManager'
+        icon_emoji: ':warning:'
+        title: 'Warning: {{ .GroupLabels.alertname }}'
+        text: |
+          {{ range .Alerts }}
+          *Alert:* {{ .Annotations.summary }}
+          *Service:* {{ .Labels.service }}
+          *Region:* {{ .Labels.region }}
+          *Description:* {{ .Annotations.description }}
+          {{ if .Annotations.runbook_url }}
+          *Runbook:* {{ .Annotations.runbook_url }}
+          {{ end }}
+          {{ end }}
+        actions:
+          - type: 'button'
+            text: 'View Dashboard'
+            url: 'https://grafana.obsrvr.com/d/stellar-overview'
+          - type: 'button'
+            text: 'Silence'
+            url: 'https://alertmanager.obsrvr.com/#/silences/new'
+  
+  - name: 'slack-performance'
+    slack_configs:
+      - api_url_file: '/etc/alertmanager/slack_url_performance'
+        channel: '#stellar-performance'
+        username: 'AlertManager'
+        icon_emoji: ':chart_with_downwards_trend:'
+        title: 'Performance Alert: {{ .GroupLabels.alertname }}'
+        color: 'warning'
+  
+  - name: 'slack-resources'
+    slack_configs:
+      - api_url_file: '/etc/alertmanager/slack_url_resources'
+        channel: '#stellar-resources'
+        username: 'AlertManager'
+        icon_emoji: ':computer:'
+        title: 'Resource Alert: {{ .GroupLabels.alertname }}'
+        color: 'warning'
+  
+  - name: 'slack-kubernetes'
+    slack_configs:
+      - api_url_file: '/etc/alertmanager/slack_url_kubernetes'
+        channel: '#kubernetes-alerts'
+        username: 'AlertManager'
+        icon_emoji: ':kubernetes:'
+        title: 'Kubernetes Alert: {{ .GroupLabels.alertname }}'
+        color: 'warning'
+  
+  - name: 'slack-info'
+    slack_configs:
+      - api_url_file: '/etc/alertmanager/slack_url_info'
+        channel: '#stellar-info'
+        username: 'AlertManager'
+        icon_emoji: ':information_source:'
+        title: 'Info: {{ .GroupLabels.alertname }}'
+        color: 'good'
+  
+  - name: 'business-metrics'
+    slack_configs:
+      - api_url_file: '/etc/alertmanager/slack_url_business'
+        channel: '#stellar-business'
+        username: 'AlertManager'
+        icon_emoji: ':chart:'
+        title: 'Business Metric Alert: {{ .GroupLabels.alertname }}'
+        color: '#439FE0'
+    email_configs:
+      - to: 'product-team@obsrvr.com'
+        subject: '[BUSINESS-METRIC] {{ .GroupLabels.alertname }}'
+        body: |
+          A business metric alert has been triggered:
+          
+          {{ range .Alerts }}
+          Alert: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          {{ end }}
+  
+  - name: 'external-services'
+    slack_configs:
+      - api_url_file: '/etc/alertmanager/slack_url_external'
+        channel: '#external-services'
+        username: 'AlertManager'
+        icon_emoji: ':globe_with_meridians:'
+        title: 'External Service Alert: {{ .GroupLabels.alertname }}'
+        color: 'danger'
+  
+  # Webhook receivers for custom integrations
+  - name: 'webhook-custom'
+    webhook_configs:
+      - url: 'https://hooks.obsrvr.com/alertmanager'
+        http_config:
+          bearer_token_file: '/etc/alertmanager/webhook_token'
+        send_resolved: true
+  
+  # Null receiver for silencing alerts
+  - name: 'null'
+
+# Templates for custom formatting
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+
+# Global configuration
+global:
+  # SMTP configuration
+  smtp_hello: 'alertmanager.obsrvr.com'
+  smtp_require_tls: true
+  
+  # HTTP configuration
+  http_config:
+    follow_redirects: true
+    proxy_url: ''
+  
+  # Resolve timeout
+  resolve_timeout: 5m
+  
+  # External URLs
+  external_url: 'https://alertmanager.obsrvr.com'
+
+# Feature flags
+features:
+  - classic_histograms
