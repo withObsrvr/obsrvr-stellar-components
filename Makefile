@@ -48,10 +48,58 @@ deps: ## Install development dependencies
 	@cd schemas && go mod download
 
 .PHONY: dev-setup
-dev-setup: deps ## Set up development environment
+dev-setup: ## Set up development environment
 	@echo "$(CYAN)Setting up development environment...$(RESET)"
-	@mkdir -p $(BUILD_DIR) $(DIST_DIR) data logs
-	@echo "Development environment ready"
+	@mkdir -p $(BUILD_DIR) $(DIST_DIR) test/data/{ledgers,output}/{parquet,json,csv}
+	@scripts/generate-test-data.sh
+
+##@ Testing
+
+.PHONY: test
+test: ## Run all tests
+	@echo "$(CYAN)Running all tests...$(RESET)"
+	@scripts/test-components.sh all
+
+.PHONY: test-unit
+test-unit: ## Run unit tests only
+	@echo "$(CYAN)Running unit tests...$(RESET)"
+	@scripts/test-components.sh schemas
+	@for component in $(COMPONENTS); do \
+		echo "Testing $$component..."; \
+		scripts/test-components.sh component $$component; \
+	done
+
+.PHONY: test-integration
+test-integration: ## Run integration tests
+	@echo "$(CYAN)Running integration tests...$(RESET)"
+	@scripts/test-components.sh integration
+
+.PHONY: test-docker
+test-docker: ## Run Docker integration tests
+	@echo "$(CYAN)Running Docker tests...$(RESET)"
+	@DOCKER_TESTS=true scripts/test-components.sh docker
+
+.PHONY: test-bench
+test-bench: ## Run performance benchmarks
+	@echo "$(CYAN)Running benchmarks...$(RESET)"
+	@scripts/test-components.sh bench
+
+.PHONY: test-coverage
+test-coverage: ## Generate test coverage reports
+	@echo "$(CYAN)Generating coverage reports...$(RESET)"
+	@COVERAGE=true scripts/test-components.sh all
+
+.PHONY: test-clean
+test-clean: ## Clean test artifacts
+	@echo "$(CYAN)Cleaning test artifacts...$(RESET)"
+	@rm -rf test/data/output/*
+	@find . -name "coverage.out" -delete
+	@find . -name "coverage.html" -delete
+
+##@ Validation
+
+.PHONY: validate
+validate: validate-bundle validate-pipelines ## Validate all configurations
 
 .PHONY: clean
 clean: ## Clean build artifacts
