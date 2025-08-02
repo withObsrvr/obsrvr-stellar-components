@@ -20,8 +20,11 @@ type StellarSourceService struct {
 	registry *schemas.SchemaRegistry
 
 	// Data sources
-	rpcClient    RPCClient
+	rpcClient      RPCClient
 	datalakeReader DataLakeReader
+
+	// XDR processing
+	xdrProcessor *XDRProcessor
 
 	// Processing state
 	mu             sync.RWMutex
@@ -30,8 +33,22 @@ type StellarSourceService struct {
 	recordsChannel chan arrow.Record
 	errorChannel   chan error
 
+	// Processing statistics
+	stats ProcessingStats
+	statsMu sync.RWMutex
+
 	// Shutdown
 	shutdownOnce sync.Once
+}
+
+// ProcessingStats tracks XDR processing statistics
+type ProcessingStats struct {
+	LedgersProcessed   uint64
+	LedgersRecovered   uint64
+	ValidationErrors   uint64
+	ProcessingErrors   uint64
+	StartTime          time.Time
+	LastProcessed      time.Time
 }
 
 // NewStellarSourceService creates a new source service
@@ -42,6 +59,8 @@ func NewStellarSourceService(config *Config, pool memory.Allocator, registry *sc
 		registry:       registry,
 		recordsChannel: make(chan arrow.Record, config.BufferSize),
 		errorChannel:   make(chan error, 10),
+		xdrProcessor:   NewXDRProcessor(config.NetworkPassphrase, true), // Enable strict validation
+		stats:          ProcessingStats{StartTime: time.Now()},
 	}
 
 	// Initialize the appropriate data source
@@ -192,13 +211,42 @@ func (s *StellarSourceService) processRPCStream(ctx context.Context) error {
 					continue
 				}
 
-				// Add ledger to builder
-				if err := builder.AddLedgerFromXDR(ledgerData, "rpc", s.config.RPCEndpoint); err != nil {
+				// Process ledger XDR with comprehensive validation
+				processedData, err := s.xdrProcessor.ProcessLedgerXDR(ledgerData, "rpc", s.config.RPCEndpoint)
+				if err != nil {
+					// Attempt recovery if strict validation fails
+					log.Warn().
+						Err(err).
+						Uint32("ledger", ledgerSeq).
+						Msg("Primary XDR processing failed, attempting recovery")
+					
+					processedData, err = s.xdrProcessor.RecoverFromXDRError(ledgerData, err)
+					if err != nil {
+						log.Error().
+							Err(err).
+							Uint32("ledger", ledgerSeq).
+							Msg("Failed to process ledger XDR even with recovery")
+						ledgersProcessed.WithLabelValues(s.config.SourceType, "error").Inc()
+						s.updateProcessingStats(false, true, false)
+						continue
+					} else {
+						s.updateProcessingStats(true, false, true) // Recovered
+						log.Info().
+							Uint32("ledger", ledgerSeq).
+							Msg("Successfully recovered from XDR processing error")
+					}
+				} else {
+					s.updateProcessingStats(true, false, false) // Clean processing
+				}
+
+				// Add processed data to builder
+				if err := builder.AddProcessedLedger(processedData); err != nil {
 					log.Error().
 						Err(err).
 						Uint32("ledger", ledgerSeq).
-						Msg("Failed to process ledger XDR")
+						Msg("Failed to add processed ledger to builder")
 					ledgersProcessed.WithLabelValues(s.config.SourceType, "error").Inc()
+					s.updateProcessingStats(false, true, false)
 					continue
 				}
 
@@ -319,14 +367,44 @@ func (s *StellarSourceService) dataLakeWorker(ctx context.Context, wg *sync.Wait
 			continue
 		}
 
-		// Add ledger to builder
+		// Process ledger XDR with comprehensive validation
 		sourceURL := s.datalakeReader.GetSourceURL(ledgerSeq)
-		if err := builder.AddLedgerFromXDR(ledgerData, "datalake", sourceURL); err != nil {
+		processedData, err := s.xdrProcessor.ProcessLedgerXDR(ledgerData, "datalake", sourceURL)
+		if err != nil {
+			// Attempt recovery if strict validation fails
+			log.Warn().
+				Err(err).
+				Uint32("ledger", ledgerSeq).
+				Msg("Primary XDR processing failed, attempting recovery")
+			
+			processedData, err = s.xdrProcessor.RecoverFromXDRError(ledgerData, err)
+			if err != nil {
+				log.Error().
+					Err(err).
+					Uint32("ledger", ledgerSeq).
+					Msg("Failed to process ledger XDR even with recovery")
+				ledgersProcessed.WithLabelValues(s.config.SourceType, "error").Inc()
+				s.updateProcessingStats(false, true, false)
+				timer.ObserveDuration()
+				continue
+			} else {
+				s.updateProcessingStats(true, false, true) // Recovered
+				log.Info().
+					Uint32("ledger", ledgerSeq).
+					Msg("Successfully recovered from XDR processing error")
+			}
+		} else {
+			s.updateProcessingStats(true, false, false) // Clean processing
+		}
+
+		// Add processed data to builder
+		if err := builder.AddProcessedLedger(processedData); err != nil {
 			log.Error().
 				Err(err).
 				Uint32("ledger", ledgerSeq).
-				Msg("Failed to process ledger XDR")
+				Msg("Failed to add processed ledger to builder")
 			ledgersProcessed.WithLabelValues(s.config.SourceType, "error").Inc()
+			s.updateProcessingStats(false, true, false)
 			timer.ObserveDuration()
 			continue
 		}
@@ -390,4 +468,30 @@ func (s *StellarSourceService) updateCurrentLedger(ledger uint32) {
 	s.mu.Unlock()
 	
 	currentLedger.WithLabelValues(s.config.SourceType).Set(float64(ledger))
+}
+
+// updateProcessingStats updates XDR processing statistics
+func (s *StellarSourceService) updateProcessingStats(processed, hasError, recovered bool) {
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+	
+	if processed {
+		s.stats.LedgersProcessed++
+		s.stats.LastProcessed = time.Now()
+	}
+	
+	if hasError {
+		s.stats.ProcessingErrors++
+	}
+	
+	if recovered {
+		s.stats.LedgersRecovered++
+	}
+}
+
+// GetProcessingStats returns current processing statistics
+func (s *StellarSourceService) GetProcessingStats() ProcessingStats {
+	s.statsMu.RLock()
+	defer s.statsMu.RUnlock()
+	return s.stats
 }

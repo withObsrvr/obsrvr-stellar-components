@@ -33,7 +33,6 @@
           
           # Apache Arrow dependencies
           arrow-cpp
-          apache-arrow
           
           # Build tools
           gcc
@@ -122,7 +121,7 @@
               go
             ];
             
-            buildInputs = [
+            buildInputs = with pkgs; [
               arrow-cpp
               openssl
               libsodium

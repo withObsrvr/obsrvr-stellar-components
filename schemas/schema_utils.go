@@ -81,6 +81,74 @@ func (b *StellarLedgerBuilder) AddLedger(
 	return nil
 }
 
+// ProcessedLedgerData represents validated and processed ledger data from XDRProcessor
+type ProcessedLedgerData struct {
+	// Core ledger identification
+	Sequence     uint32
+	Hash         []byte
+	PreviousHash []byte
+	CloseTime    time.Time
+
+	// Network information
+	ProtocolVersion uint32
+	NetworkID       []byte
+
+	// Transaction statistics
+	TransactionCount          uint32
+	SuccessfulTransactionCount uint32
+	FailedTransactionCount     uint32
+	OperationCount            uint32
+
+	// Fee information
+	TotalFees   int64
+	FeePool     int64
+	BaseFee     uint32
+	BaseReserve uint32
+
+	// Ledger capacity
+	MaxTxSetSize uint32
+
+	// Source metadata
+	SourceType string
+	SourceURL  string
+	RawXDR     []byte
+
+	// Validation metadata
+	ValidationTime time.Time
+	NetworkValid   bool
+	StructureValid bool
+}
+
+// AddProcessedLedger adds a ledger record from pre-processed and validated data
+func (b *StellarLedgerBuilder) AddProcessedLedger(data *ProcessedLedgerData) error {
+	// Validate the processed data structure
+	if data == nil {
+		return fmt.Errorf("processed ledger data is nil")
+	}
+
+	// Use the validated data directly
+	return b.AddLedger(
+		data.Sequence,
+		data.Hash,
+		data.PreviousHash,
+		data.CloseTime,
+		data.ProtocolVersion,
+		data.NetworkID,
+		data.TransactionCount,
+		data.SuccessfulTransactionCount,
+		data.FailedTransactionCount,
+		data.OperationCount,
+		data.TotalFees,
+		data.FeePool,
+		data.BaseFee,
+		data.BaseReserve,
+		data.MaxTxSetSize,
+		data.RawXDR,
+		data.SourceType,
+		data.SourceURL,
+	)
+}
+
 // AddLedgerFromXDR adds a ledger record by parsing XDR data
 func (b *StellarLedgerBuilder) AddLedgerFromXDR(
 	xdrData []byte,
