@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -623,5 +624,3 @@ func contains(s, substr string) bool {
 		 strings.Contains(s, substr))))
 }
 
-// Import strings package
-import "strings"

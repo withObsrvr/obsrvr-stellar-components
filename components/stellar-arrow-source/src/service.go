@@ -8,6 +8,7 @@ import (
 
 	"github.com/apache/arrow/go/v17/arrow"
 	"github.com/apache/arrow/go/v17/arrow/memory"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog/log"
 
 	"github.com/withobsrvr/obsrvr-stellar-components/schemas"
@@ -20,11 +21,9 @@ type StellarSourceService struct {
 	registry *schemas.SchemaRegistry
 
 	// Data sources
-	rpcClient      RPCClient
+	backendClient  *StellarBackendClient
 	datalakeReader DataLakeReader
-
-	// XDR processing
-	xdrProcessor *XDRProcessor
+	xdrProcessor   *XDRProcessor
 
 	// Processing state
 	mu             sync.RWMutex
@@ -59,25 +58,45 @@ func NewStellarSourceService(config *Config, pool memory.Allocator, registry *sc
 		registry:       registry,
 		recordsChannel: make(chan arrow.Record, config.BufferSize),
 		errorChannel:   make(chan error, 10),
-		xdrProcessor:   NewXDRProcessor(config.NetworkPassphrase, true), // Enable strict validation
 		stats:          ProcessingStats{StartTime: time.Now()},
+		xdrProcessor:   NewXDRProcessor(config.NetworkPassphrase, true), // Enable strict validation
 	}
 
 	// Initialize the appropriate data source
 	switch config.SourceType {
-	case "rpc":
-		rpcClient, err := NewRPCClient(config)
+	case "rpc", "archive", "captive", "storage":
+		backendClient, err := NewStellarBackendClient(config)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create RPC client: %w", err)
+			return nil, fmt.Errorf("failed to create backend client: %w", err)
 		}
-		service.rpcClient = rpcClient
+		service.backendClient = backendClient
 
 	case "datalake":
-		datalakeReader, err := NewDataLakeReader(config)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create data lake reader: %w", err)
+		// Try ttp-processor-demo compatible datastore first
+		if config.LedgersPerFile > 1 && (config.StorageBackend == "gcs" || config.StorageBackend == "s3") {
+			log.Info().Msg("Using ttp-processor-demo compatible datastore reader")
+			datastoreReader, err := NewStellarDatastoreReader(config)
+			if err != nil {
+				log.Warn().Err(err).Msg("Failed to create datastore reader, falling back to basic datalake reader")
+				// Fall back to basic datalake reader
+				datalakeReader, err := NewDataLakeReader(config)
+				if err != nil {
+					return nil, fmt.Errorf("failed to create data lake reader: %w", err)
+				}
+				service.datalakeReader = datalakeReader
+			} else {
+				// Wrap datastore reader to implement DataLakeReader interface
+				service.datalakeReader = &DatastoreReaderWrapper{datastoreReader}
+			}
+		} else {
+			// Use basic datalake reader for filesystem or single-ledger-per-file setups
+			log.Info().Msg("Using basic datalake reader")
+			datalakeReader, err := NewDataLakeReader(config)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create data lake reader: %w", err)
+			}
+			service.datalakeReader = datalakeReader
 		}
-		service.datalakeReader = datalakeReader
 
 	default:
 		return nil, fmt.Errorf("unsupported source type: %s", config.SourceType)
@@ -105,8 +124,8 @@ func (s *StellarSourceService) Start(ctx context.Context) error {
 
 	// Start processing based on source type
 	switch s.config.SourceType {
-	case "rpc":
-		return s.processRPCStream(ctx)
+	case "rpc", "archive", "captive", "storage":
+		return s.processBackendStream(ctx)
 	case "datalake":
 		return s.processDataLake(ctx)
 	default:
@@ -128,8 +147,8 @@ func (s *StellarSourceService) Stop(ctx context.Context) {
 		close(s.errorChannel)
 
 		// Clean up data sources
-		if s.rpcClient != nil {
-			s.rpcClient.Close()
+		if s.backendClient != nil {
+			s.backendClient.Close()
 		}
 		if s.datalakeReader != nil {
 			s.datalakeReader.Close()
@@ -163,137 +182,167 @@ func (s *StellarSourceService) IsRunning() bool {
 	return s.isRunning
 }
 
-// processRPCStream processes ledgers from RPC endpoints
-func (s *StellarSourceService) processRPCStream(ctx context.Context) error {
-	if s.rpcClient == nil {
-		return fmt.Errorf("RPC client not initialized")
+// processBackendStream processes ledgers using the new backend client
+func (s *StellarSourceService) processBackendStream(ctx context.Context) error {
+	if s.backendClient == nil {
+		return fmt.Errorf("backend client not initialized")
 	}
 
-	log.Info().Msg("Starting RPC stream processing")
+	log.Info().
+		Str("backend_type", s.config.BackendType).
+		Msg("Starting backend stream processing")
 
-	// Create ledger builder
-	builder := schemas.NewStellarLedgerBuilder(s.pool)
-	defer builder.Release()
+	// Validate configuration
+	if err := s.backendClient.ValidateConfiguration(); err != nil {
+		return fmt.Errorf("invalid backend configuration: %w", err)
+	}
 
-	var ledgerSeq uint32 = s.config.StartLedger
-	if ledgerSeq == 0 {
-		// Get latest ledger if starting from 0
-		latest, err := s.rpcClient.GetLatestLedger(ctx)
+	// Perform health check
+	if err := s.backendClient.HealthCheck(ctx); err != nil {
+		log.Warn().Err(err).Msg("Backend health check failed, continuing anyway")
+	}
+
+	var startSeq uint32 = s.config.StartLedger
+	var endSeq uint32 = s.config.EndLedger
+
+	// Get latest ledger if starting from 0
+	if startSeq == 0 {
+		latest, err := s.backendClient.GetLatestLedgerSequence(ctx)
 		if err != nil {
-			return fmt.Errorf("failed to get latest ledger: %w", err)
+			log.Warn().Err(err).Msg("Failed to get latest ledger, starting from 1")
+			startSeq = 1
+		} else {
+			startSeq = latest
+			log.Info().Uint32("ledger", startSeq).Msg("Starting from latest ledger")
 		}
-		ledgerSeq = latest
-		log.Info().Uint32("ledger", ledgerSeq).Msg("Starting from latest ledger")
 	}
+
+	// For streaming mode, process indefinitely
+	if endSeq == 0 {
+		return s.processIndefiniteStream(ctx, startSeq)
+	}
+
+	// For bounded mode, process the specified range
+	return s.processBoundedRange(ctx, startSeq, endSeq)
+}
+
+// processIndefiniteStream processes ledgers indefinitely (real-time mode)
+func (s *StellarSourceService) processIndefiniteStream(ctx context.Context, startSeq uint32) error {
+	log.Info().Uint32("start_seq", startSeq).Msg("Starting indefinite stream processing")
 
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
-	batchCount := 0
+	currentSeq := startSeq
 
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			timer := prometheus.NewTimer(processingDuration.WithLabelValues(s.config.SourceType, "batch"))
-			
-			// Process a batch of ledgers
-			batchProcessed := 0
-			for i := 0; i < s.config.BatchSize && (s.config.EndLedger == 0 || ledgerSeq <= s.config.EndLedger); i++ {
-				ledgerData, err := s.rpcClient.GetLedger(ctx, ledgerSeq)
-				if err != nil {
-					log.Error().
-						Err(err).
-						Uint32("ledger", ledgerSeq).
-						Msg("Failed to get ledger from RPC")
-					ledgersProcessed.WithLabelValues(s.config.SourceType, "error").Inc()
-					continue
-				}
+			// Process individual ledgers in real-time mode
+			record, err := s.backendClient.GetLedgerRecord(ctx, currentSeq)
+			if err != nil {
+				log.Error().
+					Err(err).
+					Uint32("sequence", currentSeq).
+					Msg("Failed to get ledger record")
+				ledgersProcessed.WithLabelValues(s.config.SourceType, "error").Inc()
+				// Skip to next ledger
+				currentSeq++
+				continue
+			}
 
-				// Process ledger XDR with comprehensive validation
-				processedData, err := s.xdrProcessor.ProcessLedgerXDR(ledgerData, "rpc", s.config.RPCEndpoint)
-				if err != nil {
-					// Attempt recovery if strict validation fails
-					log.Warn().
-						Err(err).
-						Uint32("ledger", ledgerSeq).
-						Msg("Primary XDR processing failed, attempting recovery")
-					
-					processedData, err = s.xdrProcessor.RecoverFromXDRError(ledgerData, err)
-					if err != nil {
-						log.Error().
-							Err(err).
-							Uint32("ledger", ledgerSeq).
-							Msg("Failed to process ledger XDR even with recovery")
-						ledgersProcessed.WithLabelValues(s.config.SourceType, "error").Inc()
-						s.updateProcessingStats(false, true, false)
-						continue
-					} else {
-						s.updateProcessingStats(true, false, true) // Recovered
-						log.Info().
-							Uint32("ledger", ledgerSeq).
-							Msg("Successfully recovered from XDR processing error")
-					}
-				} else {
-					s.updateProcessingStats(true, false, false) // Clean processing
-				}
-
-				// Add processed data to builder
-				if err := builder.AddProcessedLedger(processedData); err != nil {
-					log.Error().
-						Err(err).
-						Uint32("ledger", ledgerSeq).
-						Msg("Failed to add processed ledger to builder")
-					ledgersProcessed.WithLabelValues(s.config.SourceType, "error").Inc()
-					s.updateProcessingStats(false, true, false)
-					continue
-				}
-
-				s.updateCurrentLedger(ledgerSeq)
+			// Send record
+			select {
+			case s.recordsChannel <- record:
+				batchesGenerated.WithLabelValues(s.config.SourceType).Inc()
 				ledgersProcessed.WithLabelValues(s.config.SourceType, "success").Inc()
-				batchProcessed++
-				ledgerSeq++
-			}
+				s.updateCurrentLedger(currentSeq)
+				s.updateProcessingStats(true, false, false)
 
-			timer.ObserveDuration()
+				log.Debug().
+					Uint32("sequence", currentSeq).
+					Int64("num_rows", record.NumRows()).
+					Msg("Sent ledger record")
 
-			// Create and send record if we processed any ledgers
-			if batchProcessed > 0 {
-				record := builder.NewRecord()
-				
-				select {
-				case s.recordsChannel <- record:
-					batchesGenerated.WithLabelValues(s.config.SourceType).Inc()
-					batchCount++
-					log.Debug().
-						Int("batch_count", batchCount).
-						Int("ledgers_in_batch", batchProcessed).
-						Uint32("current_ledger", ledgerSeq-1).
-						Msg("Generated Arrow batch")
-				case <-ctx.Done():
-					record.Release()
-					return ctx.Err()
-				default:
-					// Channel full, log warning
-					log.Warn().Msg("Records channel full, dropping batch")
-					record.Release()
-				}
-
-				// Create new builder for next batch
-				builder.Release()
-				builder = schemas.NewStellarLedgerBuilder(s.pool)
-			}
-
-			// Check if we've reached the end ledger
-			if s.config.EndLedger != 0 && ledgerSeq > s.config.EndLedger {
-				log.Info().
-					Uint32("end_ledger", s.config.EndLedger).
-					Msg("Reached end ledger, stopping")
-				return nil
+				currentSeq++
+			case <-ctx.Done():
+				record.Release()
+				return ctx.Err()
+			default:
+				log.Warn().Msg("Records channel full, dropping record")
+				record.Release()
 			}
 		}
 	}
+}
+
+// processBoundedRange processes a specific range of ledgers
+func (s *StellarSourceService) processBoundedRange(ctx context.Context, startSeq, endSeq uint32) error {
+	log.Info().
+		Uint32("start_seq", startSeq).
+		Uint32("end_seq", endSeq).
+		Msg("Starting bounded range processing")
+
+	// Use streaming for better performance with large ranges
+	recordChan, err := s.backendClient.StreamLedgerRecords(ctx, startSeq, endSeq)
+	if err != nil {
+		return fmt.Errorf("failed to start ledger record stream: %w", err)
+	}
+
+	batchCount := 0
+
+	for recordResult := range recordChan {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		if recordResult.Error != nil {
+			log.Error().
+				Err(recordResult.Error).
+				Uint32("start_seq", recordResult.StartSeq).
+				Uint32("end_seq", recordResult.EndSeq).
+				Msg("Error in ledger record stream")
+			ledgersProcessed.WithLabelValues(s.config.SourceType, "error").Inc()
+			s.updateProcessingStats(false, true, false)
+			continue
+		}
+
+		// Send record
+		select {
+		case s.recordsChannel <- recordResult.Record:
+			batchesGenerated.WithLabelValues(s.config.SourceType).Inc()
+			ledgersProcessed.WithLabelValues(s.config.SourceType, "success").Inc()
+			s.updateCurrentLedger(recordResult.EndSeq)
+			s.updateProcessingStats(true, false, false)
+
+			batchCount++
+			log.Debug().
+				Int("batch_count", batchCount).
+				Uint32("start_seq", recordResult.StartSeq).
+				Uint32("end_seq", recordResult.EndSeq).
+				Int64("num_rows", recordResult.Record.NumRows()).
+				Msg("Sent ledger record batch")
+
+		case <-ctx.Done():
+			recordResult.Record.Release()
+			return ctx.Err()
+		default:
+			log.Warn().Msg("Records channel full, dropping record batch")
+			recordResult.Record.Release()
+		}
+	}
+
+	log.Info().
+		Int("total_batches", batchCount).
+		Uint32("start_seq", startSeq).
+		Uint32("end_seq", endSeq).
+		Msg("Bounded range processing completed")
+
+	return nil
 }
 
 // processDataLake processes ledgers from data lake storage

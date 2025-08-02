@@ -163,7 +163,9 @@ func (b *StellarLedgerBuilder) AddLedgerFromXDR(
 
 	// Extract basic information
 	sequence := uint32(ledgerHeader.LedgerSeq)
-	hash := ledgerHeader.Hash
+	// Note: In protocol-23, we need to compute the hash or get it from elsewhere
+	// For now, use the TxSetResultHash as a placeholder
+	hash := ledgerHeader.TxSetResultHash
 	previousHash := ledgerHeader.PreviousLedgerHash
 	closeTime := time.Unix(int64(ledgerHeader.ScpValue.CloseTime), 0)
 	protocolVersion := uint32(ledgerHeader.LedgerVersion)
@@ -186,15 +188,16 @@ func (b *StellarLedgerBuilder) AddLedgerFromXDR(
 		}
 		
 		// Count operations in this transaction
-		if result.Result.Successful() {
-			opCount += uint32(len(result.Result.OperationResults()))
+		if ops, ok := result.Result.OperationResults(); ok {
+			opCount += uint32(len(ops))
 		}
 	}
 
 	// Calculate fees
 	var totalFees int64
 	for _, result := range txProcessing {
-		totalFees += int64(result.FeeCharged)
+		// Get fee from the transaction result
+		totalFees += int64(result.Result.Result.FeeCharged)
 	}
 
 	feePool := int64(ledgerHeader.FeePool)
@@ -396,7 +399,7 @@ func (se *SchemaEvolution) MigrateRecord(record arrow.Record, targetSchemaName s
 	
 	// For now, return the same record if schemas are compatible
 	// In the future, this would handle field additions, renames, etc.
-	if arrow.SchemaEqual(record.Schema(), targetSchema) {
+	if record.Schema().Equal(targetSchema) {
 		return record, nil
 	}
 

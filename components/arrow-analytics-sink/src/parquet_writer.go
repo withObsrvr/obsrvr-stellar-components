@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 	"github.com/apache/arrow/go/v17/arrow"
 	"github.com/apache/arrow/go/v17/arrow/array"
 	"github.com/apache/arrow/go/v17/arrow/memory"
+	"github.com/apache/arrow/go/v17/parquet"
+	"github.com/apache/arrow/go/v17/parquet/compress"
 	"github.com/apache/arrow/go/v17/parquet/pqarrow"
 	"github.com/rs/zerolog/log"
 
@@ -170,26 +173,26 @@ func (w *ParquetWriter) writeArrowRecordToParquet(record arrow.Record, filepath 
 	defer file.Close()
 
 	// Configure Parquet writer properties with compression
-	props := pqarrow.NewWriterProperties()
-	
-	// Set compression based on configuration
+	var compressionCodec compress.Compression
 	switch w.config.ParquetCompression {
 	case "snappy":
-		props = props.WithCompression(pqarrow.Compressions.Snappy)
+		compressionCodec = compress.Codecs.Snappy
 	case "gzip":
-		props = props.WithCompression(pqarrow.Compressions.Gzip)  
+		compressionCodec = compress.Codecs.Gzip  
 	case "lz4":
-		props = props.WithCompression(pqarrow.Compressions.Lz4)
+		compressionCodec = compress.Codecs.Lz4
 	case "zstd":
-		props = props.WithCompression(pqarrow.Compressions.Zstd)
+		compressionCodec = compress.Codecs.Zstd
 	case "brotli":
-		props = props.WithCompression(pqarrow.Compressions.Brotli)
+		compressionCodec = compress.Codecs.Brotli
 	default:
-		props = props.WithCompression(pqarrow.Compressions.Uncompressed)
+		compressionCodec = compress.Codecs.Uncompressed
 	}
+	
+	props := parquet.NewWriterProperties(parquet.WithCompression(compressionCodec))
 
 	// Create Arrow properties for the writer
-	arrowProps := pqarrow.NewArrowWriterProperties()
+	arrowProps := pqarrow.DefaultWriterProps()
 
 	// Create table from record for writing
 	table := array.NewTableFromRecords(record.Schema(), []arrow.Record{record})
@@ -235,8 +238,19 @@ func (w *ParquetWriter) GetStats() map[string]interface{} {
 
 // ValidateParquetFile validates that a Parquet file can be read correctly
 func ValidateParquetFile(filepath string, pool memory.Allocator) error {
+	// Open the file for reading
+	file, err := os.Open(filepath)
+	if err != nil {
+		return fmt.Errorf("failed to open file: %w", err)
+	}
+	defer file.Close()
+	
+	// Create reader properties
+	readerProps := parquet.NewReaderProperties(pool)
+	arrowReadProps := pqarrow.ArrowReadProperties{}
+	
 	// Read the entire Parquet file as a table
-	table, err := pqarrow.ReadTable(filepath, pool, pqarrow.ArrowReadProperties{})
+	table, err := pqarrow.ReadTable(context.Background(), file, readerProps, arrowReadProps, pool)
 	if err != nil {
 		return fmt.Errorf("failed to read Parquet file: %w", err)
 	}

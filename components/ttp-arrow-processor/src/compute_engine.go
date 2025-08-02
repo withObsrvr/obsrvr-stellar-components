@@ -11,14 +11,11 @@ import (
 	"github.com/apache/arrow/go/v17/arrow/compute"
 	"github.com/apache/arrow/go/v17/arrow/memory"
 	"github.com/rs/zerolog/log"
-
-	"github.com/withobsrvr/obsrvr-stellar-components/schemas"
 )
 
 // ComputeEngine provides vectorized processing capabilities using Arrow Compute
 type ComputeEngine struct {
 	pool            memory.Allocator
-	computeContext  compute.Context
 	
 	// Pre-compiled expressions for common operations
 	compiledFilters   map[string]compute.Expression
@@ -97,14 +94,8 @@ const (
 
 // NewComputeEngine creates a new Arrow compute engine
 func NewComputeEngine(pool memory.Allocator, config *ComputeConfig) *ComputeEngine {
-	// Initialize compute context with configuration
-	computeCtx := &compute.Context{
-		Allocator: pool,
-	}
-	
 	engine := &ComputeEngine{
 		pool:              pool,
-		computeContext:    *computeCtx,
 		compiledFilters:   make(map[string]compute.Expression),
 		compiledAggregates: make(map[string]compute.Expression),
 		compiledProjections: make(map[string]compute.Expression),
@@ -167,7 +158,7 @@ func (ce *ComputeEngine) compileFilter(name, expression string) {
 		Msg("Compiled filter expression")
 	
 	// Store placeholder - real implementation would parse and compile the expression
-	ce.compiledFilters[name] = compute.Expression{}
+	ce.compiledFilters[name] = compute.NewLiteral(true)
 }
 
 // compileAggregate compiles an aggregate expression
@@ -177,7 +168,7 @@ func (ce *ComputeEngine) compileAggregate(name, expression string) {
 		Str("expression", expression).
 		Msg("Compiled aggregate expression")
 	
-	ce.compiledAggregates[name] = compute.Expression{}
+	ce.compiledAggregates[name] = compute.NewLiteral(0)
 }
 
 // compileProjection compiles a projection expression
@@ -187,7 +178,7 @@ func (ce *ComputeEngine) compileProjection(name, expression string) {
 		Str("expression", expression).
 		Msg("Compiled projection expression")
 	
-	ce.compiledProjections[name] = compute.Expression{}
+	ce.compiledProjections[name] = compute.NewFieldRef("*")
 }
 
 // ExecuteVectorizedFilter applies vectorized filtering to TTP events

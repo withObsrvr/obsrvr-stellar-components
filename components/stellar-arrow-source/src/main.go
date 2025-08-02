@@ -34,8 +34,15 @@ const (
 type Config struct {
 	// Source configuration
 	SourceType       string `mapstructure:"source_type"`
+	BackendType      string `mapstructure:"backend_type"`
 	RPCEndpoint      string `mapstructure:"rpc_endpoint"`
 	NetworkPassphrase string `mapstructure:"network_passphrase"`
+
+	// Archive backend configuration
+	ArchiveURL string `mapstructure:"archive_url"`
+
+	// Captive core configuration
+	CoreBinaryPath string `mapstructure:"core_binary_path"`
 
 	// Data lake configuration
 	StorageBackend string `mapstructure:"storage_backend"`
@@ -43,6 +50,10 @@ type Config struct {
 	AWSRegion      string `mapstructure:"aws_region"`
 	GCPProject     string `mapstructure:"gcp_project"`
 	StoragePath    string `mapstructure:"storage_path"`
+	
+	// Datastore schema configuration (ttp-processor-demo compatibility)
+	LedgersPerFile    uint32 `mapstructure:"ledgers_per_file"`
+	FilesPerPartition uint32 `mapstructure:"files_per_partition"`
 
 	// Processing configuration
 	StartLedger       uint32 `mapstructure:"start_ledger"`
@@ -68,7 +79,10 @@ type Config struct {
 func defaultConfig() *Config {
 	return &Config{
 		SourceType:        "rpc",
+		BackendType:       "rpc",
 		NetworkPassphrase: "Test SDF Network ; September 2015",
+		RPCEndpoint:       "https://soroban-testnet.stellar.org",
+		ArchiveURL:        "https://history.stellar.org/prd/core-live/core_live_001",
 		StartLedger:       0,
 		EndLedger:         0,
 		BatchSize:         1000,
@@ -81,7 +95,10 @@ func defaultConfig() *Config {
 		MetricsEnabled:    true,
 		LogLevel:          "info",
 		StoragePath:       "./data/ledgers",
+		StorageBackend:    "filesystem",
 		AWSRegion:         "us-west-2",
+		LedgersPerFile:    64,  // Match ttp-processor-demo default
+		FilesPerPartition: 10,  // Match ttp-processor-demo default
 	}
 }
 
@@ -142,7 +159,7 @@ func main() {
 
 	// Create memory allocator
 	pool := memory.NewGoAllocator()
-	defer pool.Destroy()
+	// Note: GoAllocator does not require explicit cleanup in v17
 
 	// Create schema registry
 	registry := schemas.NewSchemaRegistry()
@@ -251,14 +268,14 @@ func setupLogging(level string) {
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339})
 }
 
-func startFlightServer(server flight.Server, port int) error {
+func startFlightServer(flightServer *FlightServer, port int) error {
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return fmt.Errorf("failed to listen on port %d: %w", port, err)
 	}
 
 	grpcServer := grpc.NewServer()
-	flight.RegisterFlightServiceServer(grpcServer, server)
+	flight.RegisterFlightServiceServer(grpcServer, flightServer)
 
 	// Add health check service
 	healthServer := health.NewServer()

@@ -2,6 +2,7 @@ package schemas
 
 import (
 	"github.com/apache/arrow/go/v17/arrow"
+	"github.com/apache/arrow/go/v17/arrow/array"
 	"github.com/apache/arrow/go/v17/arrow/memory"
 )
 
@@ -22,12 +23,12 @@ var StellarLedgerSchema = arrow.NewSchema(
 				"description": "Ledger sequence number (primary key)",
 				"index":       "true",
 			})},
-		{Name: "hash", Type: arrow.FixedSizeBinaryType{ByteWidth: 32}, Nullable: false,
+		{Name: "hash", Type: &arrow.FixedSizeBinaryType{ByteWidth: 32}, Nullable: false,
 			Metadata: arrow.MetadataFrom(map[string]string{
 				"description": "Ledger hash (32 bytes)",
 				"encoding":    "hex",
 			})},
-		{Name: "previous_hash", Type: arrow.FixedSizeBinaryType{ByteWidth: 32}, Nullable: false,
+		{Name: "previous_hash", Type: &arrow.FixedSizeBinaryType{ByteWidth: 32}, Nullable: false,
 			Metadata: arrow.MetadataFrom(map[string]string{
 				"description": "Previous ledger hash (32 bytes)",
 				"encoding":    "hex",
@@ -51,7 +52,7 @@ var StellarLedgerSchema = arrow.NewSchema(
 			Metadata: arrow.MetadataFrom(map[string]string{
 				"description": "Stellar protocol version",
 			})},
-		{Name: "network_id", Type: arrow.FixedSizeBinaryType{ByteWidth: 32}, Nullable: false,
+		{Name: "network_id", Type: &arrow.FixedSizeBinaryType{ByteWidth: 32}, Nullable: false,
 			Metadata: arrow.MetadataFrom(map[string]string{
 				"description": "Network identifier hash",
 				"encoding":    "hex",
@@ -128,12 +129,13 @@ var StellarLedgerSchema = arrow.NewSchema(
 				"description": "Schema version for this record",
 			})},
 	},
-	arrow.MetadataFrom(map[string]string{
-		"version":     StellarLedgerSchemaVersion,
-		"description": "Stellar ledger data optimized for analytics",
-		"primary_key": "sequence",
-		"partition_key": "close_time",
-	}),
+	func() *arrow.Metadata {
+		m := arrow.NewMetadata(
+			[]string{"version", "description", "primary_key", "partition_key"},
+			[]string{StellarLedgerSchemaVersion, "Stellar ledger data optimized for analytics", "sequence", "close_time"},
+		)
+		return &m
+	}(),
 )
 
 // TTPEventSchema defines the Arrow schema for Token Transfer Protocol events
@@ -151,7 +153,7 @@ var TTPEventSchema = arrow.NewSchema(
 				"description": "Source ledger sequence",
 				"index":       "true",
 			})},
-		{Name: "transaction_hash", Type: arrow.FixedSizeBinaryType{ByteWidth: 32}, Nullable: false,
+		{Name: "transaction_hash", Type: &arrow.FixedSizeBinaryType{ByteWidth: 32}, Nullable: false,
 			Metadata: arrow.MetadataFrom(map[string]string{
 				"description": "Transaction hash (32 bytes)",
 				"encoding":    "hex",
@@ -281,13 +283,13 @@ var TTPEventSchema = arrow.NewSchema(
 				"description": "Schema version for this record",
 			})},
 	},
-	arrow.MetadataFrom(map[string]string{
-		"version":       TTPEventSchemaVersion,
-		"description":   "Token Transfer Protocol events optimized for analytics",
-		"primary_key":   "event_id",
-		"partition_key": "timestamp",
-		"sort_key":      "ledger_sequence,operation_index",
-	}),
+	func() *arrow.Metadata {
+		m := arrow.NewMetadata(
+			[]string{"version", "description", "primary_key", "partition_key", "sort_key"},
+			[]string{TTPEventSchemaVersion, "Token Transfer Protocol events optimized for analytics", "event_id", "timestamp", "ledger_sequence,operation_index"},
+		)
+		return &m
+	}(),
 )
 
 // ContractDataSchema defines the Arrow schema for Stellar smart contract data
@@ -300,7 +302,7 @@ var ContractDataSchema = arrow.NewSchema(
 				"description": "Source ledger sequence",
 				"index":       "true",
 			})},
-		{Name: "transaction_hash", Type: arrow.FixedSizeBinaryType{ByteWidth: 32}, Nullable: false,
+		{Name: "transaction_hash", Type: &arrow.FixedSizeBinaryType{ByteWidth: 32}, Nullable: false,
 			Metadata: arrow.MetadataFrom(map[string]string{
 				"description": "Transaction hash (32 bytes)",
 				"encoding":    "hex",
@@ -319,7 +321,7 @@ var ContractDataSchema = arrow.NewSchema(
 			})},
 
 		// Data key information
-		{Name: "key_hash", Type: arrow.FixedSizeBinaryType{ByteWidth: 32}, Nullable: false,
+		{Name: "key_hash", Type: &arrow.FixedSizeBinaryType{ByteWidth: 32}, Nullable: false,
 			Metadata: arrow.MetadataFrom(map[string]string{
 				"description": "Hash of the data key",
 				"encoding":    "hex",
@@ -365,12 +367,13 @@ var ContractDataSchema = arrow.NewSchema(
 				"description": "Schema version for this record",
 			})},
 	},
-	arrow.MetadataFrom(map[string]string{
-		"version":       ContractDataSchemaVersion,
-		"description":   "Stellar smart contract data changes",
-		"primary_key":   "ledger_sequence,transaction_hash,key_hash",
-		"partition_key": "timestamp",
-	}),
+	func() *arrow.Metadata {
+		m := arrow.NewMetadata(
+			[]string{"version", "description", "primary_key", "partition_key"},
+			[]string{ContractDataSchemaVersion, "Stellar smart contract data changes", "ledger_sequence,transaction_hash,key_hash", "timestamp"},
+		)
+		return &m
+	}(),
 )
 
 // SchemaRegistry provides utilities for schema management and evolution
@@ -421,7 +424,7 @@ func (r *SchemaRegistry) ValidateSchema(schemaName string, record arrow.Record) 
 		return arrow.ErrInvalid
 	}
 
-	if !arrow.SchemaEqual(schema, record.Schema()) {
+	if !schema.Equal(record.Schema()) {
 		return arrow.ErrInvalid
 	}
 
@@ -439,11 +442,11 @@ func GetSchemaVersion(schema *arrow.Schema) string {
 }
 
 // CreateRecordBuilder creates a new record builder for a schema
-func (r *SchemaRegistry) CreateRecordBuilder(schemaName string) (*arrow.RecordBuilder, error) {
+func (r *SchemaRegistry) CreateRecordBuilder(schemaName string) (*array.RecordBuilder, error) {
 	schema, exists := r.GetSchema(schemaName)
 	if !exists {
 		return nil, arrow.ErrInvalid
 	}
 
-	return arrow.NewRecordBuilder(r.pool, schema), nil
+	return array.NewRecordBuilder(r.pool, schema), nil
 }

@@ -3,13 +3,15 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
+	"net"
 	"sync"
 
 	"github.com/apache/arrow/go/v17/arrow"
 	"github.com/apache/arrow/go/v17/arrow/flight"
 	"github.com/apache/arrow/go/v17/arrow/ipc"
+	"github.com/apache/arrow/go/v17/arrow/memory"
 	"github.com/rs/zerolog/log"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -23,6 +25,7 @@ type FlightServer struct {
 	service *StellarSourceService
 	mu      sync.RWMutex
 	streams map[string]*StreamContext
+	addr    string
 }
 
 // StreamContext holds the context for an active stream
@@ -36,30 +39,39 @@ type StreamContext struct {
 
 // NewFlightServer creates a new Flight server
 func NewFlightServer(service *StellarSourceService) *FlightServer {
+	addr := fmt.Sprintf(":%d", service.config.FlightPort)
 	return &FlightServer{
 		service: service,
 		streams: make(map[string]*StreamContext),
+		addr:    addr,
 	}
+}
+
+// Addr returns the server address
+func (s *FlightServer) Addr() net.Addr {
+	addr, err := net.ResolveTCPAddr("tcp", s.addr)
+	if err != nil {
+		log.Error().Err(err).Str("addr", s.addr).Msg("Failed to resolve server address")
+		return nil
+	}
+	return addr
 }
 
 // GetSchema returns the schema for a given descriptor
 func (s *FlightServer) GetSchema(ctx context.Context, in *flight.FlightDescriptor) (*flight.SchemaResult, error) {
 	log.Debug().
 		Str("type", in.Type.String()).
-		Bytes("path", in.Path).
+		Strs("path", in.Path).
 		Msg("GetSchema request")
 
 	// We only support one stream type for now
-	if string(in.Path) != "stellar_ledgers" {
+	if len(in.Path) == 0 || in.Path[0] != "stellar_ledgers" {
 		return nil, status.Error(codes.NotFound, "stream not found")
 	}
 
 	// Serialize the schema
 	schema := schemas.StellarLedgerSchema
-	var buf []byte
-	if err := ipc.SerializeSchema(schema, nil, &buf); err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to serialize schema: %v", err)
-	}
+	buf := flight.SerializeSchema(schema, memory.NewGoAllocator())
 
 	return &flight.SchemaResult{Schema: buf}, nil
 }
@@ -68,14 +80,14 @@ func (s *FlightServer) GetSchema(ctx context.Context, in *flight.FlightDescripto
 func (s *FlightServer) GetFlightInfo(ctx context.Context, in *flight.FlightDescriptor) (*flight.FlightInfo, error) {
 	log.Debug().
 		Str("type", in.Type.String()).
-		Bytes("path", in.Path).
+		Strs("path", in.Path).
 		Msg("GetFlightInfo request")
 
 	// We only support one stream type for now
-	streamName := string(in.Path)
-	if streamName != "stellar_ledgers" {
+	if len(in.Path) == 0 || in.Path[0] != "stellar_ledgers" {
 		return nil, status.Error(codes.NotFound, "stream not found")
 	}
+	streamName := in.Path[0]
 
 	// Create a ticket for this stream
 	ticket := &flight.Ticket{
@@ -84,10 +96,7 @@ func (s *FlightServer) GetFlightInfo(ctx context.Context, in *flight.FlightDescr
 
 	// Serialize the schema
 	schema := schemas.StellarLedgerSchema
-	var schemaBuf []byte
-	if err := ipc.SerializeSchema(schema, nil, &schemaBuf); err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to serialize schema: %v", err)
-	}
+	schemaBuf := flight.SerializeSchema(schema, memory.NewGoAllocator())
 
 	// Create endpoint
 	endpoint := &flight.FlightEndpoint{
@@ -153,8 +162,7 @@ func (s *FlightServer) DoGet(ticket *flight.Ticket, stream flight.FlightService_
 	}()
 
 	// Create and send schema message
-	dictProvider := flight.NewBasicDictProvider()
-	writer := flight.NewRecordWriter(stream, ipc.WithSchema(streamCtx.schema), ipc.WithDictProvider(dictProvider))
+	writer := flight.NewRecordWriter(stream, ipc.WithSchema(streamCtx.schema))
 	defer writer.Close()
 
 	log.Debug().
@@ -221,7 +229,7 @@ func (s *FlightServer) ListFlights(in *flight.Criteria, stream flight.FlightServ
 
 	// We only have one flight for now
 	descriptor := &flight.FlightDescriptor{
-		Type: flight.FlightDescriptor_PATH,
+		Type: flight.DescriptorPATH,
 		Path: []string{"stellar_ledgers"},
 	}
 
@@ -250,27 +258,36 @@ func (s *FlightServer) DoExchange(stream flight.FlightService_DoExchangeServer) 
 }
 
 // DoAction handles custom actions
-func (s *FlightServer) DoAction(ctx context.Context, action *flight.Action) (*flight.Result, error) {
+func (s *FlightServer) DoAction(action *flight.Action, stream flight.FlightService_DoActionServer) error {
 	log.Debug().
 		Str("type", action.Type).
 		Bytes("body", action.Body).
 		Msg("DoAction request")
 
+	var result *flight.Result
+	var err error
+
 	switch action.Type {
 	case "get_status":
-		return s.handleGetStatus(ctx)
+		result, err = s.handleGetStatus(stream.Context())
 	case "get_current_ledger":
-		return s.handleGetCurrentLedger(ctx)
+		result, err = s.handleGetCurrentLedger(stream.Context())
 	default:
-		return nil, status.Errorf(codes.InvalidArgument, "unknown action: %s", action.Type)
+		return status.Errorf(codes.InvalidArgument, "unknown action: %s", action.Type)
 	}
+
+	if err != nil {
+		return err
+	}
+
+	return stream.Send(result)
 }
 
 // ListActions lists available actions
-func (s *FlightServer) ListActions(ctx context.Context, in *flight.Empty) (*flight.ActionType, error) {
+func (s *FlightServer) ListActions(in *flight.Empty, stream flight.FlightService_ListActionsServer) error {
 	log.Debug().Msg("ListActions request")
 
-	// Return available actions
+	// Send available actions
 	actions := []*flight.ActionType{
 		{
 			Type:        "get_status",
@@ -282,10 +299,13 @@ func (s *FlightServer) ListActions(ctx context.Context, in *flight.Empty) (*flig
 		},
 	}
 
-	return &flight.ActionType{
-		Type:        "available_actions",
-		Description: fmt.Sprintf("Available actions: %d", len(actions)),
-	}, nil
+	for _, action := range actions {
+		if err := stream.Send(action); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // handleGetStatus returns the current service status
@@ -315,6 +335,34 @@ func (s *FlightServer) handleGetCurrentLedger(ctx context.Context) (*flight.Resu
 	return &flight.Result{
 		Body: []byte(result),
 	}, nil
+}
+
+// Init initializes the Flight server
+func (s *FlightServer) Init(addr string) error {
+	s.addr = addr
+	log.Debug().Str("addr", addr).Msg("FlightServer initialized")
+	return nil
+}
+
+// InitListener initializes the Flight server listener
+func (s *FlightServer) InitListener(listener net.Listener) {
+	log.Debug().Msg("FlightServer listener initialized")
+}
+
+// RegisterService registers the service with gRPC server
+func (s *FlightServer) RegisterService(sd *grpc.ServiceDesc, ss any) {
+	log.Debug().Msg("Registering service")
+}
+
+// RegisterFlightService registers the flight service with gRPC server
+func (s *FlightServer) RegisterFlightService(server flight.FlightServer) {
+	log.Debug().Msg("Registering Flight service")
+}
+
+// GetServiceInfo returns service information for this Flight server
+func (s *FlightServer) GetServiceInfo() map[string]grpc.ServiceInfo {
+	log.Debug().Msg("GetServiceInfo request")
+	return make(map[string]grpc.ServiceInfo)
 }
 
 // Helper function to generate unique ticket IDs

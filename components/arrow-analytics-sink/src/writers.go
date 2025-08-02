@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/apache/arrow/go/v17/arrow/memory"
 	"github.com/rs/zerolog/log"
 )
 

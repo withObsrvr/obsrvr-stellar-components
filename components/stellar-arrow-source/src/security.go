@@ -420,7 +420,7 @@ func (sm *SecurityManager) validateJWT(ctx context.Context, md metadata.MD, hand
 func (sm *SecurityManager) validateMutualTLS(ctx context.Context, handler grpc.UnaryHandler, req interface{}) (interface{}, error) {
 	// Mutual TLS validation implementation would go here
 	// For now, return a placeholder implementation
-	return handler(ctx, req), nil
+	return handler(ctx, req)
 }
 
 // corsMiddleware adds CORS headers

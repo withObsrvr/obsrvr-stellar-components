@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/apache/arrow/go/v17/arrow"
+	"github.com/apache/arrow/go/v17/arrow/array"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
 )

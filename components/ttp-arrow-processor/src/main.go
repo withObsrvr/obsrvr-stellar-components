@@ -168,7 +168,7 @@ func main() {
 
 	// Create memory allocator
 	pool := memory.NewGoAllocator()
-	defer pool.Destroy()
+	// Note: Go allocator is automatically garbage collected, no manual cleanup needed
 
 	// Create schema registry
 	registry := schemas.NewSchemaRegistry()
@@ -280,14 +280,14 @@ func setupLogging(level string) {
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339})
 }
 
-func startFlightServer(server flight.Server, port int) error {
+func startFlightServer(flightServer *TTPFlightServer, port int) error {
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return fmt.Errorf("failed to listen on port %d: %w", port, err)
 	}
 
 	grpcServer := grpc.NewServer()
-	flight.RegisterFlightServiceServer(grpcServer, server)
+	flight.RegisterFlightServiceServer(grpcServer, flightServer)
 
 	// Add health check service
 	healthServer := health.NewServer()

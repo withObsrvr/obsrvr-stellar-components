@@ -1,0 +1,49 @@
+schema = 3
+
+[mod]
+  [mod."github.com/apache/arrow/go/v17"]
+    version = "v17.0.0"
+    hash = "sha256-oZAmaxCsxjTs/wLkN9ELaZ44haYzUFeWMh18tSBFqG4="
+  [mod."github.com/goccy/go-json"]
+    version = "v0.10.4"
+    hash = "sha256-QwnR7s+bwgSM+Mf5KazzHPLYTMErkYSA2LP/ZTFOOPM="
+  [mod."github.com/google/flatbuffers"]
+    version = "v24.3.25+incompatible"
+    hash = "sha256-b96yDt5Agzf8/VYrueYjuwvHE7cD8J1H/gVavQH+BRI="
+  [mod."github.com/klauspost/compress"]
+    version = "v1.17.11"
+    hash = "sha256-LFSIWy0C4VbiuPve0eKHr7Q7s4XtaGzsZ3qpO+6bEgc="
+  [mod."github.com/klauspost/cpuid/v2"]
+    version = "v2.2.8"
+    hash = "sha256-/E58BnABQYxO+cmiue7OQqRLWkd/Lh8grX8DjTU4tk8="
+  [mod."github.com/pkg/errors"]
+    version = "v0.9.1"
+    hash = "sha256-mNfQtcrQmu3sNg/7IwiieKWOgFQOVVe2yXgKBpe/wZw="
+  [mod."github.com/stellar/go"]
+    version = "v0.0.0-20250731191627-f4dc82059f0e"
+    hash = "sha256-46E7vdi3LluYXJgEIxWJouDLHUULv8zjWT7oX8qo39I="
+    replaced = "github.com/stellar/go"
+  [mod."github.com/stellar/go-xdr"]
+    version = "v0.0.0-20231122183749-b53fb00bcac2"
+    hash = "sha256-wMXQ6LqoZeUrTp0yxdQ/4AHqeM3q88/fu2dl2GsHIxE="
+  [mod."github.com/zeebo/xxh3"]
+    version = "v1.0.2"
+    hash = "sha256-XXUApJ54WZeV4YBaDHNF3kLdK16nPDOZNP1Fnx1JjpI="
+  [mod."golang.org/x/exp"]
+    version = "v0.0.0-20241217172543-b2144cdd0a67"
+    hash = "sha256-b+OVYsAPa3wAJKwvxKPz3goepavGvQomsk1Rs8pnSQU="
+  [mod."golang.org/x/mod"]
+    version = "v0.22.0"
+    hash = "sha256-U+jUPEHP4QUm0eu9upRnwBxeKhpUknEcn8l8ZvxgZ58="
+  [mod."golang.org/x/sync"]
+    version = "v0.10.0"
+    hash = "sha256-HWruKClrdoBKVdxKCyoazxeQV4dIYLdkHekQvx275/o="
+  [mod."golang.org/x/sys"]
+    version = "v0.28.0"
+    hash = "sha256-kzSlDo5FKsQU9cLefIt2dueGUfz9XuEW+mGSGlPATGc="
+  [mod."golang.org/x/tools"]
+    version = "v0.28.0"
+    hash = "sha256-3CTCErE/1HqQWApVoZDaIFS6t05NX/8rtJ2SDUxMZQg="
+  [mod."golang.org/x/xerrors"]
+    version = "v0.0.0-20240903120638-7835f813f4da"
+    hash = "sha256-bE7CcrnAvryNvM26ieJGXqbAtuLwHaGcmtVMsVnksqo="

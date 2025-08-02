@@ -3,14 +3,16 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
+	"net"
 	"sync"
 	"time"
 
 	"github.com/apache/arrow/go/v17/arrow"
 	"github.com/apache/arrow/go/v17/arrow/flight"
 	"github.com/apache/arrow/go/v17/arrow/ipc"
+	"github.com/apache/arrow/go/v17/arrow/memory"
 	"github.com/rs/zerolog/log"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -24,6 +26,7 @@ type TTPFlightServer struct {
 	service *TTPProcessorService
 	mu      sync.RWMutex
 	streams map[string]*TTPStreamContext
+	addr    string
 }
 
 // TTPStreamContext holds the context for an active TTP stream
@@ -47,10 +50,13 @@ func NewTTPFlightServer(service *TTPProcessorService) *TTPFlightServer {
 func (s *TTPFlightServer) GetSchema(ctx context.Context, in *flight.FlightDescriptor) (*flight.SchemaResult, error) {
 	log.Debug().
 		Str("type", in.Type.String()).
-		Bytes("path", in.Path).
+		Strs("path", in.Path).
 		Msg("GetSchema request")
 
-	streamName := string(in.Path)
+	streamName := ""
+	if len(in.Path) > 0 {
+		streamName = in.Path[0]
+	}
 	
 	var schema *arrow.Schema
 	switch streamName {
@@ -61,10 +67,7 @@ func (s *TTPFlightServer) GetSchema(ctx context.Context, in *flight.FlightDescri
 	}
 
 	// Serialize the schema
-	var buf []byte
-	if err := ipc.SerializeSchema(schema, nil, &buf); err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to serialize schema: %v", err)
-	}
+	buf := flight.SerializeSchema(schema, memory.NewGoAllocator())
 
 	return &flight.SchemaResult{Schema: buf}, nil
 }
@@ -73,10 +76,13 @@ func (s *TTPFlightServer) GetSchema(ctx context.Context, in *flight.FlightDescri
 func (s *TTPFlightServer) GetFlightInfo(ctx context.Context, in *flight.FlightDescriptor) (*flight.FlightInfo, error) {
 	log.Debug().
 		Str("type", in.Type.String()).
-		Bytes("path", in.Path).
+		Strs("path", in.Path).
 		Msg("GetFlightInfo request")
 
-	streamName := string(in.Path)
+	streamName := ""
+	if len(in.Path) > 0 {
+		streamName = in.Path[0]
+	}
 	
 	var schema *arrow.Schema
 	switch streamName {
@@ -92,10 +98,7 @@ func (s *TTPFlightServer) GetFlightInfo(ctx context.Context, in *flight.FlightDe
 	}
 
 	// Serialize the schema
-	var schemaBuf []byte
-	if err := ipc.SerializeSchema(schema, nil, &schemaBuf); err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to serialize schema: %v", err)
-	}
+	schemaBuf := flight.SerializeSchema(schema, memory.NewGoAllocator())
 
 	// Create endpoint
 	endpoint := &flight.FlightEndpoint{
@@ -167,8 +170,7 @@ func (s *TTPFlightServer) DoGet(ticket *flight.Ticket, stream flight.FlightServi
 	}()
 
 	// Create and send schema message
-	dictProvider := flight.NewBasicDictProvider()
-	writer := flight.NewRecordWriter(stream, ipc.WithSchema(streamCtx.schema), ipc.WithDictProvider(dictProvider))
+	writer := flight.NewRecordWriter(stream, ipc.WithSchema(streamCtx.schema))
 	defer writer.Close()
 
 	log.Debug().
@@ -235,7 +237,7 @@ func (s *TTPFlightServer) ListFlights(in *flight.Criteria, stream flight.FlightS
 
 	// We have one main flight for TTP events
 	descriptor := &flight.FlightDescriptor{
-		Type: flight.FlightDescriptor_PATH,
+		Type: flight.DescriptorPATH,
 		Path: []string{"ttp_events"},
 	}
 
@@ -264,31 +266,40 @@ func (s *TTPFlightServer) DoExchange(stream flight.FlightService_DoExchangeServe
 }
 
 // DoAction handles custom actions
-func (s *TTPFlightServer) DoAction(ctx context.Context, action *flight.Action) (*flight.Result, error) {
+func (s *TTPFlightServer) DoAction(action *flight.Action, stream flight.FlightService_DoActionServer) error {
 	log.Debug().
 		Str("type", action.Type).
 		Bytes("body", action.Body).
 		Msg("TTP DoAction request")
 
+	var result *flight.Result
+	var err error
+
 	switch action.Type {
 	case "get_status":
-		return s.handleGetStatus(ctx)
+		result, err = s.handleGetStatus(stream.Context())
 	case "get_current_ledger":
-		return s.handleGetCurrentLedger(ctx)
+		result, err = s.handleGetCurrentLedger(stream.Context())
 	case "get_stats":
-		return s.handleGetStats(ctx)
+		result, err = s.handleGetStats(stream.Context())
 	case "get_config":
-		return s.handleGetConfig(ctx)
+		result, err = s.handleGetConfig(stream.Context())
 	default:
-		return nil, status.Errorf(codes.InvalidArgument, "unknown action: %s", action.Type)
+		return status.Errorf(codes.InvalidArgument, "unknown action: %s", action.Type)
 	}
+
+	if err != nil {
+		return err
+	}
+
+	return stream.Send(result)
 }
 
 // ListActions lists available actions
-func (s *TTPFlightServer) ListActions(ctx context.Context, in *flight.Empty) (*flight.ActionType, error) {
+func (s *TTPFlightServer) ListActions(in *flight.Empty, stream flight.FlightService_ListActionsServer) error {
 	log.Debug().Msg("TTP ListActions request")
 
-	// Return available actions
+	// Send available actions
 	actions := []*flight.ActionType{
 		{
 			Type:        "get_status",
@@ -308,10 +319,13 @@ func (s *TTPFlightServer) ListActions(ctx context.Context, in *flight.Empty) (*f
 		},
 	}
 
-	return &flight.ActionType{
-		Type:        "available_actions",
-		Description: fmt.Sprintf("Available actions: %d", len(actions)),
-	}, nil
+	for _, action := range actions {
+		if err := stream.Send(action); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // handleGetStatus returns the current service status
@@ -406,6 +420,44 @@ func (s *TTPFlightServer) handleGetConfig(ctx context.Context) (*flight.Result, 
 	return &flight.Result{
 		Body: []byte(result),
 	}, nil
+}
+
+// Addr returns the server address
+func (s *TTPFlightServer) Addr() net.Addr {
+	addr, err := net.ResolveTCPAddr("tcp", s.addr)
+	if err != nil {
+		log.Error().Err(err).Str("addr", s.addr).Msg("Failed to resolve TTP server address")
+		return nil
+	}
+	return addr
+}
+
+// Init initializes the TTP Flight server
+func (s *TTPFlightServer) Init(addr string) error {
+	s.addr = addr
+	log.Debug().Str("addr", addr).Msg("TTPFlightServer initialized")
+	return nil
+}
+
+// InitListener initializes the TTP Flight server listener
+func (s *TTPFlightServer) InitListener(listener net.Listener) {
+	log.Debug().Msg("TTPFlightServer listener initialized")
+}
+
+// RegisterService registers the service with gRPC server
+func (s *TTPFlightServer) RegisterService(sd *grpc.ServiceDesc, ss any) {
+	log.Debug().Msg("Registering TTP service")
+}
+
+// RegisterFlightService registers the flight service with gRPC server
+func (s *TTPFlightServer) RegisterFlightService(server flight.FlightServer) {
+	log.Debug().Msg("Registering TTP Flight service")
+}
+
+// GetServiceInfo returns service information for this TTP Flight server
+func (s *TTPFlightServer) GetServiceInfo() map[string]grpc.ServiceInfo {
+	log.Debug().Msg("TTP GetServiceInfo request")
+	return make(map[string]grpc.ServiceInfo)
 }
 
 // Helper function to generate unique ticket IDs for TTP

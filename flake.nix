@@ -255,12 +255,52 @@
         devScripts = {
           # Build all components
           build-all = pkgs.writeShellScriptBin "build-all" ''
-            echo "Building all components with Nix..."
-            nix build .#stellar-arrow-source
-            nix build .#ttp-arrow-processor
-            nix build .#arrow-analytics-sink
-            nix build .#schema-tools
-            echo "All components built successfully!"
+            echo "Building all components with Go..."
+            
+            # Ensure we're in the project root
+            if [[ ! -f "flake.nix" ]]; then
+              echo "Error: Must run from project root (directory containing flake.nix)"
+              exit 1
+            fi
+            
+            # Create build directory
+            mkdir -p build
+            
+            # Build schemas first
+            echo "Building schemas..."
+            if [[ -d "schemas" ]]; then
+              (cd schemas && go build -o ../build/schema-tools . && echo "✅ schemas built")
+            else
+              echo "⚠️  schemas directory not found, skipping"
+            fi
+            
+            # Build stellar-arrow-source
+            echo "Building stellar-arrow-source..."
+            if [[ -d "components/stellar-arrow-source/src" ]]; then
+              (cd components/stellar-arrow-source/src && go build -o ../../../build/stellar-arrow-source . && echo "✅ stellar-arrow-source built")
+            else
+              echo "⚠️  stellar-arrow-source source not found, skipping"
+            fi
+            
+            # Build ttp-arrow-processor  
+            echo "Building ttp-arrow-processor..."
+            if [[ -d "components/ttp-arrow-processor/src" ]]; then
+              (cd components/ttp-arrow-processor/src && go build -o ../../../build/ttp-arrow-processor . && echo "✅ ttp-arrow-processor built")
+            else
+              echo "⚠️  ttp-arrow-processor source not found, skipping"
+            fi
+            
+            # Build arrow-analytics-sink
+            echo "Building arrow-analytics-sink..."
+            if [[ -d "components/arrow-analytics-sink/src" ]]; then
+              (cd components/arrow-analytics-sink/src && go build -o ../../../build/arrow-analytics-sink . && echo "✅ arrow-analytics-sink built")
+            else
+              echo "⚠️  arrow-analytics-sink source not found, skipping"
+            fi
+            
+            echo ""
+            echo "Build completed! Binaries available in build/ directory:"
+            ls -la build/ 2>/dev/null || echo "No binaries built"
           '';
           
           # Run development environment
@@ -345,7 +385,21 @@
           ];
           
           shellHook = ''
+            # Clear screen for clean environment entry
+            clear
+            
+            # Set custom PS1 to show we're in Nix development environment
+            export PS1="\[\033[1;32m\][obsrvr-nix]\[\033[0m\] \[\033[1;34m\]\u@\h\[\033[0m\]:\[\033[1;36m\]\w\[\033[0m\]\$ "
+            
+            # Add environment indicator to shell title if supported
+            if [[ $TERM == *"xterm"* ]] || [[ $TERM == *"screen"* ]] || [[ $TERM == *"tmux"* ]]; then
+              echo -ne "\033]0;obsrvr-stellar-components [NIX DEV]\007"
+            fi
+            
+            echo "═══════════════════════════════════════════════════════════════════════════════════"
             echo "🚀 obsrvr-stellar-components development environment"
+            echo "   📦 Nix Development Shell Active"
+            echo "═══════════════════════════════════════════════════════════════════════════════════"
             echo ""
             echo "Available commands:"
             echo "  build-all         - Build all components"
@@ -357,7 +411,14 @@
             echo "Environment:"
             echo "  Go version: $(go version)"
             echo "  Arrow C++:  ${arrow-cpp.version}"
+            echo "  Shell:      Nix Development Environment"
             echo ""
+            echo "📋 Quick start:"
+            echo "  build-all                    # Build all components"
+            echo "  cd components/stellar-arrow-source/src && go run ."
+            echo ""
+            echo "💡 Your prompt shows [obsrvr-nix] to indicate you're in the Nix environment"
+            echo "───────────────────────────────────────────────────────────────────────────────────"
             
             # Set up environment variables
             export CGO_ENABLED=1
@@ -365,13 +426,39 @@
             export CGO_CFLAGS="-I${arrow-cpp}/include"
             export CGO_LDFLAGS="-L${arrow-cpp}/lib -larrow -larrow_flight"
             
+            # Add NIX_DEV environment variable for scripts to detect
+            export NIX_DEV="1"
+            export OBSRVR_NIX_ENV="active"
+            
             # Create necessary directories
             mkdir -p data logs build dist
             
             # Set up Git hooks if pre-commit is available
             if command -v pre-commit >/dev/null 2>&1; then
               pre-commit install 2>/dev/null || true
+              echo "pre-commit installed at .git/hooks/pre-commit"
             fi
+            
+            # Function to show environment status
+            nix-status() {
+              echo "═══════════════════════════════════════════════════════════════════════════════════"
+              echo "🔧 Nix Development Environment Status"
+              echo "═══════════════════════════════════════════════════════════════════════════════════"
+              echo "Environment: ACTIVE"
+              echo "Prompt indicator: [obsrvr-nix]"
+              echo "CGO_ENABLED: $CGO_ENABLED"
+              echo "Go version: $(go version | cut -d' ' -f3)"
+              echo "Arrow C++: ${arrow-cpp.version}"
+              echo "Working directory: $(pwd)"
+              echo "Available tools:"
+              echo "  - build-all, test-all, docker-build"
+              echo "  - golangci-lint, gosec, delve (debugger)"
+              echo "  - kubectl, helm, awscli2, gcloud"
+              echo "───────────────────────────────────────────────────────────────────────────────────"
+            }
+            
+            # Make nix-status available as a command
+            export -f nix-status
           '';
         };
         

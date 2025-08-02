@@ -75,12 +75,6 @@ type Config struct {
 	LogLevel       string `mapstructure:"log_level"`
 }
 
-// RetentionPolicy represents data retention configuration
-type RetentionPolicy struct {
-	Enabled bool   `mapstructure:"enabled"`
-	MaxAge  string `mapstructure:"max_age"`
-	MaxSize string `mapstructure:"max_size"`
-}
 
 // Default configuration values
 func defaultConfig() *Config {
@@ -187,7 +181,7 @@ func main() {
 
 	// Create memory allocator
 	pool := memory.NewGoAllocator()
-	defer pool.Destroy()
+	// Note: Go allocator is automatically garbage collected, no manual cleanup needed
 
 	// Create schema registry
 	registry := schemas.NewSchemaRegistry()
