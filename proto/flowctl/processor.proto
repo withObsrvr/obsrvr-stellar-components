@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package flowctl;
+option go_package = "github.com/withobsrvr/flowctl/proto;flowctlpb";
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+import "common.proto";
+
+// Processor error event
+message ProcessorError {
+  string processor_id = 1;
+  string error_type = 2;                 // e.g., "VALIDATION", "PROCESSING"
+  string message = 3;
+  bytes original_event = 4;              // The event that caused the error
+  google.protobuf.Timestamp timestamp = 5;
+  map<string, string> context = 6;       // Additional error context
+}
+
+// Processor service definition
+service EventProcessor {
+  // Bidirectional stream for processing events
+  rpc Process(stream flowctl.Event) returns (stream flowctl.Event);
+  
+  // Lifecycle methods
+  rpc Ping(google.protobuf.Empty) returns (flowctl.Pong);
+  rpc Shutdown(flowctl.ShutdownRequest) returns (google.protobuf.Empty);
+} 

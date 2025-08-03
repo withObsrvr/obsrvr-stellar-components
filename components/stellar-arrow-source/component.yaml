@@ -364,6 +364,61 @@ spec:
       description: "Arrow batch size"
       default: "1000"
       
+    # FlowCtl Integration Environment Variables
+    - name: ENABLE_FLOWCTL
+      description: "Enable flowctl integration for service discovery and monitoring"
+      default: "false"
+      type: boolean
+    - name: FLOWCTL_ENDPOINT
+      description: "FlowCtl control plane endpoint for registration and coordination"
+      default: "localhost:8080"
+      validation:
+        pattern: "^[a-zA-Z0-9.-]+:[0-9]+$"
+    - name: FLOWCTL_HEARTBEAT_INTERVAL
+      description: "Heartbeat interval for flowctl health reporting"
+      default: "10s"
+      validation:
+        pattern: "^[0-9]+(s|m|h)$"
+    
+    # Component-specific FlowCtl overrides
+    - name: STELLAR_ARROW_SOURCE_ENABLE_FLOWCTL
+      description: "Component-specific flowctl enable override"
+      default: ""
+      type: boolean
+      required: false
+    - name: STELLAR_ARROW_SOURCE_FLOWCTL_ENDPOINT
+      description: "Component-specific flowctl endpoint override"
+      default: ""
+      required: false
+    - name: STELLAR_ARROW_SOURCE_FLOWCTL_HEARTBEAT_INTERVAL
+      description: "Component-specific flowctl heartbeat interval override"
+      default: ""
+      required: false
+      
+    # Advanced FlowCtl Features (Phase 4)
+    - name: CONNECTION_POOL_MAX_CONNECTIONS
+      description: "Maximum connections per endpoint in connection pool"
+      default: "10"
+      type: integer
+      minimum: 1
+      maximum: 50
+    - name: CONNECTION_POOL_MIN_CONNECTIONS
+      description: "Minimum connections to maintain per endpoint"
+      default: "2"
+      type: integer
+      minimum: 1
+      maximum: 10
+    - name: CONNECTION_POOL_IDLE_TIMEOUT
+      description: "Idle timeout for connection pool cleanup"
+      default: "5m"
+      validation:
+        pattern: "^[0-9]+(s|m|h)$"
+    - name: MONITORING_INTERVAL
+      description: "Pipeline monitoring collection interval"
+      default: "5s"
+      validation:
+        pattern: "^[0-9]+(s|m|h)$"
+      
   # Volumes
   volumes:
     - name: data

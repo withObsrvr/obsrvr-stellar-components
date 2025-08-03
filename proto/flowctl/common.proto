@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package flowctl;
+option go_package = "github.com/withobsrvr/flowctl/proto;flowctlpb";
+
+import "google/protobuf/timestamp.proto";
+
+// Generic event envelope
+message Event {
+  string event_type = 1;                 // Fully qualified protobuf name
+  bytes payload = 2;                     // Serialized protobuf
+  uint32 schema_version = 3;             // Schema version for this event
+  google.protobuf.Timestamp timestamp = 4;
+  map<string, string> metadata = 5;      // Event metadata
+}
+
+// Pong response
+message Pong {
+  string version = 1;
+  bool healthy = 2;
+}
+
+// Shutdown request
+message ShutdownRequest {
+  bool graceful = 1;
+  string reason = 2;
+} 

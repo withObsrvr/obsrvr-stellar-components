@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package flowctl;
+option go_package = "github.com/withobsrvr/flowctl/proto;flowctlpb";
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+import "common.proto";
+
+// Sink acknowledgment
+message SinkAck {
+  bool success = 1;
+  string error = 2;                      // Error message if success is false
+  map<string, string> metadata = 3;      // Additional acknowledgment metadata
+}
+
+// Sink service definition
+service EventSink {
+  // Stream events to the sink
+  rpc Ingest(stream flowctl.Event) returns (SinkAck);
+  
+  // Lifecycle methods
+  rpc Ping(google.protobuf.Empty) returns (flowctl.Pong);
+  rpc Shutdown(flowctl.ShutdownRequest) returns (google.protobuf.Empty);
+} 

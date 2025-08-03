@@ -1,0 +1,17 @@
+source_type: rpc
+backend_type: rpc
+rpc_endpoint: "https://soroban-testnet.stellar.org"
+network_passphrase: "Test SDF Network ; September 2015"
+ledgers_per_file: 1
+files_per_partition: 64000
+flight_port: 8816
+health_port: 8088
+start_ledger: 790000
+end_ledger: 0
+batch_size: 1000
+buffer_size: 10000
+concurrent_readers: 4
+arrow_memory_pool: default
+compression: none
+metrics_enabled: true
+log_level: info

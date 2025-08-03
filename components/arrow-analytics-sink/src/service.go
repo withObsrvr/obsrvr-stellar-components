@@ -21,6 +21,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/withobsrvr/obsrvr-stellar-components/internal/flowctl"
+	flowctlpb "github.com/withobsrvr/obsrvr-stellar-components/proto/gen"
 	"github.com/withobsrvr/obsrvr-stellar-components/schemas"
 )
 
@@ -30,9 +32,14 @@ type AnalyticsSinkService struct {
 	pool     memory.Allocator
 	registry *schemas.SchemaRegistry
 
+	// flowctl integration
+	flowctlController *flowctl.Controller
+
 	// Processor connection
 	processorClient flight.FlightServiceClient
 	processorConn   *grpc.ClientConn
+	processorEndpoint string
+	reconnectChan   chan struct{}
 
 	// Output writers
 	parquetWriter   *ParquetWriter
@@ -62,9 +69,13 @@ type AnalyticsStats struct {
 	EventsReceived        uint64
 	EventsWritten         uint64
 	FilesWritten          uint64
+	BytesWritten          uint64
 	WebSocketConnections  int
+	WebSocketMessagesSent uint64
+	ProcessingErrors      uint64
 	StartTime             time.Time
 	LastEventTime         time.Time
+	LastProcessed         time.Time
 }
 
 // TTPEvent represents a processed TTP event
@@ -91,18 +102,18 @@ type TTPEvent struct {
 // NewAnalyticsSinkService creates a new analytics sink service
 func NewAnalyticsSinkService(config *Config, pool memory.Allocator, registry *schemas.SchemaRegistry) (*AnalyticsSinkService, error) {
 	service := &AnalyticsSinkService{
-		config:        config,
-		pool:          pool,
-		registry:      registry,
-		eventsChannel: make(chan *TTPEvent, config.BufferSize),
-		errorChannel:  make(chan error, 10),
-		stats:         AnalyticsStats{StartTime: time.Now()},
+		config:            config,
+		pool:              pool,
+		registry:          registry,
+		eventsChannel:     make(chan *TTPEvent, config.BufferSize),
+		errorChannel:      make(chan error, 10),
+		stats:             AnalyticsStats{StartTime: time.Now()},
+		reconnectChan:     make(chan struct{}, 1),
+		processorEndpoint: config.ProcessorEndpoint, // Fallback to configured endpoint
 	}
 
-	// Connect to processor
-	if err := service.connectToProcessor(); err != nil {
-		return nil, fmt.Errorf("failed to connect to processor: %w", err)
-	}
+	// Note: Processor connection will be established later after flowctl controller is set
+	// This allows for dynamic discovery of upstream services
 
 	// Initialize output writers
 	if err := service.initializeWriters(); err != nil {
@@ -121,23 +132,132 @@ func NewAnalyticsSinkService(config *Config, pool memory.Allocator, registry *sc
 	return service, nil
 }
 
+// SetFlowCtlController sets the flowctl controller for service discovery
+func (s *AnalyticsSinkService) SetFlowCtlController(controller *flowctl.Controller) {
+	s.flowctlController = controller
+}
+
 // connectToProcessor establishes connection to the TTP processor component
 func (s *AnalyticsSinkService) connectToProcessor() error {
+	endpoint := s.discoverProcessorEndpoint()
+
 	log.Info().
-		Str("endpoint", s.config.ProcessorEndpoint).
+		Str("endpoint", endpoint).
+		Bool("discovered", endpoint != s.config.ProcessorEndpoint).
 		Msg("Connecting to ttp-arrow-processor")
 
+	// Close existing connection if any
+	if s.processorConn != nil {
+		s.processorConn.Close()
+	}
+
 	// Create gRPC connection
-	conn, err := grpc.Dial(s.config.ProcessorEndpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.Dial(endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		return fmt.Errorf("failed to connect to processor: %w", err)
+		return fmt.Errorf("failed to connect to processor at %s: %w", endpoint, err)
 	}
 
 	s.processorConn = conn
 	s.processorClient = flight.NewFlightServiceClient(conn)
+	s.processorEndpoint = endpoint
 
-	log.Info().Msg("Connected to ttp-arrow-processor")
+	log.Info().
+		Str("endpoint", endpoint).
+		Msg("Connected to ttp-arrow-processor")
 	return nil
+}
+
+// discoverProcessorEndpoint discovers processor service endpoint through flowctl
+func (s *AnalyticsSinkService) discoverProcessorEndpoint() string {
+	// If no flowctl controller, use configured endpoint
+	if s.flowctlController == nil {
+		log.Debug().Msg("No flowctl controller, using configured processor endpoint")
+		return s.config.ProcessorEndpoint
+	}
+
+	// Discover upstream services that produce TTP events
+	upstreams, err := s.flowctlController.DiscoverUpstreamServices(flowctl.TTPEventType)
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to discover upstream services, using configured endpoint")
+		return s.config.ProcessorEndpoint
+	}
+
+	if len(upstreams) == 0 {
+		log.Warn().Msg("No upstream processor services found, using configured endpoint")
+		return s.config.ProcessorEndpoint
+	}
+
+	// Use the first discovered processor service
+	processorService := upstreams[0]
+	connectionInfo := s.flowctlController.ExtractConnectionInfo(processorService)
+	
+	log.Info().
+		Str("service_id", processorService.ServiceId).
+		Str("discovered_endpoint", connectionInfo.Endpoint).
+		Msg("Discovered ttp-arrow-processor via flowctl")
+
+	return connectionInfo.Endpoint
+}
+
+// startServiceDiscoveryWatcher watches for service changes and reconnects as needed
+func (s *AnalyticsSinkService) startServiceDiscoveryWatcher(ctx context.Context) {
+	if s.flowctlController == nil {
+		log.Debug().Msg("No flowctl controller, skipping service discovery watcher")
+		return
+	}
+
+	go func() {
+		log.Info().Msg("Starting service discovery watcher")
+		
+		err := s.flowctlController.WatchServices(ctx, func(services []*flowctlpb.ServiceStatus) {
+			// Check if upstream processor has changed
+			newEndpoint := s.discoverProcessorEndpoint()
+			if newEndpoint != s.processorEndpoint {
+				log.Info().
+					Str("old_endpoint", s.processorEndpoint).
+					Str("new_endpoint", newEndpoint).
+					Msg("Processor service endpoint changed, triggering reconnect")
+				
+				select {
+				case s.reconnectChan <- struct{}{}:
+				default:
+					// Channel full, reconnection already pending
+				}
+			}
+		})
+		
+		if err != nil && err != context.Canceled {
+			log.Error().Err(err).Msg("Service discovery watcher failed")
+		}
+	}()
+}
+
+// handleReconnections processes reconnection requests
+func (s *AnalyticsSinkService) handleReconnections(ctx context.Context) {
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-s.reconnectChan:
+				log.Info().Msg("Processing reconnection request")
+				
+				// Attempt to reconnect to processor
+				if err := s.connectToProcessor(); err != nil {
+					log.Error().Err(err).Msg("Failed to reconnect to processor")
+					
+					// Retry after delay
+					time.Sleep(10 * time.Second)
+					select {
+					case s.reconnectChan <- struct{}{}:
+					default:
+					}
+				} else {
+					log.Info().Msg("Successfully reconnected to processor")
+				}
+			}
+		}
+	}()
 }
 
 // initializeWriters creates and initializes all output writers
@@ -184,7 +304,24 @@ func (s *AnalyticsSinkService) Start(ctx context.Context) error {
 		Str("processor_endpoint", s.config.ProcessorEndpoint).
 		Strs("output_formats", s.config.OutputFormats).
 		Int("writer_threads", s.config.WriterThreads).
+		Bool("flowctl_enabled", s.flowctlController != nil).
 		Msg("Starting analytics sink processing")
+
+	// Start flowctl-based dynamic connection management if available
+	if s.flowctlController != nil {
+		// Start service discovery watcher
+		s.startServiceDiscoveryWatcher(ctx)
+		
+		// Start reconnection handler
+		s.handleReconnections(ctx)
+		
+		log.Info().Msg("Started dynamic connection management via flowctl")
+	}
+
+	// Establish initial connection to processor (uses discovery if flowctl available)
+	if err := s.connectToProcessor(); err != nil {
+		return fmt.Errorf("failed to connect to processor: %w", err)
+	}
 
 	// Start writer workers
 	for i := 0; i < s.config.WriterThreads; i++ {
@@ -557,4 +694,90 @@ func createDirectories(paths ...string) error {
 		}
 	}
 	return nil
+}
+
+// GetMetrics implements flowctl.MetricsProvider interface
+func (s *AnalyticsSinkService) GetMetrics() map[string]float64 {
+	s.statsMu.RLock()
+	defer s.statsMu.RUnlock()
+
+	metrics := make(map[string]float64)
+	
+	// Basic processing statistics
+	metrics["events_received_total"] = float64(s.stats.EventsReceived)
+	metrics["events_written_total"] = float64(s.stats.EventsWritten)
+	metrics["files_written_total"] = float64(s.stats.FilesWritten)
+	metrics["bytes_written_total"] = float64(s.stats.BytesWritten)
+	
+	// WebSocket statistics
+	metrics["websocket_connections"] = float64(s.stats.WebSocketConnections)
+	metrics["websocket_messages_sent"] = float64(s.stats.WebSocketMessagesSent)
+	
+	// Current processing state
+	s.mu.RLock()
+	isRunning := s.isRunning
+	s.mu.RUnlock()
+	
+	// Service status
+	if isRunning {
+		metrics["service_status"] = 1.0
+	} else {
+		metrics["service_status"] = 0.0
+	}
+	
+	// Processing rates
+	if !s.stats.StartTime.IsZero() {
+		uptime := time.Since(s.stats.StartTime).Seconds()
+		metrics["uptime_seconds"] = uptime
+		
+		if uptime > 0 {
+			metrics["events_per_second"] = float64(s.stats.EventsReceived) / uptime
+			metrics["writes_per_second"] = float64(s.stats.EventsWritten) / uptime
+			metrics["files_per_second"] = float64(s.stats.FilesWritten) / uptime
+		}
+		
+		// Calculate write efficiency
+		if s.stats.EventsReceived > 0 {
+			metrics["write_efficiency"] = float64(s.stats.EventsWritten) / float64(s.stats.EventsReceived)
+		}
+	}
+	
+	// Time since last processed
+	if !s.stats.LastProcessed.IsZero() {
+		metrics["seconds_since_last_processed"] = time.Since(s.stats.LastProcessed).Seconds()
+	}
+	
+	// Buffer depths (if channels exist)
+	if s.eventsChannel != nil {
+		metrics["events_queue_depth"] = float64(len(s.eventsChannel))
+	}
+	if s.errorChannel != nil {
+		metrics["error_queue_depth"] = float64(len(s.errorChannel))
+	}
+	
+	// Output format-specific metrics based on configuration
+	if s.config != nil {
+		for _, format := range s.config.OutputFormats {
+			switch format {
+			case "parquet":
+				metrics["parquet_enabled"] = 1.0
+			case "json":
+				metrics["json_enabled"] = 1.0
+			case "csv":
+				metrics["csv_enabled"] = 1.0
+			case "websocket":
+				metrics["websocket_enabled"] = 1.0
+			case "api":
+				metrics["api_enabled"] = 1.0
+			}
+		}
+	}
+	
+	// Processing error rate
+	if s.stats.EventsReceived > 0 {
+		errorRate := float64(s.stats.ProcessingErrors) / float64(s.stats.EventsReceived)
+		metrics["error_rate"] = errorRate
+	}
+	
+	return metrics
 }

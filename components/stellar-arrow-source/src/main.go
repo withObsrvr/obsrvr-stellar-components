@@ -22,6 +22,8 @@ import (
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 
+	"github.com/withobsrvr/obsrvr-stellar-components/internal/config"
+	"github.com/withobsrvr/obsrvr-stellar-components/internal/flowctl"
 	"github.com/withobsrvr/obsrvr-stellar-components/schemas"
 )
 
@@ -73,6 +75,9 @@ type Config struct {
 	// Monitoring configuration
 	MetricsEnabled bool   `mapstructure:"metrics_enabled"`
 	LogLevel       string `mapstructure:"log_level"`
+
+	// flowctl integration configuration
+	FlowCtlConfig *config.FlowCtlConfig
 }
 
 // Default configuration values
@@ -155,6 +160,7 @@ func main() {
 		Str("component", ComponentName).
 		Str("version", ComponentVersion).
 		Str("source_type", config.SourceType).
+		Bool("flowctl_enabled", config.FlowCtlConfig.IsEnabled()).
 		Msg("Starting stellar-arrow-source")
 
 	// Create memory allocator
@@ -172,6 +178,43 @@ func main() {
 	service, err := NewStellarSourceService(config, pool, registry)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to create source service")
+	}
+
+	// Initialize flowctl integration if enabled
+	var flowctlController *flowctl.Controller
+	if config.FlowCtlConfig.IsEnabled() {
+		flowctlController = flowctl.NewController(
+			config.FlowCtlConfig.GetEndpoint(),
+			service, // service implements MetricsProvider
+		)
+		flowctlController.SetHeartbeatInterval(config.FlowCtlConfig.GetHeartbeatInterval())
+		
+		// Configure service registration
+		serviceInfo := flowctl.CreateSourceServiceInfo(
+			[]string{flowctl.StellarLedgerEventType},
+			fmt.Sprintf("http://localhost:%d/health", config.HealthPort),
+			1000, // max inflight
+			flowctl.BuildStellarSourceMetadata(
+				config.NetworkPassphrase,
+				config.SourceType,
+				config.BackendType,
+				map[string]string{
+					"batch_size": fmt.Sprintf("%d", config.BatchSize),
+					"compression": config.Compression,
+				},
+			),
+		)
+		flowctlController.SetServiceInfo(serviceInfo)
+
+		// Start flowctl integration
+		if err := flowctlController.Start(); err != nil {
+			log.Warn().Err(err).Msg("Failed to start flowctl integration, continuing without it")
+		} else {
+			log.Info().
+				Str("endpoint", config.FlowCtlConfig.GetEndpoint()).
+				Str("service_id", flowctlController.GetServiceID()).
+				Msg("flowctl integration started")
+		}
 	}
 
 	// Start Flight server
@@ -204,6 +247,11 @@ func main() {
 	log.Info().Msg("Shutting down stellar-arrow-source")
 	cancel()
 
+	// Stop flowctl integration
+	if flowctlController != nil {
+		flowctlController.Stop()
+	}
+
 	// Graceful shutdown with timeout
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
@@ -213,7 +261,7 @@ func main() {
 }
 
 func loadConfig() *Config {
-	config := defaultConfig()
+	cfg := defaultConfig()
 
 	viper.SetConfigName("config")
 	viper.SetConfigType("yaml")
@@ -230,9 +278,13 @@ func loadConfig() *Config {
 	}
 
 	// Unmarshal config
-	if err := viper.Unmarshal(config); err != nil {
+	if err := viper.Unmarshal(cfg); err != nil {
 		log.Fatal().Err(err).Msg("Failed to unmarshal config")
 	}
+
+	// Load flowctl configuration
+	flowCtlSourceConfig := config.LoadStellarArrowSourceFlowCtlConfig()
+	cfg.FlowCtlConfig = flowCtlSourceConfig.FlowCtl
 
 	// Override with environment variables
 	if port := os.Getenv("STELLAR_ARROW_SOURCE_PORT"); port != "" {
@@ -249,11 +301,11 @@ func loadConfig() *Config {
 	}
 
 	// Re-unmarshal after environment overrides
-	if err := viper.Unmarshal(config); err != nil {
+	if err := viper.Unmarshal(cfg); err != nil {
 		log.Fatal().Err(err).Msg("Failed to unmarshal config after env override")
 	}
 
-	return config
+	return cfg
 }
 
 func setupLogging(level string) {

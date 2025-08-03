@@ -13,6 +13,8 @@ require (
 	github.com/rs/zerolog v1.33.0
 	github.com/spf13/viper v1.19.0
 	github.com/stellar/go v0.0.0-20250731191627-f4dc82059f0e
+	github.com/withobsrvr/obsrvr-stellar-components/internal/config v0.0.0-00010101000000-000000000000
+	github.com/withobsrvr/obsrvr-stellar-components/internal/flowctl v0.0.0-00010101000000-000000000000
 	github.com/withobsrvr/obsrvr-stellar-components/schemas v0.0.0-00010101000000-000000000000
 	google.golang.org/api v0.187.0
 	google.golang.org/grpc v1.65.0
@@ -92,6 +94,7 @@ require (
 	github.com/stretchr/objx v0.5.2 // indirect
 	github.com/stretchr/testify v1.9.0 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
+	github.com/withobsrvr/obsrvr-stellar-components/proto/gen v0.0.0-00010101000000-000000000000 // indirect
 	github.com/zeebo/xxh3 v1.0.2 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.49.0 // indirect
@@ -122,5 +125,11 @@ require (
 )
 
 replace github.com/withobsrvr/obsrvr-stellar-components/schemas => ../../../schemas
+
+replace github.com/withobsrvr/obsrvr-stellar-components/internal/config => ../../../internal/config
+
+replace github.com/withobsrvr/obsrvr-stellar-components/internal/flowctl => ../../../internal/flowctl
+
+replace github.com/withobsrvr/obsrvr-stellar-components/proto/gen => ../../../proto/gen
 
 replace github.com/stellar/go => github.com/stellar/go v0.0.0-20250731191627-f4dc82059f0e

@@ -17,8 +17,9 @@ import (
 	"github.com/stellar/go/amount"
 	"github.com/stellar/go/xdr"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/withobsrvr/obsrvr-stellar-components/internal/flowctl"
+	flowctlpb "github.com/withobsrvr/obsrvr-stellar-components/proto/gen"
 	"github.com/withobsrvr/obsrvr-stellar-components/schemas"
 )
 
@@ -28,9 +29,21 @@ type TTPProcessorService struct {
 	pool     memory.Allocator
 	registry *schemas.SchemaRegistry
 
+	// flowctl integration
+	flowctlController *flowctl.Controller
+	connectionPool    *flowctl.ConnectionPool
+
 	// Source connection
-	sourceClient flight.FlightServiceClient
-	sourceConn   *grpc.ClientConn
+	sourceClient   flight.FlightServiceClient
+	sourceConn     *grpc.ClientConn
+	sourceEndpoint string
+	reconnectChan  chan struct{}
+
+	// Flow control
+	currentInflight   int32
+	maxInflight       int32
+	throttleRate      float64
+	flowControlMu     sync.RWMutex
 
 	// Processing state
 	mu             sync.RWMutex
@@ -60,6 +73,7 @@ type ProcessingStats struct {
 	EventsFiltered     uint64
 	BatchesGenerated   uint64
 	StartTime          time.Time
+	LastProcessed      time.Time
 	LastProcessedLedger uint32
 }
 
@@ -73,33 +87,231 @@ func NewTTPProcessorService(config *Config, pool memory.Allocator, registry *sch
 		errorChannel:   make(chan error, 10),
 		seenEvents:     make(map[string]bool),
 		stats:          ProcessingStats{StartTime: time.Now()},
+		reconnectChan:  make(chan struct{}, 1),
+		sourceEndpoint: config.SourceEndpoint, // Fallback to configured endpoint
+		maxInflight:    int32(config.BufferSize),
+		throttleRate:   1.0, // Start at full rate
+		connectionPool: flowctl.NewConnectionPool(flowctl.DefaultConnectionPoolConfig()),
 	}
 
-	// Connect to source
-	if err := service.connectToSource(); err != nil {
-		return nil, fmt.Errorf("failed to connect to source: %w", err)
-	}
+	// Note: Source connection will be established later after flowctl controller is set
+	// This allows for dynamic discovery of upstream services
 
 	return service, nil
 }
 
+// SetFlowCtlController sets the flowctl controller for service discovery
+func (s *TTPProcessorService) SetFlowCtlController(controller *flowctl.Controller) {
+	s.flowctlController = controller
+}
+
 // connectToSource establishes connection to the stellar-arrow-source component
 func (s *TTPProcessorService) connectToSource() error {
+	endpoint := s.discoverSourceEndpoint()
+	
 	log.Info().
-		Str("endpoint", s.config.SourceEndpoint).
+		Str("endpoint", endpoint).
+		Bool("discovered", endpoint != s.config.SourceEndpoint).
 		Msg("Connecting to stellar-arrow-source")
 
-	// Create gRPC connection
-	conn, err := grpc.Dial(s.config.SourceEndpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// Use connection pool to get a client
+	client, err := s.connectionPool.GetConnection(endpoint)
 	if err != nil {
-		return fmt.Errorf("failed to connect to source: %w", err)
+		return fmt.Errorf("failed to get pooled connection to source at %s: %w", endpoint, err)
 	}
 
-	s.sourceConn = conn
-	s.sourceClient = flight.NewFlightServiceClient(conn)
+	// Update service connection info
+	s.sourceClient = client
+	s.sourceEndpoint = endpoint
 
-	log.Info().Msg("Connected to stellar-arrow-source")
+	log.Info().
+		Str("endpoint", endpoint).
+		Msg("Connected to stellar-arrow-source via connection pool")
 	return nil
+}
+
+// discoverSourceEndpoint discovers source service endpoint through flowctl
+func (s *TTPProcessorService) discoverSourceEndpoint() string {
+	// If no flowctl controller, use configured endpoint
+	if s.flowctlController == nil {
+		log.Debug().Msg("No flowctl controller, using configured source endpoint")
+		return s.config.SourceEndpoint
+	}
+
+	// Discover upstream services that produce stellar ledger events
+	upstreams, err := s.flowctlController.DiscoverUpstreamServices(flowctl.StellarLedgerEventType)
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to discover upstream services, using configured endpoint")
+		return s.config.SourceEndpoint
+	}
+
+	if len(upstreams) == 0 {
+		log.Warn().Msg("No upstream source services found, using configured endpoint")
+		return s.config.SourceEndpoint
+	}
+
+	// Use the first discovered source service
+	sourceService := upstreams[0]
+	connectionInfo := s.flowctlController.ExtractConnectionInfo(sourceService)
+	
+	log.Info().
+		Str("service_id", sourceService.ServiceId).
+		Str("discovered_endpoint", connectionInfo.Endpoint).
+		Msg("Discovered stellar-arrow-source via flowctl")
+
+	return connectionInfo.Endpoint
+}
+
+// startServiceDiscoveryWatcher watches for service changes and reconnects as needed
+func (s *TTPProcessorService) startServiceDiscoveryWatcher(ctx context.Context) {
+	if s.flowctlController == nil {
+		log.Debug().Msg("No flowctl controller, skipping service discovery watcher")
+		return
+	}
+
+	go func() {
+		log.Info().Msg("Starting service discovery watcher")
+		
+		err := s.flowctlController.WatchServices(ctx, func(services []*flowctlpb.ServiceStatus) {
+			// Check if upstream source has changed
+			newEndpoint := s.discoverSourceEndpoint()
+			if newEndpoint != s.sourceEndpoint {
+				log.Info().
+					Str("old_endpoint", s.sourceEndpoint).
+					Str("new_endpoint", newEndpoint).
+					Msg("Source service endpoint changed, triggering reconnect")
+				
+				select {
+				case s.reconnectChan <- struct{}{}:
+				default:
+					// Channel full, reconnection already pending
+				}
+			}
+		})
+		
+		if err != nil && err != context.Canceled {
+			log.Error().Err(err).Msg("Service discovery watcher failed")
+		}
+	}()
+}
+
+// handleReconnections processes reconnection requests
+func (s *TTPProcessorService) handleReconnections(ctx context.Context) {
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-s.reconnectChan:
+				log.Info().Msg("Processing reconnection request")
+				
+				// Attempt to reconnect to source
+				if err := s.connectToSource(); err != nil {
+					log.Error().Err(err).Msg("Failed to reconnect to source")
+					
+					// Retry after delay
+					time.Sleep(10 * time.Second)
+					select {
+					case s.reconnectChan <- struct{}{}:
+					default:
+					}
+				} else {
+					log.Info().Msg("Successfully reconnected to source")
+				}
+			}
+		}
+	}()
+}
+
+// ========================================================================
+// Flow Control and Backpressure Management
+// ========================================================================
+
+// startBackpressureMonitoring starts monitoring backpressure signals from flowctl
+func (s *TTPProcessorService) startBackpressureMonitoring(ctx context.Context) {
+	if s.flowctlController == nil {
+		return
+	}
+
+	go func() {
+		log.Info().Msg("Starting backpressure monitoring")
+		
+		backpressureSignals := s.flowctlController.GetBackpressureSignals()
+		
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case signal := <-backpressureSignals:
+				s.handleBackpressureSignal(signal)
+			}
+		}
+	}()
+}
+
+// handleBackpressureSignal processes backpressure signals and adjusts processing rate
+func (s *TTPProcessorService) handleBackpressureSignal(signal flowctl.BackpressureSignal) {
+	s.flowControlMu.Lock()
+	defer s.flowControlMu.Unlock()
+	
+	oldRate := s.throttleRate
+	s.throttleRate = signal.RecommendedRate
+	
+	log.Info().
+		Str("service_id", signal.ServiceID).
+		Float64("old_rate", oldRate).
+		Float64("new_rate", s.throttleRate).
+		Float64("current_load", signal.CurrentLoad).
+		Str("reason", signal.Reason).
+		Msg("Adjusted processing rate due to backpressure")
+}
+
+// updateInflightCount updates the current inflight count and reports to flowctl
+func (s *TTPProcessorService) updateInflightCount(delta int32) {
+	s.flowControlMu.Lock()
+	s.currentInflight += delta
+	if s.currentInflight < 0 {
+		s.currentInflight = 0
+	}
+	currentCount := s.currentInflight
+	s.flowControlMu.Unlock()
+	
+	// Report to flowctl for global flow control
+	if s.flowctlController != nil {
+		serviceID := s.flowctlController.GetServiceID()
+		if serviceID != "" {
+			s.flowctlController.UpdateServiceInflight(serviceID, currentCount)
+		}
+	}
+}
+
+// shouldThrottle returns whether processing should be throttled based on current rate
+func (s *TTPProcessorService) shouldThrottle() bool {
+	s.flowControlMu.RLock()
+	rate := s.throttleRate
+	s.flowControlMu.RUnlock()
+	
+	if rate >= 1.0 {
+		return false // No throttling needed
+	}
+	
+	// Simple probabilistic throttling
+	// More sophisticated approaches could use token bucket or sliding window
+	return (time.Now().UnixNano() % 100) >= int64(rate*100)
+}
+
+// getCurrentThrottleRate returns the current throttle rate for metrics
+func (s *TTPProcessorService) getCurrentThrottleRate() float64 {
+	s.flowControlMu.RLock()
+	defer s.flowControlMu.RUnlock()
+	return s.throttleRate
+}
+
+// getInflightMetrics returns current inflight metrics
+func (s *TTPProcessorService) getInflightMetrics() (int32, int32) {
+	s.flowControlMu.RLock()
+	defer s.flowControlMu.RUnlock()
+	return s.currentInflight, s.maxInflight
 }
 
 // Start begins processing ledgers from the source
@@ -116,7 +328,40 @@ func (s *TTPProcessorService) Start(ctx context.Context) error {
 		Str("source_endpoint", s.config.SourceEndpoint).
 		Strs("event_types", s.config.EventTypes).
 		Int("processor_threads", s.config.ProcessorThreads).
+		Bool("flowctl_enabled", s.flowctlController != nil).
 		Msg("Starting TTP event processing")
+
+	// Start connection pool
+	if err := s.connectionPool.Start(ctx); err != nil {
+		log.Warn().Err(err).Msg("Failed to start connection pool, continuing without it")
+	}
+
+	// Start flowctl-based dynamic connection management if available
+	if s.flowctlController != nil {
+		// Register max inflight capacity with flowctl
+		serviceID := s.flowctlController.GetServiceID()
+		if serviceID != "" {
+			s.flowctlController.SetServiceMaxInflight(serviceID, s.maxInflight)
+		}
+		
+		// Start service discovery watcher
+		s.startServiceDiscoveryWatcher(ctx)
+		
+		// Start reconnection handler
+		s.handleReconnections(ctx)
+		
+		// Start backpressure monitoring
+		s.startBackpressureMonitoring(ctx)
+		
+		log.Info().
+			Int32("max_inflight", s.maxInflight).
+			Msg("Started dynamic connection management and flow control via flowctl")
+	}
+
+	// Establish initial connection to source (uses discovery if flowctl available)
+	if err := s.connectToSource(); err != nil {
+		return fmt.Errorf("failed to connect to source: %w", err)
+	}
 
 	// Start worker pool
 	for i := 0; i < s.config.ProcessorThreads; i++ {
@@ -140,7 +385,12 @@ func (s *TTPProcessorService) Stop(ctx context.Context) {
 		close(s.recordsChannel)
 		close(s.errorChannel)
 
-		// Close source connection
+		// Stop connection pool
+		if s.connectionPool != nil {
+			s.connectionPool.Stop()
+		}
+
+		// Close source connection (if using direct connection)
 		if s.sourceConn != nil {
 			s.sourceConn.Close()
 		}
@@ -238,6 +488,23 @@ func (s *TTPProcessorService) processingWorker(ctx context.Context, workerID int
 				log.Debug().Int("worker_id", workerID).Msg("Processing channel closed")
 				return
 			}
+
+			// Check if we should throttle processing
+			if s.shouldThrottle() {
+				// Put the record back and wait a bit
+				select {
+				case s.recordsChannel <- record:
+					time.Sleep(time.Duration(100+workerID*10) * time.Millisecond) // Staggered backoff
+					continue
+				default:
+					// Channel full, process anyway but log throttling
+					log.Debug().Int("worker_id", workerID).Msg("Throttling active but channel full")
+				}
+			}
+
+			// Track inflight processing
+			s.updateInflightCount(1)
+			defer s.updateInflightCount(-1)
 
 			timer := prometheus.NewTimer(processingDuration.WithLabelValues("ledger"))
 
@@ -865,4 +1132,110 @@ func getAssetCode(assetCode *string) string {
 		return "XLM"
 	}
 	return *assetCode
+}
+
+// GetMetrics implements flowctl.MetricsProvider interface
+func (s *TTPProcessorService) GetMetrics() map[string]float64 {
+	s.statsMu.RLock()
+	defer s.statsMu.RUnlock()
+
+	metrics := make(map[string]float64)
+	
+	// Basic processing statistics
+	metrics["ledgers_processed_total"] = float64(s.stats.LedgersProcessed)
+	metrics["transactions_processed_total"] = float64(s.stats.TransactionsProcessed)
+	metrics["operations_processed_total"] = float64(s.stats.OperationsProcessed)
+	metrics["events_extracted_total"] = float64(s.stats.EventsExtracted)
+	metrics["events_filtered_total"] = float64(s.stats.EventsFiltered)
+	metrics["batches_generated_total"] = float64(s.stats.BatchesGenerated)
+	
+	// Current processing state
+	s.mu.RLock()
+	metrics["current_ledger"] = float64(s.currentLedger)
+	isRunning := s.isRunning
+	s.mu.RUnlock()
+	
+	// Service status
+	if isRunning {
+		metrics["service_status"] = 1.0
+	} else {
+		metrics["service_status"] = 0.0
+	}
+	
+	// Last processed ledger
+	metrics["last_processed_ledger"] = float64(s.stats.LastProcessedLedger)
+	
+	// Processing rates
+	if !s.stats.StartTime.IsZero() {
+		uptime := time.Since(s.stats.StartTime).Seconds()
+		metrics["uptime_seconds"] = uptime
+		
+		if uptime > 0 {
+			metrics["ledgers_per_second"] = float64(s.stats.LedgersProcessed) / uptime
+			metrics["events_per_second"] = float64(s.stats.EventsExtracted) / uptime
+			metrics["operations_per_second"] = float64(s.stats.OperationsProcessed) / uptime
+		}
+	}
+	
+	// Time since last processed
+	if !s.stats.LastProcessed.IsZero() {
+		metrics["seconds_since_last_processed"] = time.Since(s.stats.LastProcessed).Seconds()
+	}
+	
+	// Queue depths (if channels exist)
+	if s.recordsChannel != nil {
+		metrics["records_queue_depth"] = float64(len(s.recordsChannel))
+	}
+	if s.errorChannel != nil {
+		metrics["error_queue_depth"] = float64(len(s.errorChannel))
+	}
+	
+	// Event processing efficiency
+	if s.stats.OperationsProcessed > 0 {
+		metrics["event_extraction_rate"] = float64(s.stats.EventsExtracted) / float64(s.stats.OperationsProcessed)
+		metrics["event_filter_rate"] = float64(s.stats.EventsFiltered) / float64(s.stats.OperationsProcessed)
+	}
+	
+	// Flow control metrics
+	currentInflight, maxInflight := s.getInflightMetrics()
+	metrics["current_inflight"] = float64(currentInflight)
+	metrics["max_inflight"] = float64(maxInflight)
+	metrics["throttle_rate"] = s.getCurrentThrottleRate()
+	
+	// Inflight utilization
+	if maxInflight > 0 {
+		metrics["inflight_utilization"] = float64(currentInflight) / float64(maxInflight)
+	}
+	
+	// Backpressure status
+	if s.flowctlController != nil && s.flowctlController.IsBackpressureActive() {
+		metrics["backpressure_active"] = 1.0
+	} else {
+		metrics["backpressure_active"] = 0.0
+	}
+	
+	// Connection pool metrics
+	if s.connectionPool != nil {
+		poolStats := s.connectionPool.GetPoolStats()
+		for endpoint, stats := range poolStats {
+			// Use endpoint as a label in the metric name for simplicity
+			prefix := fmt.Sprintf("pool_%s_", s.sanitizeEndpointForMetrics(endpoint))
+			metrics[prefix+"total_connections"] = float64(stats.TotalConnections)
+			metrics[prefix+"healthy_connections"] = float64(stats.HealthyConnections)
+			metrics[prefix+"idle_connections"] = float64(stats.IdleConnections)
+			metrics[prefix+"average_use_count"] = stats.AverageUseCount
+			metrics[prefix+"oldest_connection_seconds"] = stats.OldestConnection.Seconds()
+		}
+	}
+	
+	return metrics
+}
+
+// sanitizeEndpointForMetrics converts endpoint to metric-safe string
+func (s *TTPProcessorService) sanitizeEndpointForMetrics(endpoint string) string {
+	// Replace common characters that aren't metric-safe
+	safe := strings.ReplaceAll(endpoint, ":", "_")
+	safe = strings.ReplaceAll(safe, ".", "_")
+	safe = strings.ReplaceAll(safe, "-", "_")
+	return safe
 }

@@ -215,10 +215,19 @@ func NewGCSDataLakeReader(config *Config) (*GCSDataLakeReader, error) {
 		return nil, fmt.Errorf("failed to create GCS client: %w", err)
 	}
 
+	// Use configured storage path instead of hardcoded prefix
+	prefix := config.StoragePath
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	if prefix == "" {
+		prefix = "ledgers/" // Default fallback
+	}
+
 	return &GCSDataLakeReader{
 		client:     client,
 		bucketName: config.BucketName,
-		prefix:     "ledgers/", // Standard prefix for ledger data
+		prefix:     prefix,
 	}, nil
 }
 

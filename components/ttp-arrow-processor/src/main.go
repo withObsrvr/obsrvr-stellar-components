@@ -22,6 +22,8 @@ import (
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 
+	"github.com/withobsrvr/obsrvr-stellar-components/internal/config"
+	"github.com/withobsrvr/obsrvr-stellar-components/internal/flowctl"
 	"github.com/withobsrvr/obsrvr-stellar-components/schemas"
 )
 
@@ -58,6 +60,9 @@ type Config struct {
 	MetricsEnabled bool   `mapstructure:"metrics_enabled"`
 	StatsInterval  string `mapstructure:"stats_interval"`
 	LogLevel       string `mapstructure:"log_level"`
+
+	// flowctl integration configuration
+	FlowCtlConfig *config.FlowCtlConfig
 }
 
 // AssetFilter represents a filter for specific assets
@@ -164,6 +169,7 @@ func main() {
 		Str("version", ComponentVersion).
 		Str("source_endpoint", config.SourceEndpoint).
 		Strs("event_types", config.EventTypes).
+		Bool("flowctl_enabled", config.FlowCtlConfig.IsEnabled()).
 		Msg("Starting ttp-arrow-processor")
 
 	// Create memory allocator
@@ -181,6 +187,48 @@ func main() {
 	service, err := NewTTPProcessorService(config, pool, registry)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to create processor service")
+	}
+
+	// Initialize flowctl integration if enabled
+	var flowctlController *flowctl.Controller
+	if config.FlowCtlConfig.IsEnabled() {
+		flowctlController = flowctl.NewController(
+			config.FlowCtlConfig.GetEndpoint(),
+			service, // service implements MetricsProvider
+		)
+		flowctlController.SetHeartbeatInterval(config.FlowCtlConfig.GetHeartbeatInterval())
+		
+		// Configure service registration
+		serviceInfo := flowctl.CreateProcessorServiceInfo(
+			[]string{flowctl.StellarLedgerEventType},    // input event types
+			[]string{flowctl.TTPEventType},              // output event types
+			fmt.Sprintf("http://localhost:%d/health", config.HealthPort),
+			1000, // max inflight
+			flowctl.BuildTTPProcessorMetadata(
+				"", // network will be determined from source
+				"ttp_event_extraction",
+				config.EventTypes,
+				map[string]string{
+					"batch_size":       fmt.Sprintf("%d", config.BatchSize),
+					"processor_threads": fmt.Sprintf("%d", config.ProcessorThreads),
+					"source_endpoint":   config.SourceEndpoint,
+				},
+			),
+		)
+		flowctlController.SetServiceInfo(serviceInfo)
+
+		// Start flowctl integration
+		if err := flowctlController.Start(); err != nil {
+			log.Warn().Err(err).Msg("Failed to start flowctl integration, continuing without it")
+		} else {
+			log.Info().
+				Str("endpoint", config.FlowCtlConfig.GetEndpoint()).
+				Str("service_id", flowctlController.GetServiceID()).
+				Msg("flowctl integration started")
+		}
+
+		// Set the controller on the service for dynamic discovery
+		service.SetFlowCtlController(flowctlController)
 	}
 
 	// Start Flight server
@@ -213,6 +261,11 @@ func main() {
 	log.Info().Msg("Shutting down ttp-arrow-processor")
 	cancel()
 
+	// Stop flowctl integration
+	if flowctlController != nil {
+		flowctlController.Stop()
+	}
+
 	// Graceful shutdown with timeout
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
@@ -222,7 +275,7 @@ func main() {
 }
 
 func loadConfig() *Config {
-	config := defaultConfig()
+	cfg := defaultConfig()
 
 	viper.SetConfigName("config")
 	viper.SetConfigType("yaml")
@@ -239,9 +292,13 @@ func loadConfig() *Config {
 	}
 
 	// Unmarshal config
-	if err := viper.Unmarshal(config); err != nil {
+	if err := viper.Unmarshal(cfg); err != nil {
 		log.Fatal().Err(err).Msg("Failed to unmarshal config")
 	}
+
+	// Load flowctl configuration
+	flowCtlProcessorConfig := config.LoadTTPArrowProcessorFlowCtlConfig()
+	cfg.FlowCtlConfig = flowCtlProcessorConfig.FlowCtl
 
 	// Override with environment variables
 	if port := os.Getenv("TTP_ARROW_PROCESSOR_PORT"); port != "" {
@@ -261,11 +318,11 @@ func loadConfig() *Config {
 	}
 
 	// Re-unmarshal after environment overrides
-	if err := viper.Unmarshal(config); err != nil {
+	if err := viper.Unmarshal(cfg); err != nil {
 		log.Fatal().Err(err).Msg("Failed to unmarshal config after env override")
 	}
 
-	return config
+	return cfg
 }
 
 func setupLogging(level string) {

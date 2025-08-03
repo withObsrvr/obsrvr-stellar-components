@@ -9,6 +9,9 @@ require (
 	github.com/prometheus/client_golang v1.19.1
 	github.com/rs/zerolog v1.33.0
 	github.com/spf13/viper v1.19.0
+	github.com/withobsrvr/obsrvr-stellar-components/internal/config v0.0.0-00010101000000-000000000000
+	github.com/withobsrvr/obsrvr-stellar-components/internal/flowctl v0.0.0-00010101000000-000000000000
+	github.com/withobsrvr/obsrvr-stellar-components/proto/gen v0.0.0-00010101000000-000000000000
 	github.com/withobsrvr/obsrvr-stellar-components/schemas v0.0.0-00010101000000-000000000000
 	google.golang.org/grpc v1.65.0
 )
@@ -21,6 +24,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/goccy/go-json v0.10.4 // indirect
+	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/google/flatbuffers v24.3.25+incompatible // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
@@ -65,5 +69,11 @@ require (
 )
 
 replace github.com/withobsrvr/obsrvr-stellar-components/schemas => ../../../schemas
+
+replace github.com/withobsrvr/obsrvr-stellar-components/internal/config => ../../../internal/config
+
+replace github.com/withobsrvr/obsrvr-stellar-components/internal/flowctl => ../../../internal/flowctl
+
+replace github.com/withobsrvr/obsrvr-stellar-components/proto/gen => ../../../proto/gen
 
 replace github.com/stellar/go => github.com/stellar/go v0.0.0-20250731191627-f4dc82059f0e

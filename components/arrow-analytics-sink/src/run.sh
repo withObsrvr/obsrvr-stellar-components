@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+
+# Set up Arrow library path
+export LD_LIBRARY_PATH="/nix/store/bi90gd0fbr5icl03scxylsdv4ba9sc8d-arrow-cpp-20.0.0/lib:$LD_LIBRARY_PATH"
+
+# FlowCtl Configuration (optional)
+export ENABLE_FLOWCTL=${ENABLE_FLOWCTL:-false}
+export FLOWCTL_ENDPOINT=${FLOWCTL_ENDPOINT:-localhost:8080}
+export FLOWCTL_HEARTBEAT_INTERVAL=${FLOWCTL_HEARTBEAT_INTERVAL:-10s}
+
+# Component-specific FlowCtl overrides (optional)
+export ARROW_ANALYTICS_SINK_ENABLE_FLOWCTL=${ARROW_ANALYTICS_SINK_ENABLE_FLOWCTL:-}
+export ARROW_ANALYTICS_SINK_FLOWCTL_ENDPOINT=${ARROW_ANALYTICS_SINK_FLOWCTL_ENDPOINT:-}
+export ARROW_ANALYTICS_SINK_FLOWCTL_HEARTBEAT_INTERVAL=${ARROW_ANALYTICS_SINK_FLOWCTL_HEARTBEAT_INTERVAL:-}
+
+# Advanced FlowCtl Features (Phase 4)
+export CONNECTION_POOL_MAX_CONNECTIONS=${CONNECTION_POOL_MAX_CONNECTIONS:-10}
+export CONNECTION_POOL_MIN_CONNECTIONS=${CONNECTION_POOL_MIN_CONNECTIONS:-2}
+export CONNECTION_POOL_IDLE_TIMEOUT=${CONNECTION_POOL_IDLE_TIMEOUT:-5m}
+export MONITORING_INTERVAL=${MONITORING_INTERVAL:-5s}
+
+# Component-specific configuration
+export ARROW_ANALYTICS_SINK_PORT=${ARROW_ANALYTICS_SINK_PORT:-8817}
+export ARROW_ANALYTICS_SINK_HEALTH_PORT=${ARROW_ANALYTICS_SINK_HEALTH_PORT:-8088}
+export ARROW_ANALYTICS_SINK_WEBSOCKET_PORT=${ARROW_ANALYTICS_SINK_WEBSOCKET_PORT:-8080}
+export ARROW_ANALYTICS_SINK_DATA_PATH=${ARROW_ANALYTICS_SINK_DATA_PATH:-/data}
+export ARROW_ANALYTICS_SINK_LOG_LEVEL=${ARROW_ANALYTICS_SINK_LOG_LEVEL:-info}
+
+# Create data directory if it doesn't exist
+mkdir -p "${ARROW_ANALYTICS_SINK_DATA_PATH}"
+
+echo "Starting arrow-analytics-sink..."
+echo "Arrow Flight server: localhost:${ARROW_ANALYTICS_SINK_PORT}"
+echo "Health endpoint: http://localhost:${ARROW_ANALYTICS_SINK_HEALTH_PORT}/health"
+echo "WebSocket server: ws://localhost:${ARROW_ANALYTICS_SINK_WEBSOCKET_PORT}/ws"
+echo "Data output path: ${ARROW_ANALYTICS_SINK_DATA_PATH}"
+echo "FlowCtl Integration: $ENABLE_FLOWCTL"
+if [ "$ENABLE_FLOWCTL" = "true" ]; then
+    echo "FlowCtl Endpoint: $FLOWCTL_ENDPOINT"
+    echo "Heartbeat Interval: $FLOWCTL_HEARTBEAT_INTERVAL"
+    echo "Connection Pool: ${CONNECTION_POOL_MIN_CONNECTIONS}-${CONNECTION_POOL_MAX_CONNECTIONS} connections"
+fi
+echo ""
+
+# Run the component
+exec ./arrow-analytics-sink

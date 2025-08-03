@@ -544,3 +544,47 @@ func (s *StellarSourceService) GetProcessingStats() ProcessingStats {
 	defer s.statsMu.RUnlock()
 	return s.stats
 }
+
+// GetMetrics implements flowctl.MetricsProvider interface
+func (s *StellarSourceService) GetMetrics() map[string]float64 {
+	s.statsMu.RLock()
+	defer s.statsMu.RUnlock()
+
+	metrics := make(map[string]float64)
+	
+	// Basic processing statistics
+	metrics["ledgers_processed_total"] = float64(s.stats.LedgersProcessed)
+	metrics["ledgers_recovered_total"] = float64(s.stats.LedgersRecovered)
+	metrics["validation_errors_total"] = float64(s.stats.ValidationErrors)
+	metrics["processing_errors_total"] = float64(s.stats.ProcessingErrors)
+	
+	// Current ledger
+	s.mu.RLock()
+	metrics["current_ledger"] = float64(s.currentLedger)
+	isRunning := s.isRunning
+	s.mu.RUnlock()
+	
+	// Service status
+	if isRunning {
+		metrics["service_status"] = 1.0
+	} else {
+		metrics["service_status"] = 0.0
+	}
+	
+	// Processing duration metrics
+	if !s.stats.StartTime.IsZero() {
+		uptime := time.Since(s.stats.StartTime).Seconds()
+		metrics["uptime_seconds"] = uptime
+		
+		if s.stats.LedgersProcessed > 0 && uptime > 0 {
+			metrics["ledgers_per_second"] = float64(s.stats.LedgersProcessed) / uptime
+		}
+	}
+	
+	// Time since last processed
+	if !s.stats.LastProcessed.IsZero() {
+		metrics["seconds_since_last_processed"] = time.Since(s.stats.LastProcessed).Seconds()
+	}
+	
+	return metrics
+}

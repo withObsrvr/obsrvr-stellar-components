@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package flowctl;
+option go_package = "github.com/withobsrvr/flowctl/proto;flowctlpb";
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+import "common.proto";
+
+// Raw ledger data from Stellar
+message RawLedger {
+  uint32 ledger_sequence = 1;
+  bytes xdr_data = 2;                    // Raw XDR bytes
+  google.protobuf.Timestamp timestamp = 3;
+  string network = 4;                    // e.g., "pubnet", "testnet"
+  map<string, string> metadata = 5;      // Additional ledger metadata
+}
+
+// Source service request
+message SourceRequest {
+  string network = 1;                    // Network to stream from
+  uint32 start_ledger = 2;              // Optional starting ledger
+  map<string, string> params = 3;        // Source-specific parameters
+}
+
+// Source service definition
+service LedgerSource {
+  // Stream raw ledgers from Stellar
+  rpc StreamRawLedgers(SourceRequest) returns (stream RawLedger);
+  
+  // Lifecycle methods
+  rpc Ping(google.protobuf.Empty) returns (flowctl.Pong);
+  rpc Shutdown(flowctl.ShutdownRequest) returns (google.protobuf.Empty);
+} 
