@@ -18,6 +18,11 @@ message LedgerBatch {
   repeated ContractInvocationRow contract_invocations = 14;
   repeated TokenTransferRow token_transfers = 15;
   repeated AccountEffectRow account_effects = 16;
+
+  // Full bronze extractor surface. Each row is a JSON serialization of the
+  // corresponding stellar-extract row type, keyed by the destination bronze
+  // table name used by the history loader / Postgres ingester.
+  repeated BronzeRow bronze_rows = 100;
 }
 
 message LedgerRow {
@@ -104,4 +109,13 @@ message AccountEffectRow {
   string account_id = 7;
   string effect_type = 8;
   string effect_json = 9;
+}
+
+message BronzeRow {
+  string id = 1;
+  string table_name = 2;
+  string network_passphrase = 3;
+  uint32 ledger_sequence = 4;
+  uint32 ledger_range = 5;
+  string row_json = 6;
 }

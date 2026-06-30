@@ -346,6 +346,13 @@ github.com/go-logr/stdr
 # github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da
 ## explicit
 github.com/golang/groupcache/lru
+# github.com/google/go-cmp v0.7.0
+## explicit; go 1.21
+github.com/google/go-cmp/cmp
+github.com/google/go-cmp/cmp/internal/diff
+github.com/google/go-cmp/cmp/internal/flags
+github.com/google/go-cmp/cmp/internal/function
+github.com/google/go-cmp/cmp/internal/value
 # github.com/google/s2a-go v0.1.8
 ## explicit; go 1.20
 github.com/google/s2a-go
@@ -467,14 +474,17 @@ github.com/spiffe/go-spiffe/v2/spiffeid
 # github.com/stellar/go-stellar-sdk v0.5.0
 ## explicit; go 1.25
 github.com/stellar/go-stellar-sdk/amount
+github.com/stellar/go-stellar-sdk/asset
 github.com/stellar/go-stellar-sdk/clients/rpcclient
 github.com/stellar/go-stellar-sdk/clients/stellarcore
 github.com/stellar/go-stellar-sdk/hash
 github.com/stellar/go-stellar-sdk/historyarchive
+github.com/stellar/go-stellar-sdk/ingest
 github.com/stellar/go-stellar-sdk/ingest/ledgerbackend
 github.com/stellar/go-stellar-sdk/ingest/sac
 github.com/stellar/go-stellar-sdk/keypair
 github.com/stellar/go-stellar-sdk/network
+github.com/stellar/go-stellar-sdk/processors/token_transfer
 github.com/stellar/go-stellar-sdk/protocols/rpc
 github.com/stellar/go-stellar-sdk/protocols/stellarcore
 github.com/stellar/go-stellar-sdk/strkey
@@ -482,6 +492,7 @@ github.com/stellar/go-stellar-sdk/strkey/internal/crc16
 github.com/stellar/go-stellar-sdk/support/collections/heap
 github.com/stellar/go-stellar-sdk/support/collections/set
 github.com/stellar/go-stellar-sdk/support/compressxdr
+github.com/stellar/go-stellar-sdk/support/contractevents
 github.com/stellar/go-stellar-sdk/support/datastore
 github.com/stellar/go-stellar-sdk/support/errors
 github.com/stellar/go-stellar-sdk/support/log
@@ -511,6 +522,9 @@ github.com/withObsrvr/flowctl-sdk/pkg/consumer
 github.com/withObsrvr/flowctl-sdk/pkg/flowctl
 github.com/withObsrvr/flowctl-sdk/pkg/processor
 github.com/withObsrvr/flowctl-sdk/pkg/stellar
+# github.com/withObsrvr/stellar-extract v0.1.2
+## explicit; go 1.25.4
+github.com/withObsrvr/stellar-extract
 # go.opencensus.io v0.24.0
 ## explicit; go 1.13
 go.opencensus.io

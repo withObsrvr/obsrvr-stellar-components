@@ -36,3 +36,18 @@ create table if not exists stellar_operations (
   operation_xdr text not null,
   unique (network_passphrase, ledger_sequence, transaction_index, operation_index)
 );
+
+create table if not exists stellar_bronze_rows (
+  id text primary key,
+  table_name text not null,
+  network_passphrase text not null,
+  ledger_sequence integer not null,
+  ledger_range integer not null,
+  row_json jsonb not null
+);
+
+create index if not exists stellar_bronze_rows_table_ledger_idx
+  on stellar_bronze_rows(table_name, ledger_sequence);
+
+create index if not exists stellar_bronze_rows_range_idx
+  on stellar_bronze_rows(network_passphrase, ledger_range);

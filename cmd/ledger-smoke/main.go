@@ -5,12 +5,14 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	"github.com/stellar/go-stellar-sdk/network"
 	"github.com/stellar/go-stellar-sdk/support/datastore"
+	componentsv1 "github.com/withObsrvr/obsrvr-stellar-components/gen/go/stellar/components/v1"
 	"github.com/withObsrvr/obsrvr-stellar-components/pkg/contracts"
 	"github.com/withObsrvr/obsrvr-stellar-components/pkg/normalize"
 	"google.golang.org/protobuf/proto"
@@ -91,7 +93,28 @@ func main() {
 	fmt.Printf("contract_invocation_rows=%d\n", len(batch.ContractInvocations))
 	fmt.Printf("token_transfer_rows=%d\n", len(batch.TokenTransfers))
 	fmt.Printf("account_effect_rows=%d\n", len(batch.AccountEffects))
+	fmt.Printf("bronze_rows=%d\n", len(batch.BronzeRows))
+	for _, line := range bronzeTableCounts(batch.BronzeRows) {
+		fmt.Println(line)
+	}
 	fmt.Printf("protobuf_payload_bytes=%d\n", len(payload))
+}
+
+func bronzeTableCounts(rows []*componentsv1.BronzeRow) []string {
+	counts := map[string]int{}
+	for _, row := range rows {
+		counts[row.TableName]++
+	}
+	tables := make([]string, 0, len(counts))
+	for table := range counts {
+		tables = append(tables, table)
+	}
+	sort.Strings(tables)
+	out := make([]string, 0, len(tables))
+	for _, table := range tables {
+		out = append(out, fmt.Sprintf("bronze_table.%s=%d", table, counts[table]))
+	}
+	return out
 }
 
 type smokeConfig struct {

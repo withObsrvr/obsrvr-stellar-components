@@ -20,20 +20,17 @@ Producer:   stellar-ledger-processor
 
 `LedgerBatch` is defined in `proto/stellar/components/v1/ledger_batch.proto`.
 
-The first implementation populates:
+The compatibility fields populate:
 
 - `ledgers`
 - `transactions`
 - `operations`
 
-The contract reserves typed repeated fields for:
+The full bronze extractor surface is carried in:
 
-- `contract_events`
-- `contract_invocations`
-- `token_transfers`
-- `account_effects`
+- `bronze_rows`
 
-Those fields remain part of the protobuf contract even while extraction coverage is hardened.
+Each `BronzeRow` has the destination table name and a JSON serialization of the matching `stellar-extract` row type. This covers the row families used by `stellar-history-loader` and `stellar-postgres-ingester`, including effects, trades, accounts, offers, trustlines, account signers, claimable balances, liquidity pools, config settings, TTL entries, native balances, contract events, contract data, contract code, contract creations, token transfers, evicted keys, and restored keys.
 
 ## Idempotency
 
@@ -42,5 +39,6 @@ Rows use deterministic IDs:
 - ledger: network + ledger sequence
 - transaction: network + ledger sequence + transaction index + transaction hash
 - operation: network + ledger sequence + transaction index + operation index
+- bronze row: network + ledger sequence + table name + row ordinal + row JSON hash
 
 Sinks should treat these IDs as replay keys.

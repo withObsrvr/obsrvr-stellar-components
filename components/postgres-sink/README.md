@@ -1,10 +1,13 @@
 # postgres-sink
 
-Consumes `stellar.ledger.batch.v1` events and idempotently materializes the first canonical tables into Postgres:
+Consumes `stellar.ledger.batch.v1` events and idempotently materializes canonical tables into Postgres:
 
 - `stellar_ledgers`
 - `stellar_transactions`
 - `stellar_operations`
+- `stellar_bronze_rows`
+
+`stellar_bronze_rows` stores the full `stellar-extract` bronze surface as JSONB keyed by source table name, ledger, and deterministic row ID.
 
 Environment:
 

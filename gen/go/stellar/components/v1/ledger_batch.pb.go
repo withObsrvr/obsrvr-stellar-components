@@ -35,8 +35,12 @@ type LedgerBatch struct {
 	ContractInvocations []*ContractInvocationRow `protobuf:"bytes,14,rep,name=contract_invocations,json=contractInvocations,proto3" json:"contract_invocations,omitempty"`
 	TokenTransfers      []*TokenTransferRow      `protobuf:"bytes,15,rep,name=token_transfers,json=tokenTransfers,proto3" json:"token_transfers,omitempty"`
 	AccountEffects      []*AccountEffectRow      `protobuf:"bytes,16,rep,name=account_effects,json=accountEffects,proto3" json:"account_effects,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// Full bronze extractor surface. Each row is a JSON serialization of the
+	// corresponding stellar-extract row type, keyed by the destination bronze
+	// table name used by the history loader / Postgres ingester.
+	BronzeRows    []*BronzeRow `protobuf:"bytes,100,rep,name=bronze_rows,json=bronzeRows,proto3" json:"bronze_rows,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *LedgerBatch) Reset() {
@@ -149,6 +153,13 @@ func (x *LedgerBatch) GetTokenTransfers() []*TokenTransferRow {
 func (x *LedgerBatch) GetAccountEffects() []*AccountEffectRow {
 	if x != nil {
 		return x.AccountEffects
+	}
+	return nil
+}
+
+func (x *LedgerBatch) GetBronzeRows() []*BronzeRow {
+	if x != nil {
+		return x.BronzeRows
 	}
 	return nil
 }
@@ -925,11 +936,95 @@ func (x *AccountEffectRow) GetEffectJson() string {
 	return ""
 }
 
+type BronzeRow struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Id                string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	TableName         string                 `protobuf:"bytes,2,opt,name=table_name,json=tableName,proto3" json:"table_name,omitempty"`
+	NetworkPassphrase string                 `protobuf:"bytes,3,opt,name=network_passphrase,json=networkPassphrase,proto3" json:"network_passphrase,omitempty"`
+	LedgerSequence    uint32                 `protobuf:"varint,4,opt,name=ledger_sequence,json=ledgerSequence,proto3" json:"ledger_sequence,omitempty"`
+	LedgerRange       uint32                 `protobuf:"varint,5,opt,name=ledger_range,json=ledgerRange,proto3" json:"ledger_range,omitempty"`
+	RowJson           string                 `protobuf:"bytes,6,opt,name=row_json,json=rowJson,proto3" json:"row_json,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *BronzeRow) Reset() {
+	*x = BronzeRow{}
+	mi := &file_stellar_components_v1_ledger_batch_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BronzeRow) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BronzeRow) ProtoMessage() {}
+
+func (x *BronzeRow) ProtoReflect() protoreflect.Message {
+	mi := &file_stellar_components_v1_ledger_batch_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BronzeRow.ProtoReflect.Descriptor instead.
+func (*BronzeRow) Descriptor() ([]byte, []int) {
+	return file_stellar_components_v1_ledger_batch_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *BronzeRow) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *BronzeRow) GetTableName() string {
+	if x != nil {
+		return x.TableName
+	}
+	return ""
+}
+
+func (x *BronzeRow) GetNetworkPassphrase() string {
+	if x != nil {
+		return x.NetworkPassphrase
+	}
+	return ""
+}
+
+func (x *BronzeRow) GetLedgerSequence() uint32 {
+	if x != nil {
+		return x.LedgerSequence
+	}
+	return 0
+}
+
+func (x *BronzeRow) GetLedgerRange() uint32 {
+	if x != nil {
+		return x.LedgerRange
+	}
+	return 0
+}
+
+func (x *BronzeRow) GetRowJson() string {
+	if x != nil {
+		return x.RowJson
+	}
+	return ""
+}
+
 var File_stellar_components_v1_ledger_batch_proto protoreflect.FileDescriptor
 
 const file_stellar_components_v1_ledger_batch_proto_rawDesc = "" +
 	"\n" +
-	"(stellar/components/v1/ledger_batch.proto\x12\x15stellar.components.v1\"\x84\x06\n" +
+	"(stellar/components/v1/ledger_batch.proto\x12\x15stellar.components.v1\"\xc7\x06\n" +
 	"\vLedgerBatch\x12-\n" +
 	"\x12network_passphrase\x18\x01 \x01(\tR\x11networkPassphrase\x12'\n" +
 	"\x0fledger_sequence\x18\x02 \x01(\rR\x0eledgerSequence\x12$\n" +
@@ -945,7 +1040,9 @@ const file_stellar_components_v1_ledger_batch_proto_rawDesc = "" +
 	"\x0fcontract_events\x18\r \x03(\v2'.stellar.components.v1.ContractEventRowR\x0econtractEvents\x12_\n" +
 	"\x14contract_invocations\x18\x0e \x03(\v2,.stellar.components.v1.ContractInvocationRowR\x13contractInvocations\x12P\n" +
 	"\x0ftoken_transfers\x18\x0f \x03(\v2'.stellar.components.v1.TokenTransferRowR\x0etokenTransfers\x12P\n" +
-	"\x0faccount_effects\x18\x10 \x03(\v2'.stellar.components.v1.AccountEffectRowR\x0eaccountEffects\"\x9a\x03\n" +
+	"\x0faccount_effects\x18\x10 \x03(\v2'.stellar.components.v1.AccountEffectRowR\x0eaccountEffects\x12A\n" +
+	"\vbronze_rows\x18d \x03(\v2 .stellar.components.v1.BronzeRowR\n" +
+	"bronzeRows\"\x9a\x03\n" +
 	"\tLedgerRow\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12-\n" +
 	"\x12network_passphrase\x18\x02 \x01(\tR\x11networkPassphrase\x12'\n" +
@@ -1033,7 +1130,15 @@ const file_stellar_components_v1_ledger_batch_proto_rawDesc = "" +
 	"\veffect_type\x18\b \x01(\tR\n" +
 	"effectType\x12\x1f\n" +
 	"\veffect_json\x18\t \x01(\tR\n" +
-	"effectJsonB[ZYgithub.com/withObsrvr/obsrvr-stellar-components/gen/go/stellar/components/v1;componentsv1b\x06proto3"
+	"effectJson\"\xd0\x01\n" +
+	"\tBronzeRow\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1d\n" +
+	"\n" +
+	"table_name\x18\x02 \x01(\tR\ttableName\x12-\n" +
+	"\x12network_passphrase\x18\x03 \x01(\tR\x11networkPassphrase\x12'\n" +
+	"\x0fledger_sequence\x18\x04 \x01(\rR\x0eledgerSequence\x12!\n" +
+	"\fledger_range\x18\x05 \x01(\rR\vledgerRange\x12\x19\n" +
+	"\brow_json\x18\x06 \x01(\tR\arowJsonB[ZYgithub.com/withObsrvr/obsrvr-stellar-components/gen/go/stellar/components/v1;componentsv1b\x06proto3"
 
 var (
 	file_stellar_components_v1_ledger_batch_proto_rawDescOnce sync.Once
@@ -1047,7 +1152,7 @@ func file_stellar_components_v1_ledger_batch_proto_rawDescGZIP() []byte {
 	return file_stellar_components_v1_ledger_batch_proto_rawDescData
 }
 
-var file_stellar_components_v1_ledger_batch_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_stellar_components_v1_ledger_batch_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_stellar_components_v1_ledger_batch_proto_goTypes = []any{
 	(*LedgerBatch)(nil),           // 0: stellar.components.v1.LedgerBatch
 	(*LedgerRow)(nil),             // 1: stellar.components.v1.LedgerRow
@@ -1057,6 +1162,7 @@ var file_stellar_components_v1_ledger_batch_proto_goTypes = []any{
 	(*ContractInvocationRow)(nil), // 5: stellar.components.v1.ContractInvocationRow
 	(*TokenTransferRow)(nil),      // 6: stellar.components.v1.TokenTransferRow
 	(*AccountEffectRow)(nil),      // 7: stellar.components.v1.AccountEffectRow
+	(*BronzeRow)(nil),             // 8: stellar.components.v1.BronzeRow
 }
 var file_stellar_components_v1_ledger_batch_proto_depIdxs = []int32{
 	1, // 0: stellar.components.v1.LedgerBatch.ledgers:type_name -> stellar.components.v1.LedgerRow
@@ -1066,11 +1172,12 @@ var file_stellar_components_v1_ledger_batch_proto_depIdxs = []int32{
 	5, // 4: stellar.components.v1.LedgerBatch.contract_invocations:type_name -> stellar.components.v1.ContractInvocationRow
 	6, // 5: stellar.components.v1.LedgerBatch.token_transfers:type_name -> stellar.components.v1.TokenTransferRow
 	7, // 6: stellar.components.v1.LedgerBatch.account_effects:type_name -> stellar.components.v1.AccountEffectRow
-	7, // [7:7] is the sub-list for method output_type
-	7, // [7:7] is the sub-list for method input_type
-	7, // [7:7] is the sub-list for extension type_name
-	7, // [7:7] is the sub-list for extension extendee
-	0, // [0:7] is the sub-list for field type_name
+	8, // 7: stellar.components.v1.LedgerBatch.bronze_rows:type_name -> stellar.components.v1.BronzeRow
+	8, // [8:8] is the sub-list for method output_type
+	8, // [8:8] is the sub-list for method input_type
+	8, // [8:8] is the sub-list for extension type_name
+	8, // [8:8] is the sub-list for extension extendee
+	0, // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_stellar_components_v1_ledger_batch_proto_init() }
@@ -1084,7 +1191,7 @@ func file_stellar_components_v1_ledger_batch_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_stellar_components_v1_ledger_batch_proto_rawDesc), len(file_stellar_components_v1_ledger_batch_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   8,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
