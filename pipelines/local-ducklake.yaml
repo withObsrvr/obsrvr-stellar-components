@@ -1,0 +1,27 @@
+name: local-stellar-ledger-duckdb
+description: Local analytical materialization pipeline using DuckDB-loadable files.
+
+components:
+  raw-ledger-source:
+    image: raw-ledger-source:0.2.2
+    type: source
+    outputs: [stellar.ledger.v1]
+
+  stellar-ledger-processor:
+    image: stellar-ledger-processor:0.1.0
+    type: processor
+    inputs: [stellar.ledger.v1]
+    outputs: [stellar.ledger.batch.v1]
+
+  ducklake-sink:
+    image: ducklake-sink:0.1.0
+    type: sink
+    inputs: [stellar.ledger.batch.v1]
+    env:
+      DUCKDB_EXPORT_DIR: "./duckdb-ledger-batches"
+
+edges:
+  - from: raw-ledger-source
+    to: stellar-ledger-processor
+  - from: stellar-ledger-processor
+    to: ducklake-sink

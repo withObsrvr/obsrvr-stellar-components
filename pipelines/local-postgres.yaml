@@ -1,0 +1,27 @@
+name: local-stellar-ledger-postgres
+description: Local Postgres materialization pipeline.
+
+components:
+  raw-ledger-source:
+    image: raw-ledger-source:0.2.2
+    type: source
+    outputs: [stellar.ledger.v1]
+
+  stellar-ledger-processor:
+    image: stellar-ledger-processor:0.1.0
+    type: processor
+    inputs: [stellar.ledger.v1]
+    outputs: [stellar.ledger.batch.v1]
+
+  postgres-sink:
+    image: postgres-sink:0.1.0
+    type: sink
+    inputs: [stellar.ledger.batch.v1]
+    env:
+      POSTGRES_DSN: "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable"
+
+edges:
+  - from: raw-ledger-source
+    to: stellar-ledger-processor
+  - from: stellar-ledger-processor
+    to: postgres-sink

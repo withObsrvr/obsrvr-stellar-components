@@ -1,0 +1,15 @@
+FROM golang:1.26-bookworm AS builder
+WORKDIR /src
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /build/component ./components/stellar-ledger-processor/cmd/component
+
+FROM gcr.io/distroless/base-debian12
+LABEL org.opencontainers.image.title="stellar-ledger-processor"
+LABEL org.opencontainers.image.version="0.1.0"
+LABEL org.opencontainers.image.source="https://github.com/withObsrvr/obsrvr-stellar-components"
+LABEL io.flowctl.component.type="processor"
+LABEL io.flowctl.component.api-version="v1"
+COPY --from=builder /build/component /app/component
+COPY components/stellar-ledger-processor/metadata.json /metadata.json
+EXPOSE 50051 8088
+ENTRYPOINT ["/app/component"]

@@ -1,0 +1,24 @@
+{
+  "name": "ducklake-sink",
+  "version": "0.1.0",
+  "type": "sink",
+  "description": "Writes stellar.ledger.batch.v1 payloads into DuckDB-loadable partitioned JSONL as the first DuckLake materialization step",
+  "input_types": ["stellar.ledger.batch.v1"],
+  "output_types": [],
+  "config_schema": {
+    "duckdb_export_dir": { "env": "DUCKDB_EXPORT_DIR", "default": "duckdb-ledger-batches" },
+    "port": { "env": "PORT", "default": ":50052" },
+    "health_port": { "env": "HEALTH_PORT", "default": "8089" },
+    "flowctl_endpoint": { "env": "FLOWCTL_ENDPOINT" },
+    "component_id": { "env": "COMPONENT_ID" }
+  },
+  "env_mapping": {
+    "duckdb_export_dir": "DUCKDB_EXPORT_DIR",
+    "port": "PORT",
+    "health_port": "HEALTH_PORT",
+    "flowctl_endpoint": "FLOWCTL_ENDPOINT",
+    "component_id": "COMPONENT_ID"
+  },
+  "port": 50052,
+  "health_port": 8089
+}

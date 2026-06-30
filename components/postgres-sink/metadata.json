@@ -1,0 +1,24 @@
+{
+  "name": "postgres-sink",
+  "version": "0.1.0",
+  "type": "sink",
+  "description": "Idempotently materializes stellar.ledger.batch.v1 ledger, transaction, and operation rows into Postgres",
+  "input_types": ["stellar.ledger.batch.v1"],
+  "output_types": [],
+  "config_schema": {
+    "postgres_dsn": { "env": "POSTGRES_DSN" },
+    "port": { "env": "PORT", "default": ":50052" },
+    "health_port": { "env": "HEALTH_PORT", "default": "8089" },
+    "flowctl_endpoint": { "env": "FLOWCTL_ENDPOINT" },
+    "component_id": { "env": "COMPONENT_ID" }
+  },
+  "env_mapping": {
+    "postgres_dsn": "POSTGRES_DSN",
+    "port": "PORT",
+    "health_port": "HEALTH_PORT",
+    "flowctl_endpoint": "FLOWCTL_ENDPOINT",
+    "component_id": "COMPONENT_ID"
+  },
+  "port": 50052,
+  "health_port": 8089
+}

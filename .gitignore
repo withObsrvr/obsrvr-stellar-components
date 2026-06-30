@@ -1,0 +1,14 @@
+.direnv/
+.env
+.env.*
+!.env.example
+bin/
+dist/
+result
+result-*
+*.log
+*.db
+*.duckdb
+*.sqlite
+*.jsonl
+coverage.out

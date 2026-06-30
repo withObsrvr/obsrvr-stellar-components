@@ -1,0 +1,24 @@
+{
+  "name": "stellar-ledger-processor",
+  "version": "0.1.0",
+  "type": "processor",
+  "description": "Normalizes stellar.v1.RawLedger events into ledger-bounded Stellar batch events",
+  "input_types": ["stellar.ledger.v1"],
+  "output_types": ["stellar.ledger.batch.v1"],
+  "config_schema": {
+    "network_passphrase": { "env": "NETWORK_PASSPHRASE" },
+    "port": { "env": "PORT", "default": ":50051" },
+    "health_port": { "env": "HEALTH_PORT", "default": "8088" },
+    "flowctl_endpoint": { "env": "FLOWCTL_ENDPOINT" },
+    "component_id": { "env": "COMPONENT_ID" }
+  },
+  "env_mapping": {
+    "network_passphrase": "NETWORK_PASSPHRASE",
+    "port": "PORT",
+    "health_port": "HEALTH_PORT",
+    "flowctl_endpoint": "FLOWCTL_ENDPOINT",
+    "component_id": "COMPONENT_ID"
+  },
+  "port": 50051,
+  "health_port": 8088
+}

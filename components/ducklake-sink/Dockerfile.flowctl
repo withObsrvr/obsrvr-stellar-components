@@ -1,0 +1,15 @@
+FROM golang:1.26-bookworm AS builder
+WORKDIR /src
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /build/component ./components/ducklake-sink/cmd/component
+
+FROM gcr.io/distroless/base-debian12
+LABEL org.opencontainers.image.title="ducklake-sink"
+LABEL org.opencontainers.image.version="0.1.0"
+LABEL org.opencontainers.image.source="https://github.com/withObsrvr/obsrvr-stellar-components"
+LABEL io.flowctl.component.type="sink"
+LABEL io.flowctl.component.api-version="v1"
+COPY --from=builder /build/component /app/component
+COPY components/ducklake-sink/metadata.json /metadata.json
+EXPOSE 50052 8089
+ENTRYPOINT ["/app/component"]

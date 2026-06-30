@@ -1,0 +1,35 @@
+name: local-stellar-ledger-jsonl
+description: Local proof pipeline for raw ledgers to normalized JSONL batches.
+
+components:
+  raw-ledger-source:
+    image: raw-ledger-source:0.2.2
+    type: source
+    outputs:
+      - stellar.ledger.v1
+    env:
+      NETWORK_PASSPHRASE: "Test SDF Network ; September 2015"
+
+  stellar-ledger-processor:
+    image: stellar-ledger-processor:0.1.0
+    type: processor
+    inputs:
+      - stellar.ledger.v1
+    outputs:
+      - stellar.ledger.batch.v1
+    env:
+      NETWORK_PASSPHRASE: "Test SDF Network ; September 2015"
+
+  jsonl-sink:
+    image: jsonl-sink:0.1.0
+    type: sink
+    inputs:
+      - stellar.ledger.batch.v1
+    env:
+      JSONL_PATH: "./ledger_batches.jsonl"
+
+edges:
+  - from: raw-ledger-source
+    to: stellar-ledger-processor
+  - from: stellar-ledger-processor
+    to: jsonl-sink

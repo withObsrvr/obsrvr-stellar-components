@@ -1,0 +1,107 @@
+syntax = "proto3";
+
+package stellar.components.v1;
+
+option go_package = "github.com/withObsrvr/obsrvr-stellar-components/gen/go/stellar/components/v1;componentsv1";
+
+message LedgerBatch {
+  string network_passphrase = 1;
+  uint32 ledger_sequence = 2;
+  int64 closed_at_unix = 3;
+  string schema_version = 4;
+  string extraction_version = 5;
+
+  repeated LedgerRow ledgers = 10;
+  repeated TransactionRow transactions = 11;
+  repeated OperationRow operations = 12;
+  repeated ContractEventRow contract_events = 13;
+  repeated ContractInvocationRow contract_invocations = 14;
+  repeated TokenTransferRow token_transfers = 15;
+  repeated AccountEffectRow account_effects = 16;
+}
+
+message LedgerRow {
+  string id = 1;
+  string network_passphrase = 2;
+  uint32 ledger_sequence = 3;
+  int64 closed_at_unix = 4;
+  string ledger_hash = 5;
+  string previous_ledger_hash = 6;
+  uint32 protocol_version = 7;
+  uint32 transaction_count = 8;
+  string schema_version = 9;
+  string extraction_version = 10;
+}
+
+message TransactionRow {
+  string id = 1;
+  string network_passphrase = 2;
+  uint32 ledger_sequence = 3;
+  uint32 transaction_index = 4;
+  string transaction_hash = 5;
+  bool successful = 6;
+  string envelope_xdr = 7;
+  string result_xdr = 8;
+  string meta_xdr = 9;
+}
+
+message OperationRow {
+  string id = 1;
+  string transaction_id = 2;
+  string network_passphrase = 3;
+  uint32 ledger_sequence = 4;
+  uint32 transaction_index = 5;
+  uint32 operation_index = 6;
+  string operation_type = 7;
+  string operation_xdr = 8;
+}
+
+message ContractEventRow {
+  string id = 1;
+  string transaction_id = 2;
+  string network_passphrase = 3;
+  uint32 ledger_sequence = 4;
+  uint32 transaction_index = 5;
+  uint32 event_index = 6;
+  string contract_id = 7;
+  string topic_json = 8;
+  string value_json = 9;
+}
+
+message ContractInvocationRow {
+  string id = 1;
+  string transaction_id = 2;
+  string network_passphrase = 3;
+  uint32 ledger_sequence = 4;
+  uint32 transaction_index = 5;
+  uint32 invocation_index = 6;
+  string contract_id = 7;
+  string function_name = 8;
+  string arguments_json = 9;
+}
+
+message TokenTransferRow {
+  string id = 1;
+  string transaction_id = 2;
+  string network_passphrase = 3;
+  uint32 ledger_sequence = 4;
+  uint32 transaction_index = 5;
+  uint32 operation_index = 6;
+  string asset_code = 7;
+  string asset_issuer = 8;
+  string from_account = 9;
+  string to_account = 10;
+  string amount = 11;
+}
+
+message AccountEffectRow {
+  string id = 1;
+  string transaction_id = 2;
+  string network_passphrase = 3;
+  uint32 ledger_sequence = 4;
+  uint32 transaction_index = 5;
+  uint32 operation_index = 6;
+  string account_id = 7;
+  string effect_type = 8;
+  string effect_json = 9;
+}
