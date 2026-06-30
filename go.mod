@@ -6,7 +6,7 @@ require (
 	github.com/lib/pq v1.10.9
 	github.com/stellar/go-stellar-sdk v0.5.0
 	github.com/withObsrvr/flow-proto v0.1.3
-	github.com/withObsrvr/flowctl-sdk v0.1.1
+	github.com/withObsrvr/flowctl-sdk v0.1.2
 	google.golang.org/protobuf v1.36.11
 )
 
