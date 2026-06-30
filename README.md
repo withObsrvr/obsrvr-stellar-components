@@ -41,6 +41,7 @@ raw-ledger-source@0.2.2
 
 See:
 
+- `docs/quickstart.md`
 - `docs/rebuild-plan.md`
 - `docs/architecture.md`
 - `docs/event-contracts.md`
