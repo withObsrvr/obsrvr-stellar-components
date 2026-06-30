@@ -27,20 +27,21 @@ After JSONL works, the same processor output can feed `postgres-sink` for hot op
 - Nix with flakes enabled
 - Go, provided by `nix develop`
 - `flowctl` available on `PATH` for local pipeline runs
-- a checkout of `stellar-raw-ledger-origin` for `raw-ledger-source@0.2.2`
 
-Clone both repositories side by side, or set `RAW_LEDGER_SOURCE_REPO` to the source checkout:
+This quickstart builds `raw-ledger-source@0.2.2` from the `stellar-raw-ledger-origin` source repo. Clone both repositories side by side:
 
 ```bash
 git clone https://github.com/withObsrvr/obsrvr-stellar-components.git
-git clone https://github.com/withObsrvr/stellar-raw-ledger-origin.git
+git clone --branch v0.2.2 https://github.com/withObsrvr/stellar-raw-ledger-origin.git
 ```
 
-If you already have `stellar-raw-ledger-origin` somewhere else:
+If you already have `stellar-raw-ledger-origin` somewhere else, point the quickstart at it:
 
 ```bash
 export RAW_LEDGER_SOURCE_REPO="/path/to/stellar-raw-ledger-origin"
 ```
+
+The separate checkout is only needed because `raw-ledger-source` is the external source component for this repo. Once you have a published `raw-ledger-source` binary or container image in your environment, you can use that instead of building from source.
 
 ## 1. Enter the Reproducible Shell
 
