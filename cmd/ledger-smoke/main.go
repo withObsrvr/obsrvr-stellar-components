@@ -25,6 +25,8 @@ func main() {
 		archiveStorage    = flag.String("archive-storage-type", envOr("ARCHIVE_STORAGE_TYPE", envOr("STORAGE_TYPE", "GCS")), "archive storage type: GCS or S3")
 		archiveBucket     = flag.String("archive-bucket-name", envOr("ARCHIVE_BUCKET_NAME", envOr("BUCKET_NAME", "")), "archive bucket name")
 		archivePath       = flag.String("archive-path", envOr("ARCHIVE_PATH", envOr("BUCKET_PATH", "")), "optional archive prefix inside bucket")
+		awsRegion         = flag.String("aws-region", envOr("AWS_REGION", "us-east-1"), "AWS region for S3 archive storage")
+		s3EndpointURL     = flag.String("s3-endpoint-url", envOr("S3_ENDPOINT_URL", ""), "optional S3-compatible endpoint URL")
 		ledgersPerFile    = flag.Uint("ledgers-per-file", envUint("LEDGERS_PER_FILE", 64), "archive ledgers per object")
 		filesPerPartition = flag.Uint("files-per-partition", envUint("FILES_PER_PARTITION", 10), "archive files per partition")
 		bufferSize        = flag.Uint("buffer-size", envUint("BUFFER_SIZE", 5), "archive read-ahead buffer size")
@@ -49,6 +51,8 @@ func main() {
 		archiveStorage:    *archiveStorage,
 		archiveBucket:     *archiveBucket,
 		archivePath:       *archivePath,
+		awsRegion:         *awsRegion,
+		s3EndpointURL:     *s3EndpointURL,
 		ledgersPerFile:    uint32(*ledgersPerFile),
 		filesPerPartition: uint32(*filesPerPartition),
 		bufferSize:        uint32(*bufferSize),
@@ -123,6 +127,8 @@ type smokeConfig struct {
 	archiveStorage    string
 	archiveBucket     string
 	archivePath       string
+	awsRegion         string
+	s3EndpointURL     string
 	ledgersPerFile    uint32
 	filesPerPartition uint32
 	bufferSize        uint32
@@ -167,6 +173,12 @@ func newArchiveBackend(ctx context.Context, cfg smokeConfig) (ledgerbackend.Ledg
 	}
 	params := map[string]string{
 		"destination_bucket_path": archiveBucketPath(cfg.archiveBucket, cfg.archivePath),
+	}
+	if storageType == "S3" {
+		params["region"] = cfg.awsRegion
+		if cfg.s3EndpointURL != "" {
+			params["endpoint_url"] = cfg.s3EndpointURL
+		}
 	}
 	dataStore, err := datastore.NewDataStore(ctx, datastore.DataStoreConfig{
 		Type:   storageType,

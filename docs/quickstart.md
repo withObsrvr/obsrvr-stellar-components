@@ -27,25 +27,36 @@ After JSONL works, the same processor output can feed `postgres-sink` for hot op
 - Nix with flakes enabled
 - Go, provided by `nix develop`
 - `flowctl` available on `PATH` for local pipeline runs
-- `raw-ledger-source@0.2.2`, built from `stellar-raw-ledger-origin`
-- GCS credentials when using the Obsrvr GCS archive
+- a checkout of `stellar-raw-ledger-origin` for `raw-ledger-source@0.2.2`
 
-For the current local workspace layout, the source repo is expected at:
+Clone both repositories side by side, or set `RAW_LEDGER_SOURCE_REPO` to the source checkout:
 
-```text
-/home/tillman/Documents/stellar-raw-ledger-origin
+```bash
+git clone https://github.com/withObsrvr/obsrvr-stellar-components.git
+git clone https://github.com/withObsrvr/stellar-raw-ledger-origin.git
 ```
 
-For a different machine, set `RAW_LEDGER_SOURCE_REPO` to the checkout path.
+If you already have `stellar-raw-ledger-origin` somewhere else:
+
+```bash
+export RAW_LEDGER_SOURCE_REPO="/path/to/stellar-raw-ledger-origin"
+```
 
 ## 1. Enter the Reproducible Shell
 
 ```bash
-cd /home/tillman/Documents/obsrvr-stellar-components
+cd obsrvr-stellar-components
 nix develop
 ```
 
 The flake pins the Go and protobuf toolchain used by the repo.
+
+Install `flowctl` inside the shell if it is not already available:
+
+```bash
+go install github.com/withobsrvr/flowctl@latest
+export PATH="$HOME/go/bin:$PATH"
+```
 
 ## 2. Verify and Build Components
 
@@ -67,17 +78,18 @@ bin/ducklake-sink
 
 ## 3. Smoke Test One Mainnet Ledger
 
-Before running flowctl, verify archive access, XDR decode, and normalization directly:
+Before running flowctl, verify archive access, XDR decode, and normalization directly. This example uses the public AWS Stellar archive, which does not require Obsrvr credentials:
 
 ```bash
 go run ./cmd/ledger-smoke \
   -backend ARCHIVE \
-  -archive-storage-type GCS \
-  -archive-bucket-name obsrvr-stellar-ledger-data-pubnet-data \
-  -archive-path landing/ledgers/pubnet \
+  -archive-storage-type S3 \
+  -archive-bucket-name aws-public-blockchain \
+  -archive-path v1.1/stellar/ledgers/pubnet \
+  -aws-region us-east-2 \
   -ledgers-per-file 1 \
   -files-per-partition 64000 \
-  -ledger 60200000 \
+  -ledger 62080000 \
   -timeout 60s
 ```
 
@@ -88,19 +100,20 @@ A successful run prints a `stellar.ledger.batch.v1` summary with non-zero transa
 Build the external source binary:
 
 ```bash
-export RAW_LEDGER_SOURCE_REPO="${RAW_LEDGER_SOURCE_REPO:-/home/tillman/Documents/stellar-raw-ledger-origin}"
-mkdir -p /tmp/obsrvr-stellar-quickstart
+export COMPONENTS_REPO="$(pwd)"
+export RAW_LEDGER_SOURCE_REPO="${RAW_LEDGER_SOURCE_REPO:-../stellar-raw-ledger-origin}"
+export QUICKSTART_DIR="$(mktemp -d "${TMPDIR:-/tmp}/obsrvr-stellar-quickstart.XXXXXX")"
 
 (
   cd "$RAW_LEDGER_SOURCE_REPO/source"
-  go build -o /tmp/obsrvr-stellar-quickstart/raw-ledger-source ./cmd/raw-ledger-source
+  go build -o "$QUICKSTART_DIR/raw-ledger-source" ./cmd/raw-ledger-source
 )
 ```
 
 Create a one-ledger archive pipeline:
 
 ```bash
-cat >/tmp/obsrvr-stellar-quickstart/archive-jsonl.yaml <<'YAML'
+cat >"$QUICKSTART_DIR/archive-jsonl.yaml" <<YAML
 apiVersion: flowctl/v1
 kind: Pipeline
 metadata:
@@ -110,18 +123,19 @@ spec:
   sources:
     - id: raw-ledger-source
       type: source
-      command: ["/tmp/obsrvr-stellar-quickstart/raw-ledger-source"]
+      command: ["$QUICKSTART_DIR/raw-ledger-source"]
       env:
         FLOWCTL_COMPONENT_ID: "raw-ledger-source"
         BACKEND_TYPE: "ARCHIVE"
-        ARCHIVE_STORAGE_TYPE: "GCS"
-        ARCHIVE_BUCKET_NAME: "obsrvr-stellar-ledger-data-pubnet-data"
-        ARCHIVE_PATH: "landing/ledgers/pubnet"
+        ARCHIVE_STORAGE_TYPE: "S3"
+        ARCHIVE_BUCKET_NAME: "aws-public-blockchain"
+        ARCHIVE_PATH: "v1.1/stellar/ledgers/pubnet"
+        AWS_REGION: "us-east-2"
         LEDGERS_PER_FILE: "1"
         FILES_PER_PARTITION: "64000"
         NETWORK_PASSPHRASE: "Public Global Stellar Network ; September 2015"
-        START_LEDGER: "60200000"
-        END_LEDGER: "60200000"
+        START_LEDGER: "62080000"
+        END_LEDGER: "62080000"
         GRPC_PORT: "55171"
         HEALTH_PORT: "19181"
         FLOWCTL_ENDPOINT: "127.0.0.1:19180"
@@ -129,7 +143,7 @@ spec:
   processors:
     - id: stellar-ledger-processor
       type: processor
-      command: ["/home/tillman/Documents/obsrvr-stellar-components/bin/stellar-ledger-processor"]
+      command: ["$COMPONENTS_REPO/bin/stellar-ledger-processor"]
       inputs: ["raw-ledger-source"]
       env:
         COMPONENT_ID: "stellar-ledger-processor"
@@ -142,11 +156,11 @@ spec:
   sinks:
     - id: jsonl-sink
       type: sink
-      command: ["/home/tillman/Documents/obsrvr-stellar-components/bin/jsonl-sink"]
+      command: ["$COMPONENTS_REPO/bin/jsonl-sink"]
       inputs: ["stellar-ledger-processor"]
       env:
         COMPONENT_ID: "jsonl-sink"
-        JSONL_PATH: "/tmp/obsrvr-stellar-quickstart/ledger_batches.jsonl"
+        JSONL_PATH: "$QUICKSTART_DIR/ledger_batches.jsonl"
         PORT: ":55173"
         HEALTH_PORT: "19183"
         ENABLE_FLOWCTL: "true"
@@ -159,21 +173,21 @@ Run it:
 ```bash
 timeout 75s flowctl run \
   --control-plane-port 19180 \
-  --db-path /tmp/obsrvr-stellar-quickstart/flowctl.db \
-  --log-dir /tmp/obsrvr-stellar-quickstart/logs \
-  /tmp/obsrvr-stellar-quickstart/archive-jsonl.yaml
+  --db-path "$QUICKSTART_DIR/flowctl.db" \
+  --log-dir "$QUICKSTART_DIR/logs" \
+  "$QUICKSTART_DIR/archive-jsonl.yaml"
 ```
 
 `flowctl run` is a supervisor, so `timeout` ending the process is expected for this bounded smoke test. The pass condition is one JSONL row:
 
 ```bash
-wc -l /tmp/obsrvr-stellar-quickstart/ledger_batches.jsonl
+wc -l "$QUICKSTART_DIR/ledger_batches.jsonl"
 ```
 
 Expected:
 
 ```text
-1 /tmp/obsrvr-stellar-quickstart/ledger_batches.jsonl
+1 <quickstart-dir>/ledger_batches.jsonl
 ```
 
 Inspect the payload:
@@ -184,7 +198,26 @@ jq '{
   txs: (.transactions | length),
   ops: (.operations | length),
   bronzeRows: (.bronzeRows | length)
-}' /tmp/obsrvr-stellar-quickstart/ledger_batches.jsonl
+}' "$QUICKSTART_DIR/ledger_batches.jsonl"
+```
+
+### Using an Obsrvr GCS Archive
+
+If your team has access to an Obsrvr GCS archive, replace the source archive environment with:
+
+```yaml
+BACKEND_TYPE: "ARCHIVE"
+ARCHIVE_STORAGE_TYPE: "GCS"
+ARCHIVE_BUCKET_NAME: "obsrvr-stellar-ledger-data-pubnet-data"
+ARCHIVE_PATH: "landing/ledgers/pubnet"
+LEDGERS_PER_FILE: "1"
+FILES_PER_PARTITION: "64000"
+```
+
+GCS uses Application Default Credentials:
+
+```bash
+gcloud auth application-default login
 ```
 
 ## 5. Materialize to Postgres
