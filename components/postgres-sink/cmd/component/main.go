@@ -30,7 +30,7 @@ func main() {
 
 	consumer.Run(consumer.ConsumerConfig{
 		ConsumerName: "Stellar Ledger Postgres Sink",
-		ComponentID:  "postgres-sink",
+		ComponentID:  getenv("COMPONENT_ID", "postgres-sink"),
 		InputTypes:   []string{contracts.LedgerBatchEventType},
 		OnEvent: func(ctx context.Context, event *flowctlv1.Event) error {
 			if event.Type != contracts.LedgerBatchEventType {
@@ -106,6 +106,13 @@ on conflict (id) do update set
 	}
 
 	return tx.Commit()
+}
+
+func getenv(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
 }
 
 const schemaSQL = `

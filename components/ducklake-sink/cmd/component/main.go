@@ -23,7 +23,7 @@ func main() {
 
 	consumer.Run(consumer.ConsumerConfig{
 		ConsumerName: "Stellar Ledger DuckDB Sink",
-		ComponentID:  "ducklake-sink",
+		ComponentID:  getenv("COMPONENT_ID", "ducklake-sink"),
 		InputTypes:   []string{contracts.LedgerBatchEventType},
 		OnEvent: func(ctx context.Context, event *flowctlv1.Event) error {
 			if event.Type != contracts.LedgerBatchEventType {

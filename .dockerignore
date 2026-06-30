@@ -1,0 +1,12 @@
+.git
+.direnv
+bin
+dist
+result
+result-*
+*.log
+*.db
+*.duckdb
+*.sqlite
+*.jsonl
+vendor

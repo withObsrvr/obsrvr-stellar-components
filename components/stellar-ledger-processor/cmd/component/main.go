@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"os"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
 	"github.com/withObsrvr/flowctl-sdk/pkg/stellar"
@@ -14,7 +15,7 @@ func main() {
 	stellar.Run(stellar.ProcessorConfig{
 		ProcessorName: "Stellar Ledger Processor",
 		OutputType:    contracts.LedgerBatchEventType,
-		ComponentID:   contracts.DefaultComponentID,
+		ComponentID:   getenv("COMPONENT_ID", contracts.DefaultComponentID),
 		ProcessLedger: func(passphrase string, ledger xdr.LedgerCloseMeta) (proto.Message, error) {
 			batch, err := normalize.LedgerBatch(ledger, normalize.Options{
 				NetworkPassphrase: passphrase,
@@ -26,4 +27,11 @@ func main() {
 			return batch, nil
 		},
 	})
+}
+
+func getenv(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
 }
