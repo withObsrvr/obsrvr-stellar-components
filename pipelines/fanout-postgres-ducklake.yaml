@@ -1,4 +1,4 @@
-name: fanout-stellar-ledger-postgres-duckdb
+name: fanout-stellar-ledger-postgres-ducklake
 description: Fan-out pipeline from one normalized ledger batch stream to operational and analytical sinks.
 
 components:

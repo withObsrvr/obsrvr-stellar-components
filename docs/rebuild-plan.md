@@ -484,5 +484,5 @@ Acceptance criteria:
 4. Should checkpoints live in sinks only, or should processors also expose progress/watermark state?
     answer: processors should also expose progress
 
-5. Should `ducklake-sink` write directly to DuckLake first, or start as DuckDB/Parquet and graduate?
+5. Resolved: `ducklake-sink` writes directly to a DuckLake catalog through embedded DuckDB. It is not a DuckDB/Parquet staging sink.
     answer: start with DuckDB first.

@@ -2,7 +2,7 @@ apiVersion: flowctl/v1
 kind: Pipeline
 metadata:
   name: local-archive-ducklake
-  description: Local process pipeline from public Stellar archive to DuckDB-loadable ledger batch files.
+  description: Local process pipeline from public Stellar archive to a DuckLake catalog.
 
 spec:
   driver: process
@@ -47,7 +47,8 @@ spec:
       inputs: ["stellar-ledger-processor"]
       env:
         COMPONENT_ID: "ducklake-sink"
-        DUCKDB_EXPORT_DIR: "./duckdb-ledger-batches"
+        DUCKLAKE_CATALOG_PATH: "./ducklake/stellar.ducklake"
+        DUCKLAKE_DATA_PATH: "./ducklake/data"
         PORT: ":55173"
         HEALTH_PORT: "19183"
         ENABLE_FLOWCTL: "true"

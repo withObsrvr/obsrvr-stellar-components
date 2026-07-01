@@ -1,19 +1,20 @@
 # ducklake-sink
 
-Consumes `stellar.ledger.batch.v1` events and writes partitioned, DuckDB-loadable JSONL files plus a `schema.sql` helper. This is the first analytical materialization step before native DuckLake catalog writes.
+Consumes `stellar.ledger.batch.v1` events and writes them into a DuckLake catalog through embedded DuckDB.
 
 Environment:
 
-- `DUCKDB_EXPORT_DIR`, default `duckdb-ledger-batches`
+- `DUCKLAKE_CATALOG_PATH`, default `ducklake/stellar.ducklake`
+- `DUCKLAKE_DATA_PATH`, default `ducklake/data`
+- `DUCKLAKE_ATTACH_NAME`, default `stellar_lake`
 - `PORT`, default `:50052`
 - `HEALTH_PORT`, default `8089`
 
-Output layout:
+Tables:
 
 ```text
-duckdb-ledger-batches/
-  schema.sql
-  network=<network>/
-    ledger_range=<range>/
-      ledger_<sequence>.jsonl
+ledger_batches
+bronze_rows
 ```
+
+`ledger_batches` stores one row per processed ledger and the full protobuf JSON payload. `bronze_rows` stores the full extractor surface as one row per bronze row. Replaying the same network and ledger sequence deletes and reinserts those rows in one DuckLake transaction.

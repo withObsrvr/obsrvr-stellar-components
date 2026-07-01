@@ -1,5 +1,5 @@
-name: local-stellar-ledger-duckdb
-description: Local analytical materialization pipeline using DuckDB-loadable files.
+name: local-stellar-ledger-ducklake
+description: Local analytical materialization pipeline using a DuckLake catalog.
 
 components:
   raw-ledger-source:
@@ -18,7 +18,8 @@ components:
     type: sink
     inputs: [stellar.ledger.batch.v1]
     env:
-      DUCKDB_EXPORT_DIR: "./duckdb-ledger-batches"
+      DUCKLAKE_CATALOG_PATH: "./ducklake/stellar.ducklake"
+      DUCKLAKE_DATA_PATH: "./ducklake/data"
 
 edges:
   - from: raw-ledger-source

@@ -240,25 +240,35 @@ export POSTGRES_DSN="postgres://postgres:postgres@localhost:5432/postgres?sslmod
 
 Then swap `jsonl-sink` for `postgres-sink` in the pipeline. The sink writes canonical ledger, transaction, and operation tables, plus the full bronze extractor surface in `stellar_bronze_rows` as JSONB.
 
-## 6. Materialize to DuckDB/DuckLake Files
+## 6. Materialize to DuckLake
 
-Use `ducklake-sink` when you want local analytical files that DuckDB can scan:
+Use `ducklake-sink` when you want ledger batches written into a DuckLake catalog:
 
 ```bash
-export DUCKDB_EXPORT_DIR="./duckdb-ledger-batches"
+export DUCKLAKE_CATALOG_PATH="./ducklake/stellar.ducklake"
+export DUCKLAKE_DATA_PATH="./ducklake/data"
 ```
 
-Output layout:
+The sink creates two DuckLake tables:
 
 ```text
-duckdb-ledger-batches/
-  schema.sql
-  network=<network>/
-    ledger_range=<range>/
-      ledger_<sequence>.jsonl
+ledger_batches
+bronze_rows
 ```
 
-Load or query with DuckDB using the generated `schema.sql` helper and JSONL files.
+Query the catalog with DuckDB:
+
+```bash
+duckdb -c "
+INSTALL ducklake;
+LOAD ducklake;
+ATTACH 'ducklake:./ducklake/stellar.ducklake' AS dl;
+USE dl;
+SELECT ledger_sequence, transaction_count, operation_count, bronze_row_count
+FROM ledger_batches;
+SELECT count(*) AS bronze_rows FROM bronze_rows;
+"
+```
 
 ## Choosing the Right Tool
 

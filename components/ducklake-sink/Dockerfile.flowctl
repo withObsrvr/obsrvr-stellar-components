@@ -1,7 +1,7 @@
 FROM golang:1.26-bookworm AS builder
 WORKDIR /src
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /build/component ./components/ducklake-sink/cmd/component
+RUN CGO_ENABLED=1 GOOS=linux go build -ldflags="-s -w" -o /build/component ./components/ducklake-sink/cmd/component
 
 FROM gcr.io/distroless/base-debian12
 LABEL org.opencontainers.image.title="ducklake-sink"

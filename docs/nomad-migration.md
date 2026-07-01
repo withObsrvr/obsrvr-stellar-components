@@ -51,7 +51,9 @@ raw-ledger-source@0.2.2
 
 `ducklake-sink`:
 
-- `DUCKDB_EXPORT_DIR`
+- `DUCKLAKE_CATALOG_PATH`
+- `DUCKLAKE_DATA_PATH`
+- `DUCKLAKE_ATTACH_NAME`
 - `PORT`
 - `HEALTH_PORT`
 - `ENABLE_FLOWCTL`

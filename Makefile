@@ -3,6 +3,7 @@
 GO ?= go
 GOFMT ?= gofmt
 PROTOC ?= protoc
+CGO_ENABLED ?= 1
 
 COMPONENTS := stellar-ledger-processor jsonl-sink postgres-sink ducklake-sink
 
@@ -10,7 +11,7 @@ build:
 	@mkdir -p bin
 	@for component in $(COMPONENTS); do \
 		echo "building $$component"; \
-		$(GO) build -o bin/$$component ./components/$$component/cmd/component; \
+		CGO_ENABLED=$(CGO_ENABLED) $(GO) build -o bin/$$component ./components/$$component/cmd/component; \
 	done
 
 lint:
