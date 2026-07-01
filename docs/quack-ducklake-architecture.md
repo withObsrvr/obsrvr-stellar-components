@@ -34,8 +34,16 @@ index-materializer
   INDEX_NAME=contract_events_index
   -> server-side range rebuild through Quack
 
+ducklake-replica-sync
+  SOURCE_TABLES=bronze.transactions_row_v2,bronze.contract_events_stream_v1
+  TARGET_MODE=quack
+  -> snapshot-driven changed-ledger rebuilds through replica Quack
+
+quack-ducklake-server-replica
+  -> owns the serving/read-replica DuckLake attachment
+
 stellar-query-api / obsrvr-gateway
-  -> query through Quack or purpose-built API readers
+  -> query through replica Quack or purpose-built API readers
 ```
 
 ## Why
@@ -102,6 +110,16 @@ Recommended shape:
 Derived index tables may live in a read/serving replica, but they should not be
 treated as authoritative state. Their correctness should come from replaying
 primary DuckLake snapshots or ledger ranges.
+
+`ducklake-replica-sync` is the first component for this pattern. It keeps its
+own per-table checkpoints in the target DuckLake, discovers changed ledgers with
+`table_changes`, and rebuilds those ledgers in the serving target from the
+current primary rows.
+
+For a continuously available read replica, run a second Quack server for the
+target DuckLake and configure `ducklake-replica-sync` with `TARGET_MODE=quack`.
+The target Quack server owns the serving DuckLake attachment for both replica
+writes and API/user reads.
 
 ## Caveat
 
