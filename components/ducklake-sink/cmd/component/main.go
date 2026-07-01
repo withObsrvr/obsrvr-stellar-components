@@ -51,24 +51,26 @@ func main() {
 }
 
 type DuckLakeConfig struct {
-	Mode          string
-	CatalogPath   string
-	DataPath      string
-	AttachName    string
-	QuackURI      string
-	QuackToken    string
-	QuackRemoteDB string
+	Mode            string
+	CatalogPath     string
+	DataPath        string
+	AttachName      string
+	QuackURI        string
+	QuackToken      string
+	QuackRemoteDB   string
+	QuackDisableSSL bool
 }
 
 func DuckLakeConfigFromEnv() DuckLakeConfig {
 	return DuckLakeConfig{
-		Mode:          strings.ToLower(getenv("DUCKLAKE_MODE", "embedded")),
-		CatalogPath:   getenv("DUCKLAKE_CATALOG_PATH", "ducklake/stellar.ducklake"),
-		DataPath:      getenv("DUCKLAKE_DATA_PATH", "ducklake/data"),
-		AttachName:    getenv("DUCKLAKE_ATTACH_NAME", "stellar_lake"),
-		QuackURI:      getenv("QUACK_URI", "quack:127.0.0.1:9494"),
-		QuackToken:    getenv("QUACK_TOKEN", ""),
-		QuackRemoteDB: getenv("QUACK_REMOTE_DB", "remote_lake"),
+		Mode:            strings.ToLower(getenv("DUCKLAKE_MODE", "embedded")),
+		CatalogPath:     getenv("DUCKLAKE_CATALOG_PATH", "ducklake/stellar.ducklake"),
+		DataPath:        getenv("DUCKLAKE_DATA_PATH", "ducklake/data"),
+		AttachName:      getenv("DUCKLAKE_ATTACH_NAME", "stellar_lake"),
+		QuackURI:        getenv("QUACK_URI", "quack:127.0.0.1:9494"),
+		QuackToken:      getenv("QUACK_TOKEN", ""),
+		QuackRemoteDB:   getenv("QUACK_REMOTE_DB", "remote_lake"),
+		QuackDisableSSL: getenvBool("QUACK_DISABLE_SSL", true),
 	}
 }
 
@@ -179,10 +181,11 @@ func (s *DuckLakeSink) initQuack(cfg DuckLakeConfig) error {
 		"INSTALL quack",
 		"LOAD quack",
 		fmt.Sprintf(
-			"ATTACH '%s' AS %s (TOKEN '%s', DISABLE_SSL true)",
+			"ATTACH '%s' AS %s (TOKEN '%s', DISABLE_SSL %t)",
 			escapeSQLString(cfg.QuackURI),
 			s.remoteDB,
 			escapeSQLString(cfg.QuackToken),
+			cfg.QuackDisableSSL,
 		),
 	}
 	for _, stmt := range stmts {
@@ -477,6 +480,14 @@ func getenv(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func getenvBool(key string, fallback bool) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if value == "" {
+		return fallback
+	}
+	return value == "1" || value == "true" || value == "yes"
 }
 
 const createLedgerBatchesSQL = `

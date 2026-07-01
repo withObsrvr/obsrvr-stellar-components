@@ -24,10 +24,17 @@ each transformer attaching the catalog independently.
 - `QUACK_URI`, default `quack:127.0.0.1:9494`
 - `QUACK_TOKEN`, required
 - `QUACK_REMOTE_DB`, default `remote_lake`
+- `QUACK_DISABLE_SSL`, default `true`
 - `DUCKLAKE_ATTACH_NAME`, default `stellar_lake`
 - `INDEX_NAME`, default `tx_hash_index`
 - `START_LEDGER`, default `0`
 - `END_LEDGER`, default max int64
+
+`START_LEDGER` and `END_LEDGER` must be unsigned integers. Each run rebuilds
+the requested ledger range by deleting existing derived rows for
+`(START_LEDGER, END_LEDGER]` and inserting them again from bronze tables in the
+same remote transaction. That keeps reruns idempotent and also handles corrected
+or replayed source ledgers.
 
 ## Local Examples
 

@@ -40,8 +40,8 @@ func configFromEnv() config {
 		AttachName:         sanitizeIdentifier(getenv("DUCKLAKE_ATTACH_NAME", "stellar_lake")),
 		URI:                getenv("QUACK_URI", "quack:127.0.0.1:9494"),
 		Token:              getenv("QUACK_TOKEN", ""),
-		AllowOtherHostname: getenv("QUACK_ALLOW_OTHER_HOSTNAME", "true") == "true",
-		DisableSSL:         getenv("QUACK_DISABLE_SSL", "true") == "true",
+		AllowOtherHostname: getenvBool("QUACK_ALLOW_OTHER_HOSTNAME", true),
+		DisableSSL:         getenvBool("QUACK_DISABLE_SSL", true),
 	}
 }
 
@@ -113,6 +113,14 @@ func getenv(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func getenvBool(key string, fallback bool) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if value == "" {
+		return fallback
+	}
+	return value == "1" || value == "true" || value == "yes"
 }
 
 func escapeSQLString(value string) string {
