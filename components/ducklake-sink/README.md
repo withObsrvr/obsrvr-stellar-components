@@ -16,6 +16,7 @@ Environment:
 - `QUACK_URI`, default `quack:127.0.0.1:9494`
 - `QUACK_TOKEN`, required when `DUCKLAKE_MODE=quack`
 - `QUACK_REMOTE_DB`, default `remote_lake`
+- `QUACK_DISABLE_SSL`, default `true`
 - `PORT`, default `:50052`
 - `HEALTH_PORT`, default `8089`
 
