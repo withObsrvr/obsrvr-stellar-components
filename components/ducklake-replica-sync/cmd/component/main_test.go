@@ -79,3 +79,84 @@ func TestUIntListSQL(t *testing.T) {
 		t.Fatalf("uint list = %q", got)
 	}
 }
+
+func TestChangedLedgersSQL(t *testing.T) {
+	cfg := config{SourceCatalog: "stellar_lake"}
+	table := sourceTable{Name: "bronze.transactions_row_v2", LedgerColumn: "ledger_sequence"}
+
+	sqlText := changedLedgersSQL(cfg, table, "bronze", "transactions_row_v2", 11, 22)
+	for _, want := range []string{
+		"USE stellar_lake; USE bronze;",
+		`SELECT DISTINCT "ledger_sequence"`,
+		"FROM table_changes('transactions_row_v2', 11, 22)",
+		`WHERE "ledger_sequence" IS NOT NULL`,
+	} {
+		if !strings.Contains(sqlText, want) {
+			t.Fatalf("changed ledgers SQL missing %q:\n%s", want, sqlText)
+		}
+	}
+}
+
+func TestRebuildTargetLedgerBatchQuackSQL(t *testing.T) {
+	cfg := config{
+		QuackURI:         "quack:primary:9494",
+		QuackToken:       "primary's secret",
+		DisableSSL:       true,
+		SourceCatalog:    "stellar_lake",
+		TargetAttachName: "serving_lake",
+	}
+	table := sourceTable{Name: "bronze.transactions_row_v2", LedgerColumn: "ledger_sequence"}
+
+	sqlText := rebuildTargetLedgerBatchQuackSQL(cfg, table, []uint64{100, 101})
+	for _, want := range []string{
+		"ATTACH IF NOT EXISTS 'quack:primary:9494' AS replica_primary",
+		"CREATE SCHEMA IF NOT EXISTS serving_lake.bronze",
+		"CREATE TABLE IF NOT EXISTS serving_lake.bronze.transactions_row_v2",
+		"BEGIN TRANSACTION;",
+		`DELETE FROM serving_lake.bronze.transactions_row_v2 WHERE "ledger_sequence" IN (100, 101);`,
+		"INSERT INTO serving_lake.bronze.transactions_row_v2 SELECT * FROM replica_primary.query",
+		"COMMIT;",
+	} {
+		if !strings.Contains(sqlText, want) {
+			t.Fatalf("quack rebuild SQL missing %q:\n%s", want, sqlText)
+		}
+	}
+	if strings.Contains(sqlText, "sync_checkpoints") {
+		t.Fatalf("quack rebuild batch should not checkpoint before all chunks complete:\n%s", sqlText)
+	}
+	if !strings.Contains(sqlText, "primary''s secret") {
+		t.Fatalf("quack rebuild SQL did not escape token literal:\n%s", sqlText)
+	}
+}
+
+func TestChunkUint64s(t *testing.T) {
+	chunks := chunkUint64s([]uint64{1, 2, 3, 4, 5}, 2)
+	if len(chunks) != 3 {
+		t.Fatalf("chunk count = %d, want 3", len(chunks))
+	}
+	if got := uintListSQL(chunks[0]); got != "1, 2" {
+		t.Fatalf("chunk 0 = %q", got)
+	}
+	if got := uintListSQL(chunks[2]); got != "5" {
+		t.Fatalf("chunk 2 = %q", got)
+	}
+}
+
+func TestGetenvTrimsWhitespace(t *testing.T) {
+	t.Setenv("DUCKLAKE_REPLICA_SYNC_TEST_VALUE", "   ")
+	if got := getenv("DUCKLAKE_REPLICA_SYNC_TEST_VALUE", "fallback"); got != "fallback" {
+		t.Fatalf("whitespace env = %q, want fallback", got)
+	}
+
+	t.Setenv("DUCKLAKE_REPLICA_SYNC_TEST_VALUE", "  configured  ")
+	if got := getenv("DUCKLAKE_REPLICA_SYNC_TEST_VALUE", "fallback"); got != "configured" {
+		t.Fatalf("trimmed env = %q, want configured", got)
+	}
+}
+
+func TestInitStepNameRedactsAttachSQL(t *testing.T) {
+	stmt := "ATTACH 'quack:127.0.0.1:9494' AS remote_lake (TOKEN 'secret', DISABLE_SSL true)"
+	if got := initStepName(stmt); got != "attach Quack" {
+		t.Fatalf("init step name = %q", got)
+	}
+}

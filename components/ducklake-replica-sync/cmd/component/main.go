@@ -38,6 +38,7 @@ type config struct {
 	TargetQuackToken  string
 	TargetQuackRemote string
 	TargetDisableSSL  bool
+	LedgerBatchSize   int
 }
 
 type sourceTable struct {
@@ -78,6 +79,7 @@ func configFromEnv() config {
 		TargetQuackToken:  getenv("TARGET_QUACK_TOKEN", ""),
 		TargetQuackRemote: sanitizeIdentifier(getenv("TARGET_QUACK_REMOTE_DB", "target_lake")),
 		TargetDisableSSL:  getenvBool("TARGET_QUACK_DISABLE_SSL", getenvBool("QUACK_DISABLE_SSL", true)),
+		LedgerBatchSize:   int(mustParseUintEnv("LEDGER_BATCH_SIZE", "1000")),
 	}
 }
 
@@ -105,6 +107,9 @@ func run(ctx context.Context, cfg config) error {
 		}
 	default:
 		return fmt.Errorf("unsupported TARGET_MODE %q", cfg.TargetMode)
+	}
+	if cfg.LedgerBatchSize <= 0 {
+		return fmt.Errorf("LEDGER_BATCH_SIZE must be greater than zero")
 	}
 
 	db, err := sql.Open("duckdb", "")
@@ -181,12 +186,38 @@ func initDuckDB(ctx context.Context, db *sql.DB, cfg config) error {
 			cfg.TargetDisableSSL,
 		))
 	}
-	for _, stmt := range stmts {
+	for i, stmt := range stmts {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("init %q: %w", stmt, err)
+			return fmt.Errorf("init step %d (%s): %w", i+1, initStepName(stmt), err)
 		}
 	}
 	return initTargetMetadata(ctx, db, cfg)
+}
+
+func initStepName(stmt string) string {
+	stmt = strings.TrimSpace(stmt)
+	switch {
+	case strings.HasPrefix(stmt, "SET home_directory"):
+		return "set home_directory"
+	case stmt == "INSTALL ducklake":
+		return "install ducklake"
+	case stmt == "LOAD ducklake":
+		return "load ducklake"
+	case stmt == "INSTALL quack":
+		return "install quack"
+	case stmt == "LOAD quack":
+		return "load quack"
+	case strings.HasPrefix(stmt, "ATTACH 'ducklake:"):
+		return "attach target DuckLake"
+	case strings.HasPrefix(stmt, "ATTACH '"):
+		return "attach Quack"
+	default:
+		fields := strings.Fields(stmt)
+		if len(fields) == 0 {
+			return "empty statement"
+		}
+		return strings.ToLower(fields[0])
+	}
 }
 
 func syncTable(ctx context.Context, db *sql.DB, cfg config, table sourceTable, current uint64) error {
@@ -218,8 +249,11 @@ func syncTable(ctx context.Context, db *sql.DB, cfg config, table sourceTable, c
 		return nil
 	}
 
-	if err := rebuildTargetLedgers(ctx, db, cfg, table, ledgers, current); err != nil {
+	if err := rebuildTargetLedgers(ctx, db, cfg, table, ledgers); err != nil {
 		_ = saveCheckpoint(ctx, db, cfg, table, fromSnapshot, "error", err.Error())
+		return err
+	}
+	if err := saveCheckpoint(ctx, db, cfg, table, current, "ok", ""); err != nil {
 		return err
 	}
 	log.Printf("table=%s changed_ledgers=%d checkpoint=%d", table.Name, len(ledgers), current)
@@ -313,16 +347,7 @@ LIMIT 1`,
 
 func changedLedgers(ctx context.Context, db *sql.DB, cfg config, table sourceTable, fromSnapshot, toSnapshot uint64) ([]uint64, error) {
 	schema, tableName := splitTableName(table.Name)
-	sourceSQL := fmt.Sprintf(
-		"USE %s; USE %s; SELECT DISTINCT %s FROM table_changes('%s', %d, %d) WHERE %s IS NOT NULL ORDER BY 1",
-		cfg.SourceCatalog,
-		schema,
-		quoteIdentifier(table.LedgerColumn),
-		escapeSQLString(tableName),
-		fromSnapshot,
-		toSnapshot,
-		quoteIdentifier(table.LedgerColumn),
-	)
+	sourceSQL := changedLedgersSQL(cfg, table, schema, tableName, fromSnapshot, toSnapshot)
 	rows, err := db.QueryContext(ctx, fmt.Sprintf("SELECT * FROM %s.query(?)", cfg.QuackRemoteDB), sourceSQL)
 	if err != nil {
 		return nil, fmt.Errorf("read changed ledgers for %s snapshots [%d,%d]: %w", table.Name, fromSnapshot, toSnapshot, err)
@@ -343,23 +368,38 @@ func changedLedgers(ctx context.Context, db *sql.DB, cfg config, table sourceTab
 	return ledgers, nil
 }
 
-func rebuildTargetLedgers(ctx context.Context, db *sql.DB, cfg config, table sourceTable, ledgers []uint64, snapshot uint64) error {
-	if cfg.TargetMode == "quack" {
-		return rebuildTargetLedgersQuack(ctx, db, cfg, table, ledgers, snapshot)
-	}
-	return rebuildTargetLedgersEmbedded(ctx, db, cfg, table, ledgers, snapshot)
+func changedLedgersSQL(cfg config, table sourceTable, schema, tableName string, fromSnapshot, toSnapshot uint64) string {
+	return fmt.Sprintf(
+		"USE %s; USE %s; SELECT DISTINCT %s FROM table_changes('%s', %d, %d) WHERE %s IS NOT NULL ORDER BY 1",
+		cfg.SourceCatalog,
+		schema,
+		quoteIdentifier(table.LedgerColumn),
+		escapeSQLString(tableName),
+		fromSnapshot,
+		toSnapshot,
+		quoteIdentifier(table.LedgerColumn),
+	)
 }
 
-func rebuildTargetLedgersEmbedded(ctx context.Context, db *sql.DB, cfg config, table sourceTable, ledgers []uint64, snapshot uint64) error {
+func rebuildTargetLedgers(ctx context.Context, db *sql.DB, cfg config, table sourceTable, ledgers []uint64) error {
+	for _, batch := range chunkUint64s(ledgers, cfg.LedgerBatchSize) {
+		if cfg.TargetMode == "quack" {
+			if err := rebuildTargetLedgerBatchQuack(ctx, db, cfg, table, batch); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := rebuildTargetLedgerBatchEmbedded(ctx, db, cfg, table, batch); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rebuildTargetLedgerBatchEmbedded(ctx context.Context, db *sql.DB, cfg config, table sourceTable, ledgers []uint64) error {
 	targetTable := targetTableName(cfg, table)
-	sourceTable := fmt.Sprintf("%s.%s", cfg.SourceCatalog, table.Name)
 	ledgerList := uintListSQL(ledgers)
-	sourceSelect := fmt.Sprintf(
-		"SELECT * FROM %s WHERE %s IN (%s)",
-		sourceTable,
-		quoteIdentifier(table.LedgerColumn),
-		ledgerList,
-	)
+	sourceSelect := sourceRowsSQL(cfg, table, ledgerList)
 
 	stmts := []string{
 		"BEGIN TRANSACTION",
@@ -371,8 +411,6 @@ func rebuildTargetLedgersEmbedded(ctx context.Context, db *sql.DB, cfg config, t
 		),
 		fmt.Sprintf("DELETE FROM %s WHERE %s IN (%s)", targetTable, quoteIdentifier(table.LedgerColumn), ledgerList),
 		fmt.Sprintf("INSERT INTO %s SELECT * FROM %s.query(?)", targetTable, cfg.QuackRemoteDB),
-		deleteCheckpointSQL(cfg, table),
-		insertCheckpointSQL(cfg, table, snapshot, "ok", ""),
 		"COMMIT",
 	}
 
@@ -401,39 +439,32 @@ func rebuildTargetLedgersEmbedded(ctx context.Context, db *sql.DB, cfg config, t
 		}
 	}
 	if _, err := db.ExecContext(ctx, stmts[5]); err != nil {
-		_ = rollback(ctx, db)
-		return fmt.Errorf("delete checkpoint for %s: %w", table.Name, err)
-	}
-	if _, err := db.ExecContext(ctx, stmts[6]); err != nil {
-		_ = rollback(ctx, db)
-		return fmt.Errorf("insert checkpoint for %s: %w", table.Name, err)
-	}
-	if _, err := db.ExecContext(ctx, stmts[7]); err != nil {
 		_ = rollback(context.Background(), db)
 		return fmt.Errorf("commit target rebuild for %s: %w", table.Name, err)
 	}
 	return nil
 }
 
-func rebuildTargetLedgersQuack(ctx context.Context, db *sql.DB, cfg config, table sourceTable, ledgers []uint64, snapshot uint64) error {
+func rebuildTargetLedgerBatchQuack(ctx context.Context, db *sql.DB, cfg config, table sourceTable, ledgers []uint64) error {
+	script := rebuildTargetLedgerBatchQuackSQL(cfg, table, ledgers)
+	if err := execTargetScript(ctx, db, cfg, script); err != nil {
+		_ = execTargetScript(context.Background(), db, cfg, "ROLLBACK;")
+		return fmt.Errorf("target quack rebuild for %s: %w", table.Name, err)
+	}
+	return nil
+}
+
+func rebuildTargetLedgerBatchQuackSQL(cfg config, table sourceTable, ledgers []uint64) string {
 	targetTable := targetTableName(cfg, table)
-	sourceTable := fmt.Sprintf("%s.%s", cfg.SourceCatalog, table.Name)
 	ledgerList := uintListSQL(ledgers)
-	sourceSelect := fmt.Sprintf(
-		"SELECT * FROM %s WHERE %s IN (%s)",
-		sourceTable,
-		quoteIdentifier(table.LedgerColumn),
-		ledgerList,
-	)
+	sourceSelect := sourceRowsSQL(cfg, table, ledgerList)
 	primaryRemote := "replica_primary"
-	script := fmt.Sprintf(`ATTACH IF NOT EXISTS %s AS %s (TOKEN %s, DISABLE_SSL %t);
+	return fmt.Sprintf(`ATTACH IF NOT EXISTS %s AS %s (TOKEN %s, DISABLE_SSL %t);
 %s;
 CREATE TABLE IF NOT EXISTS %s AS SELECT * FROM %s.query(%s) WHERE 1=0;
 BEGIN TRANSACTION;
 DELETE FROM %s WHERE %s IN (%s);
 INSERT INTO %s SELECT * FROM %s.query(%s);
-%s;
-%s;
 COMMIT;`,
 		sqlLiteral(cfg.QuackURI),
 		primaryRemote,
@@ -449,14 +480,17 @@ COMMIT;`,
 		targetTable,
 		primaryRemote,
 		sqlLiteral(sourceSelect),
-		deleteCheckpointSQL(cfg, table),
-		insertCheckpointSQL(cfg, table, snapshot, "ok", ""),
 	)
-	if err := execTargetScript(ctx, db, cfg, script); err != nil {
-		_ = execTargetScript(context.Background(), db, cfg, "ROLLBACK;")
-		return fmt.Errorf("target quack rebuild for %s: %w", table.Name, err)
-	}
-	return nil
+}
+
+func sourceRowsSQL(cfg config, table sourceTable, ledgerList string) string {
+	return fmt.Sprintf(
+		"SELECT * FROM %s.%s WHERE %s IN (%s)",
+		cfg.SourceCatalog,
+		table.Name,
+		quoteIdentifier(table.LedgerColumn),
+		ledgerList,
+	)
 }
 
 func saveCheckpoint(ctx context.Context, db *sql.DB, cfg config, table sourceTable, snapshot uint64, status, message string) error {
@@ -615,6 +649,21 @@ func uintListSQL(values []uint64) string {
 	return strings.Join(parts, ", ")
 }
 
+func chunkUint64s(values []uint64, size int) [][]uint64 {
+	if size <= 0 {
+		size = len(values)
+	}
+	var chunks [][]uint64
+	for start := 0; start < len(values); start += size {
+		end := start + size
+		if end > len(values) {
+			end = len(values)
+		}
+		chunks = append(chunks, values[start:end])
+	}
+	return chunks
+}
+
 func parseUintEnv(key, fallback string) (uint64, error) {
 	value := getenv(key, fallback)
 	parsed, err := strconv.ParseUint(value, 10, 64)
@@ -624,8 +673,16 @@ func parseUintEnv(key, fallback string) (uint64, error) {
 	return parsed, nil
 }
 
+func mustParseUintEnv(key, fallback string) uint64 {
+	value, err := parseUintEnv(key, fallback)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return value
+}
+
 func getenv(key, fallback string) string {
-	if value := os.Getenv(key); value != "" {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 		return value
 	}
 	return fallback

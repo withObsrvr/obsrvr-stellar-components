@@ -26,6 +26,7 @@ those ledgers in the target table from the current primary table contents.
 - `TARGET_QUACK_TOKEN`, required when `TARGET_MODE=quack`
 - `TARGET_QUACK_REMOTE_DB`, default `target_lake`
 - `TARGET_QUACK_DISABLE_SSL`, default `QUACK_DISABLE_SSL`
+- `LEDGER_BATCH_SIZE`, default `1000`
 
 Optional ledger column overrides:
 
@@ -60,6 +61,10 @@ to the target Quack server. The target server attaches the primary Quack endpoin
 inside that server-side script, pulls current primary rows, rebuilds target
 ledgers, and commits the checkpoint. This keeps the target DuckLake attachment
 owned by the read-replica Quack server while replication is running.
+
+Changed ledgers are rebuilt in bounded batches controlled by
+`LEDGER_BATCH_SIZE`. The table checkpoint advances only after all batches for
+that table have completed.
 
 ## Semantics
 
