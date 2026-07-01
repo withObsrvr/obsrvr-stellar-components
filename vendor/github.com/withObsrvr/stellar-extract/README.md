@@ -8,7 +8,7 @@ Shared Go library for extracting typed rows from Stellar ledger data. Single sou
 go get github.com/withObsrvr/stellar-extract@latest
 ```
 
-Only dependency: `github.com/stellar/go-stellar-sdk v0.5.0`
+Only dependency: `github.com/stellar/go-stellar-sdk v0.6.0`
 
 ## Quick start
 
