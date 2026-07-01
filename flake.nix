@@ -66,6 +66,8 @@
           jsonl-sink = buildComponent "jsonl-sink";
           postgres-sink = buildComponent "postgres-sink";
           ducklake-sink = buildComponent "ducklake-sink";
+          quack-ducklake-server = buildComponent "quack-ducklake-server";
+          index-materializer = buildComponent "index-materializer";
           default = stellar-ledger-processor;
         });
     };

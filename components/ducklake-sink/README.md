@@ -1,12 +1,21 @@
 # ducklake-sink
 
-Consumes `stellar.ledger.batch.v1` events and writes them into a DuckLake catalog through embedded DuckDB.
+Consumes `stellar.ledger.batch.v1` events and writes them into a DuckLake catalog.
+
+The sink supports two modes:
+
+- `DUCKLAKE_MODE=embedded`, default: attach DuckLake directly from this process.
+- `DUCKLAKE_MODE=quack`: send write SQL to a `quack-ducklake-server` that owns the DuckLake attachment.
 
 Environment:
 
+- `DUCKLAKE_MODE`, default `embedded`
 - `DUCKLAKE_CATALOG_PATH`, default `ducklake/stellar.ducklake`
 - `DUCKLAKE_DATA_PATH`, default `ducklake/data`
 - `DUCKLAKE_ATTACH_NAME`, default `stellar_lake`
+- `QUACK_URI`, default `quack:127.0.0.1:9494`
+- `QUACK_TOKEN`, required when `DUCKLAKE_MODE=quack`
+- `QUACK_REMOTE_DB`, default `remote_lake`
 - `PORT`, default `:50052`
 - `HEALTH_PORT`, default `8089`
 

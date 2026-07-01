@@ -51,34 +51,54 @@ func main() {
 }
 
 type DuckLakeConfig struct {
-	CatalogPath string
-	DataPath    string
-	AttachName  string
+	Mode          string
+	CatalogPath   string
+	DataPath      string
+	AttachName    string
+	QuackURI      string
+	QuackToken    string
+	QuackRemoteDB string
 }
 
 func DuckLakeConfigFromEnv() DuckLakeConfig {
 	return DuckLakeConfig{
-		CatalogPath: getenv("DUCKLAKE_CATALOG_PATH", "ducklake/stellar.ducklake"),
-		DataPath:    getenv("DUCKLAKE_DATA_PATH", "ducklake/data"),
-		AttachName:  getenv("DUCKLAKE_ATTACH_NAME", "stellar_lake"),
+		Mode:          strings.ToLower(getenv("DUCKLAKE_MODE", "embedded")),
+		CatalogPath:   getenv("DUCKLAKE_CATALOG_PATH", "ducklake/stellar.ducklake"),
+		DataPath:      getenv("DUCKLAKE_DATA_PATH", "ducklake/data"),
+		AttachName:    getenv("DUCKLAKE_ATTACH_NAME", "stellar_lake"),
+		QuackURI:      getenv("QUACK_URI", "quack:127.0.0.1:9494"),
+		QuackToken:    getenv("QUACK_TOKEN", ""),
+		QuackRemoteDB: getenv("QUACK_REMOTE_DB", "remote_lake"),
 	}
 }
 
 type DuckLakeSink struct {
-	db         *sql.DB
-	attachName string
-	mu         sync.Mutex
+	db            *sql.DB
+	attachName    string
+	remoteDB      string
+	remoteCatalog string
+	remoteMode    bool
+	mu            sync.Mutex
 }
 
 func NewDuckLakeSink(cfg DuckLakeConfig) (*DuckLakeSink, error) {
+	if cfg.Mode == "" {
+		cfg.Mode = "embedded"
+	}
+	if cfg.AttachName == "" {
+		return nil, fmt.Errorf("DUCKLAKE_ATTACH_NAME is required")
+	}
+	if cfg.Mode == "quack" {
+		return newQuackDuckLakeSink(cfg)
+	}
+	if cfg.Mode != "embedded" {
+		return nil, fmt.Errorf("unsupported DUCKLAKE_MODE %q", cfg.Mode)
+	}
 	if cfg.CatalogPath == "" {
 		return nil, fmt.Errorf("DUCKLAKE_CATALOG_PATH is required")
 	}
 	if cfg.DataPath == "" {
 		return nil, fmt.Errorf("DUCKLAKE_DATA_PATH is required")
-	}
-	if cfg.AttachName == "" {
-		return nil, fmt.Errorf("DUCKLAKE_ATTACH_NAME is required")
 	}
 	if err := os.MkdirAll(filepath.Dir(cfg.CatalogPath), 0o755); err != nil && filepath.Dir(cfg.CatalogPath) != "." {
 		return nil, fmt.Errorf("create DuckLake catalog directory: %w", err)
@@ -93,6 +113,31 @@ func NewDuckLakeSink(cfg DuckLakeConfig) (*DuckLakeSink, error) {
 	}
 	sink := &DuckLakeSink{db: db, attachName: sanitizeIdentifier(cfg.AttachName)}
 	if err := sink.init(cfg); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return sink, nil
+}
+
+func newQuackDuckLakeSink(cfg DuckLakeConfig) (*DuckLakeSink, error) {
+	if cfg.QuackURI == "" {
+		return nil, fmt.Errorf("QUACK_URI is required when DUCKLAKE_MODE=quack")
+	}
+	if cfg.QuackToken == "" {
+		return nil, fmt.Errorf("QUACK_TOKEN is required when DUCKLAKE_MODE=quack")
+	}
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		return nil, fmt.Errorf("open DuckDB Quack client: %w", err)
+	}
+	sink := &DuckLakeSink{
+		db:            db,
+		attachName:    sanitizeIdentifier(cfg.AttachName),
+		remoteDB:      sanitizeIdentifier(cfg.QuackRemoteDB),
+		remoteCatalog: sanitizeIdentifier(cfg.AttachName),
+		remoteMode:    true,
+	}
+	if err := sink.initQuack(cfg); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -129,6 +174,40 @@ func (s *DuckLakeSink) init(cfg DuckLakeConfig) error {
 	return nil
 }
 
+func (s *DuckLakeSink) initQuack(cfg DuckLakeConfig) error {
+	stmts := []string{
+		"INSTALL quack",
+		"LOAD quack",
+		fmt.Sprintf(
+			"ATTACH '%s' AS %s (TOKEN '%s', DISABLE_SSL true)",
+			escapeSQLString(cfg.QuackURI),
+			s.remoteDB,
+			escapeSQLString(cfg.QuackToken),
+		),
+	}
+	for _, stmt := range stmts {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("quack init %q: %w", stmt, err)
+		}
+	}
+	if err := s.execRemoteScript(s.remoteInitSQL()); err != nil {
+		return fmt.Errorf("quack remote schema init: %w", err)
+	}
+	return nil
+}
+
+func (s *DuckLakeSink) remoteInitSQL() string {
+	stmts := []string{
+		fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s.bronze", s.remoteCatalog),
+		qualifyCreateTableSQL(createLedgerBatchesSQL, s.remoteCatalog, ""),
+		qualifyCreateTableSQL(createBronzeRowsSQL, s.remoteCatalog, ""),
+	}
+	for _, stmt := range splitSQLStatements(bronzeSchemaSQL) {
+		stmts = append(stmts, qualifyCreateTableSQL(stmt, s.remoteCatalog, "bronze"))
+	}
+	return strings.Join(stmts, ";\n") + ";"
+}
+
 func (s *DuckLakeSink) initBronzeSchema() error {
 	stmts := []string{"CREATE SCHEMA IF NOT EXISTS bronze"}
 	stmts = append(stmts, splitSQLStatements(bronzeSchemaSQL)...)
@@ -150,6 +229,10 @@ func (s *DuckLakeSink) Close() error {
 func (s *DuckLakeSink) WriteBatch(batch *componentsv1.LedgerBatch) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.remoteMode {
+		return s.writeBatchRemote(batch)
+	}
 
 	payloadJSON, err := protojson.MarshalOptions{EmitUnpopulated: true}.Marshal(batch)
 	if err != nil {
@@ -237,6 +320,133 @@ func (s *DuckLakeSink) WriteBatch(batch *componentsv1.LedgerBatch) error {
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit DuckLake transaction: %w", err)
+	}
+	return nil
+}
+
+func (s *DuckLakeSink) writeBatchRemote(batch *componentsv1.LedgerBatch) error {
+	payloadJSON, err := protojson.MarshalOptions{EmitUnpopulated: true}.Marshal(batch)
+	if err != nil {
+		return err
+	}
+
+	var stmts []string
+	stmts = append(stmts, "BEGIN TRANSACTION")
+	stmts = append(stmts,
+		fmt.Sprintf(
+			"DELETE FROM %s.bronze_rows WHERE network_passphrase = %s AND ledger_sequence = %d",
+			s.remoteCatalog,
+			sqlLiteral(batch.NetworkPassphrase),
+			batch.LedgerSequence,
+		),
+		fmt.Sprintf(
+			"DELETE FROM %s.ledger_batches WHERE network_passphrase = %s AND ledger_sequence = %d",
+			s.remoteCatalog,
+			sqlLiteral(batch.NetworkPassphrase),
+			batch.LedgerSequence,
+		),
+	)
+	for _, spec := range typedTableSpecs {
+		if spec.LedgerColumn == "" {
+			continue
+		}
+		stmts = append(stmts, fmt.Sprintf(
+			"DELETE FROM %s.bronze.%s WHERE %s = %d",
+			s.remoteCatalog,
+			spec.TableName,
+			quoteIdentifier(spec.LedgerColumn),
+			batch.LedgerSequence,
+		))
+	}
+	stmts = append(stmts, fmt.Sprintf(
+		`INSERT INTO %s.ledger_batches (
+			network_passphrase,
+			ledger_sequence,
+			closed_at_unix,
+			schema_version,
+			extraction_version,
+			transaction_count,
+			operation_count,
+			bronze_row_count,
+			payload_json
+		) VALUES (%s, %d, %d, %s, %s, %d, %d, %d, %s)`,
+		s.remoteCatalog,
+		sqlLiteral(batch.NetworkPassphrase),
+		batch.LedgerSequence,
+		batch.ClosedAtUnix,
+		sqlLiteral(batch.SchemaVersion),
+		sqlLiteral(batch.ExtractionVersion),
+		len(batch.Transactions),
+		len(batch.Operations),
+		len(batch.BronzeRows),
+		sqlLiteral(string(payloadJSON)),
+	))
+
+	if len(batch.BronzeRows) > 0 {
+		values := make([]string, 0, len(batch.BronzeRows))
+		for i, row := range batch.BronzeRows {
+			values = append(values, fmt.Sprintf("(%s, %d, %d, %d, %s, %s, %s)",
+				sqlLiteral(row.NetworkPassphrase),
+				row.LedgerSequence,
+				row.LedgerRange,
+				i,
+				sqlLiteral(row.Id),
+				sqlLiteral(row.TableName),
+				sqlLiteral(row.RowJson),
+			))
+		}
+		stmts = append(stmts, fmt.Sprintf(
+			`INSERT INTO %s.bronze_rows (
+				network_passphrase,
+				ledger_sequence,
+				ledger_range,
+				row_ordinal,
+				bronze_row_id,
+				table_name,
+				row_json
+			) VALUES %s`,
+			s.remoteCatalog,
+			strings.Join(values, ", "),
+		))
+	}
+
+	typedRows := map[string][]string{}
+	for _, row := range batch.BronzeRows {
+		valuesSQL, err := typedBronzeValuesSQL(row)
+		if err != nil {
+			return fmt.Errorf("prepare typed bronze row table %s: %w", row.TableName, err)
+		}
+		if valuesSQL != "" {
+			typedRows[row.TableName] = append(typedRows[row.TableName], valuesSQL)
+		}
+	}
+	for tableName, rows := range typedRows {
+		spec := typedTableSpecs[tableName]
+		columns := make([]string, len(spec.Columns))
+		for i, col := range spec.Columns {
+			columns[i] = quoteIdentifier(col)
+		}
+		stmts = append(stmts, fmt.Sprintf(
+			"INSERT INTO %s.bronze.%s (%s) VALUES %s",
+			s.remoteCatalog,
+			tableName,
+			strings.Join(columns, ", "),
+			strings.Join(rows, ", "),
+		))
+	}
+	stmts = append(stmts, "COMMIT")
+
+	if err := s.execRemoteScript(strings.Join(stmts, ";\n") + ";"); err != nil {
+		_ = s.execRemoteScript("ROLLBACK;")
+		return fmt.Errorf("remote DuckLake write batch ledger %d: %w", batch.LedgerSequence, err)
+	}
+	return nil
+}
+
+func (s *DuckLakeSink) execRemoteScript(sqlText string) error {
+	query := fmt.Sprintf("SELECT * FROM %s.query(?)", s.remoteDB)
+	if _, err := s.db.Exec(query, sqlText); err != nil {
+		return err
 	}
 	return nil
 }
@@ -397,6 +607,57 @@ func sqlValue(value reflect.Value) any {
 		return string(data)
 	}
 	return value.Interface()
+}
+
+func typedBronzeValuesSQL(row *componentsv1.BronzeRow) (string, error) {
+	spec, ok := typedTableSpecs[row.TableName]
+	if !ok {
+		return "", nil
+	}
+	value := reflect.New(spec.RowType)
+	if err := json.Unmarshal([]byte(row.RowJson), value.Interface()); err != nil {
+		return "", fmt.Errorf("unmarshal typed row: %w", err)
+	}
+	values, err := typedValues(spec, value.Elem(), row)
+	if err != nil {
+		return "", err
+	}
+	literals := make([]string, len(values))
+	for i, value := range values {
+		literals[i] = sqlLiteral(value)
+	}
+	return "(" + strings.Join(literals, ", ") + ")", nil
+}
+
+func sqlLiteral(value any) string {
+	if value == nil {
+		return "NULL"
+	}
+	switch v := value.(type) {
+	case string:
+		return "'" + escapeSQLString(v) + "'"
+	case []byte:
+		return "'" + escapeSQLString(string(v)) + "'"
+	case bool:
+		if v {
+			return "true"
+		}
+		return "false"
+	case time.Time:
+		return "TIMESTAMP '" + escapeSQLString(v.UTC().Format("2006-01-02 15:04:05.999999")) + "'"
+	case fmt.Stringer:
+		return "'" + escapeSQLString(v.String()) + "'"
+	default:
+		return fmt.Sprint(v)
+	}
+}
+
+func qualifyCreateTableSQL(sqlText, catalog, schema string) string {
+	sqlText = strings.TrimSpace(sqlText)
+	if schema != "" {
+		return strings.Replace(sqlText, "CREATE TABLE IF NOT EXISTS "+schema+".", "CREATE TABLE IF NOT EXISTS "+catalog+"."+schema+".", 1)
+	}
+	return strings.Replace(sqlText, "CREATE TABLE IF NOT EXISTS ", "CREATE TABLE IF NOT EXISTS "+catalog+".", 1)
 }
 
 func snakeToExported(value string) string {
