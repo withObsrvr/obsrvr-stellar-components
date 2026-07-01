@@ -249,11 +249,23 @@ export DUCKLAKE_CATALOG_PATH="./ducklake/stellar.ducklake"
 export DUCKLAKE_DATA_PATH="./ducklake/data"
 ```
 
-The sink creates two DuckLake tables:
+The sink creates envelope tables:
 
 ```text
 ledger_batches
 bronze_rows
+```
+
+It also creates history-loader-compatible typed tables under the `bronze` schema, such as:
+
+```text
+bronze.ledgers_row_v2
+bronze.transactions_row_v2
+bronze.operations_row_v2
+bronze.effects_row_v1
+bronze.accounts_snapshot_v1
+bronze.contract_events_stream_v1
+bronze.token_transfers_stream_v1
 ```
 
 Query the catalog with DuckDB:
@@ -267,6 +279,9 @@ USE dl;
 SELECT ledger_sequence, transaction_count, operation_count, bronze_row_count
 FROM ledger_batches;
 SELECT count(*) AS bronze_rows FROM bronze_rows;
+SELECT ledger_sequence, transaction_hash, source_account, successful
+FROM bronze.transactions_row_v2
+LIMIT 10;
 "
 ```
 

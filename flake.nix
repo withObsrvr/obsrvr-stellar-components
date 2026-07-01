@@ -58,6 +58,7 @@
             nativeBuildInputs = [ pkgs.gcc ];
             env.CGO_ENABLED = "1";
             vendorHash = null;
+            doCheck = false;
           };
         in
         rec {

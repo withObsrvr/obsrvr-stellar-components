@@ -10,11 +10,26 @@ Environment:
 - `PORT`, default `:50052`
 - `HEALTH_PORT`, default `8089`
 
-Tables:
+Envelope tables:
 
 ```text
 ledger_batches
 bronze_rows
 ```
 
-`ledger_batches` stores one row per processed ledger and the full protobuf JSON payload. `bronze_rows` stores the full extractor surface as one row per bronze row. Replaying the same network and ledger sequence deletes and reinserts those rows in one DuckLake transaction.
+Typed bronze tables are also materialized under the `bronze` schema using the same table names as `stellar-history-loader`, including:
+
+```text
+bronze.ledgers_row_v2
+bronze.transactions_row_v2
+bronze.operations_row_v2
+bronze.effects_row_v1
+bronze.trades_row_v1
+bronze.accounts_snapshot_v1
+bronze.trustlines_snapshot_v1
+bronze.contract_events_stream_v1
+bronze.contract_data_snapshot_v1
+bronze.token_transfers_stream_v1
+```
+
+`ledger_batches` stores one row per processed ledger and the full protobuf JSON payload. `bronze_rows` stores the full extractor surface as one row per bronze row. The typed `bronze.*` tables provide history-loader-compatible analytical tables. Replaying the same ledger deletes and reinserts both the envelope rows and typed rows in one DuckLake transaction.
