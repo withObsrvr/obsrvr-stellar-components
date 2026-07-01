@@ -48,7 +48,7 @@ The index materialization model should prefer server-side SQL that rebuilds a
 bounded ledger range:
 
 ```sql
-BEGIN;
+BEGIN TRANSACTION;
 DELETE FROM index.some_index
 WHERE ledger_sequence > $start
   AND ledger_sequence <= $end;
@@ -62,12 +62,21 @@ WHERE ledger_sequence > $start
 COMMIT;
 ```
 
+The `DELETE` and `INSERT` must use the identical `(> $start AND <= $end)` bounds
+so the range is replaced exactly — a narrower delete duplicates rows, a wider one
+drops them. Reruns are idempotent at the row grain; any audit timestamps set to
+`now()` are refreshed on each rebuild and are not part of that guarantee.
+
 This replaces row-moving transformer services with compact orchestration:
 
 1. choose ledger range
 2. run SQL through Quack
 3. checkpoint the range
 4. report health and lag
+
+Checkpointing (step 3) and the snapshot-driven consumers below describe the
+target architecture; the current `index-materializer` takes `START_LEDGER` /
+`END_LEDGER` per invocation and does not yet persist a checkpoint store.
 
 The delete-then-insert shape is intentional. A replayed or corrected source
 ledger replaces its bronze rows, so derived index tables must replace the same

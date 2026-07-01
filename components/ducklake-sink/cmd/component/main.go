@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -113,6 +114,10 @@ func NewDuckLakeSink(cfg DuckLakeConfig) (*DuckLakeSink, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open embedded DuckDB: %w", err)
 	}
+	// Pin the pool to one connection so the loaded extensions/attachment and
+	// every transaction (including a failure ROLLBACK) share a single DuckDB
+	// session instead of being routed across pooled connections.
+	db.SetMaxOpenConns(1)
 	sink := &DuckLakeSink{db: db, attachName: sanitizeIdentifier(cfg.AttachName)}
 	if err := sink.init(cfg); err != nil {
 		db.Close()
@@ -132,6 +137,11 @@ func newQuackDuckLakeSink(cfg DuckLakeConfig) (*DuckLakeSink, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open DuckDB Quack client: %w", err)
 	}
+	// Pin the pool to one connection so the remote write script and its failure
+	// ROLLBACK land on the same DuckDB/Quack session. This process is long-lived,
+	// so a pooled connection left holding an aborted transaction could otherwise
+	// be reused for a later batch.
+	db.SetMaxOpenConns(1)
 	sink := &DuckLakeSink{
 		db:            db,
 		attachName:    sanitizeIdentifier(cfg.AttachName),
@@ -440,15 +450,27 @@ func (s *DuckLakeSink) writeBatchRemote(batch *componentsv1.LedgerBatch) error {
 	stmts = append(stmts, "COMMIT")
 
 	if err := s.execRemoteScript(strings.Join(stmts, ";\n") + ";"); err != nil {
-		_ = s.execRemoteScript("ROLLBACK;")
+		// Best-effort ROLLBACK on the same pinned connection to clear any
+		// lingering transaction before this connection is reused for the next
+		// batch. Bound it so a degraded Quack link cannot stall the sink, and
+		// log a failed rollback rather than swallowing an unclean state.
+		rbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if rbErr := s.execRemoteScriptContext(rbCtx, "ROLLBACK;"); rbErr != nil {
+			log.Printf("remote DuckLake write batch ledger %d: rollback did not confirm clean state: %v", batch.LedgerSequence, rbErr)
+		}
 		return fmt.Errorf("remote DuckLake write batch ledger %d: %w", batch.LedgerSequence, err)
 	}
 	return nil
 }
 
 func (s *DuckLakeSink) execRemoteScript(sqlText string) error {
+	return s.execRemoteScriptContext(context.Background(), sqlText)
+}
+
+func (s *DuckLakeSink) execRemoteScriptContext(ctx context.Context, sqlText string) error {
 	query := fmt.Sprintf("SELECT * FROM %s.query(?)", s.remoteDB)
-	if _, err := s.db.Exec(query, sqlText); err != nil {
+	if _, err := s.db.ExecContext(ctx, query, sqlText); err != nil {
 		return err
 	}
 	return nil
@@ -483,11 +505,22 @@ func getenv(key, fallback string) string {
 }
 
 func getenvBool(key string, fallback bool) bool {
-	value := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
-	if value == "" {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
 		return fallback
 	}
-	return value == "1" || value == "true" || value == "yes"
+	// These flags gate security-relevant transport behavior (e.g. DISABLE_SSL),
+	// so an unrecognized value is a misconfiguration we must not silently coerce
+	// to false. Accept the common boolean spellings and fail fast on anything else.
+	switch strings.ToLower(raw) {
+	case "1", "t", "true", "y", "yes", "on":
+		return true
+	case "0", "f", "false", "n", "no", "off":
+		return false
+	default:
+		log.Fatalf("%s must be a boolean (true/false/1/0/yes/no), got %q", key, raw)
+		return fallback // unreachable; log.Fatalf exits
+	}
 }
 
 const createLedgerBatchesSQL = `
