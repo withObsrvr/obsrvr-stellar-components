@@ -1,0 +1,54 @@
+apiVersion: flowctl/v1
+kind: Pipeline
+metadata:
+  name: local-archive-ducklake
+  description: Local process pipeline from public Stellar archive to DuckDB-loadable ledger batch files.
+
+spec:
+  driver: process
+
+  sources:
+    - id: raw-ledger-source
+      type: source
+      command: ["./bin/raw-ledger-source"]
+      env:
+        FLOWCTL_COMPONENT_ID: "raw-ledger-source"
+        BACKEND_TYPE: "ARCHIVE"
+        ARCHIVE_STORAGE_TYPE: "S3"
+        ARCHIVE_BUCKET_NAME: "aws-public-blockchain"
+        ARCHIVE_PATH: "v1.1/stellar/ledgers/pubnet"
+        AWS_REGION: "us-east-2"
+        LEDGERS_PER_FILE: "1"
+        FILES_PER_PARTITION: "64000"
+        NETWORK_PASSPHRASE: "Public Global Stellar Network ; September 2015"
+        START_LEDGER: "62080000"
+        END_LEDGER: "62080000"
+        GRPC_PORT: "55171"
+        HEALTH_PORT: "19181"
+        FLOWCTL_ENDPOINT: "127.0.0.1:19180"
+
+  processors:
+    - id: stellar-ledger-processor
+      type: processor
+      command: ["./bin/stellar-ledger-processor"]
+      inputs: ["raw-ledger-source"]
+      env:
+        COMPONENT_ID: "stellar-ledger-processor"
+        NETWORK_PASSPHRASE: "Public Global Stellar Network ; September 2015"
+        PORT: ":55172"
+        HEALTH_PORT: "19182"
+        ENABLE_FLOWCTL: "true"
+        FLOWCTL_ENDPOINT: "127.0.0.1:19180"
+
+  sinks:
+    - id: ducklake-sink
+      type: sink
+      command: ["./bin/ducklake-sink"]
+      inputs: ["stellar-ledger-processor"]
+      env:
+        COMPONENT_ID: "ducklake-sink"
+        DUCKDB_EXPORT_DIR: "./duckdb-ledger-batches"
+        PORT: ":55173"
+        HEALTH_PORT: "19183"
+        ENABLE_FLOWCTL: "true"
+        FLOWCTL_ENDPOINT: "127.0.0.1:19180"
