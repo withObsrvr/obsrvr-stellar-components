@@ -17,9 +17,9 @@ beside ingestion, index materializers, and query APIs rather than inside
 - `QUACK_HEALTH_ADDR`, default `:8088`; serves `/healthz`
 - `QUACK_ALLOW_OTHER_HOSTNAME`, default `false`
 - `QUACK_DISABLE_SSL`, default `false`
-- `QUACK_INSECURE`, default `false`; required before plaintext or
-  allow-other-hostname mode can start. When true, the server also uses
-  plaintext Quack.
+- `QUACK_INSECURE`, default `false`; required before plaintext,
+  allow-other-hostname, external-access, or `disabled_filesystems=none` mode
+  can start. When true, the server also uses plaintext Quack.
 - `QUACK_ENABLE_EXTERNAL_ACCESS`, default `false`
 - `QUACK_DISABLED_FILESYSTEMS`, default `LocalFileSystem`; set to `none` only
   for intentionally file-backed local DuckLake catalogs.
@@ -54,10 +54,10 @@ SELECT * FROM remote.query(
 );
 ```
 
-Production startup fails closed when plaintext mode is requested without
-`QUACK_INSECURE=true`. The server also pins DuckDB to one connection, sets
-memory/thread limits, exposes `/healthz`, and locks configuration after Quack
-starts.
+Production startup fails closed when plaintext transport or relaxed filesystem
+access is requested without `QUACK_INSECURE=true`. The server also pins DuckDB
+to one connection, sets memory/thread limits, exposes `/healthz`, and locks
+configuration after Quack starts.
 
 Current Quack beta limitation: strict `enable_external_access=false` plus
 `disabled_filesystems=LocalFileSystem` prevents local `ducklake:` catalogs from

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"net"
 	"strings"
 	"testing"
 )
@@ -23,10 +25,38 @@ func TestValidateConfigAllowsExplicitInsecureOptOut(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.DisableSSL = true
 	cfg.AllowOtherHostname = true
+	cfg.EnableExternal = true
+	cfg.DisabledFilesystems = "none"
 	cfg.Insecure = true
 
 	if err := validateConfig(cfg); err != nil {
 		t.Fatalf("validateConfig: %v", err)
+	}
+}
+
+func TestValidateConfigRequiresExplicitInsecureForExternalAccess(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.EnableExternal = true
+
+	err := validateConfig(cfg)
+	if err == nil {
+		t.Fatalf("validateConfig succeeded with external access and no explicit insecure opt-out")
+	}
+	if !strings.Contains(err.Error(), "QUACK_INSECURE=true") {
+		t.Fatalf("validateConfig error = %q, want QUACK_INSECURE guidance", err)
+	}
+}
+
+func TestValidateConfigRequiresExplicitInsecureForDisabledFilesystemNone(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.DisabledFilesystems = "none"
+
+	err := validateConfig(cfg)
+	if err == nil {
+		t.Fatalf("validateConfig succeeded with disabled_filesystems=none and no explicit insecure opt-out")
+	}
+	if !strings.Contains(err.Error(), "QUACK_INSECURE=true") {
+		t.Fatalf("validateConfig error = %q, want QUACK_INSECURE guidance", err)
 	}
 }
 
@@ -116,6 +146,25 @@ func TestHealthQueryChecksAttachedCatalog(t *testing.T) {
 func TestQuackTCPAddress(t *testing.T) {
 	if got := quackTCPAddress("quack:127.0.0.1:9494"); got != "127.0.0.1:9494" {
 		t.Fatalf("quackTCPAddress returned %q", got)
+	}
+}
+
+func TestStartHealthServerReturnsBindError(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	server, err := startHealthServer(context.Background(), listener.Addr().String(), nil, "stellar_lake", "")
+	if err == nil {
+		if server != nil {
+			_ = server.Close()
+		}
+		t.Fatalf("startHealthServer succeeded on an occupied address")
+	}
+	if !strings.Contains(err.Error(), "listen") {
+		t.Fatalf("startHealthServer error = %q, want bind/listen failure", err)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -37,7 +38,9 @@ func main() {
 		panic(err)
 	}
 	defer sink.Close()
-	startSinkHealthServer(getenv("HEALTH_PORT", "8089"), sink)
+	if err := startSinkHealthServer(getenv("HEALTH_PORT", "8089"), sink); err != nil {
+		log.Fatalf("start sink health endpoint: %v", err)
+	}
 
 	writeGate := make(chan struct{}, 1)
 	consumer.Run(consumer.ConsumerConfig{
@@ -468,10 +471,10 @@ type sinkHealthSnapshot struct {
 	LastError    string
 }
 
-func startSinkHealthServer(port string, sink *DuckLakeSink) {
+func startSinkHealthServer(port string, sink *DuckLakeSink) error {
 	addr := strings.TrimSpace(port)
 	if addr == "" {
-		return
+		return nil
 	}
 	if !strings.Contains(addr, ":") {
 		addr = ":" + addr
@@ -499,12 +502,18 @@ func startSinkHealthServer(port string, sink *DuckLakeSink) {
 			snapshot.LastError,
 		)
 	})
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", addr, err)
+	}
+	server := &http.Server{Handler: mux}
 	go func() {
 		log.Printf("sink health endpoint listening on %s", addr)
-		if err := http.ListenAndServe(addr, mux); err != nil {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("sink health endpoint failed: %v", err)
 		}
 	}()
+	return nil
 }
 
 func (s *DuckLakeSink) writeBatchRemote(batch *componentsv1.LedgerBatch) error {
@@ -529,6 +538,10 @@ func (s *DuckLakeSink) writeBatchRemote(batch *componentsv1.LedgerBatch) error {
 }
 
 func (s *DuckLakeSink) remoteWriteSQL(batch *componentsv1.LedgerBatch) (string, error) {
+	networkPassphrase := strings.TrimSpace(batch.NetworkPassphrase)
+	if networkPassphrase == "" {
+		return "", fmt.Errorf("ledger batch network_passphrase is required")
+	}
 	payloadJSON, err := protojson.MarshalOptions{EmitUnpopulated: true}.Marshal(batch)
 	if err != nil {
 		return "", err
@@ -537,23 +550,23 @@ func (s *DuckLakeSink) remoteWriteSQL(batch *componentsv1.LedgerBatch) (string, 
 	var stmts []string
 	stmts = append(stmts, "BEGIN TRANSACTION")
 	stmts = append(stmts,
-		ensureCatalogNetworkSQL(s.remoteCatalog, batch.NetworkPassphrase),
+		ensureCatalogNetworkSQL(s.remoteCatalog, networkPassphrase),
 		fmt.Sprintf(
 			"DELETE FROM %s.bronze_rows WHERE network_passphrase = %s AND ledger_sequence = %d",
 			s.remoteCatalog,
-			sqlLiteral(batch.NetworkPassphrase),
+			sqlLiteral(networkPassphrase),
 			batch.LedgerSequence,
 		),
 		fmt.Sprintf(
 			"DELETE FROM %s.ledger_batches WHERE network_passphrase = %s AND ledger_sequence = %d",
 			s.remoteCatalog,
-			sqlLiteral(batch.NetworkPassphrase),
+			sqlLiteral(networkPassphrase),
 			batch.LedgerSequence,
 		),
 		fmt.Sprintf(
 			"DELETE FROM %s.ingest_watermarks WHERE network_passphrase = %s AND ledger_sequence = %d",
 			s.remoteCatalog,
-			sqlLiteral(batch.NetworkPassphrase),
+			sqlLiteral(networkPassphrase),
 			batch.LedgerSequence,
 		),
 	)
@@ -582,7 +595,7 @@ func (s *DuckLakeSink) remoteWriteSQL(batch *componentsv1.LedgerBatch) (string, 
 			payload_json
 		) VALUES (%s, %d, %d, %s, %s, %d, %d, %d, %s)`,
 		s.remoteCatalog,
-		sqlLiteral(batch.NetworkPassphrase),
+		sqlLiteral(networkPassphrase),
 		batch.LedgerSequence,
 		batch.ClosedAtUnix,
 		sqlLiteral(batch.SchemaVersion),
@@ -599,7 +612,7 @@ func (s *DuckLakeSink) remoteWriteSQL(batch *componentsv1.LedgerBatch) (string, 
 			written_at
 		) VALUES (%s, %d, current_timestamp)`,
 		s.remoteCatalog,
-		sqlLiteral(batch.NetworkPassphrase),
+		sqlLiteral(networkPassphrase),
 		batch.LedgerSequence,
 	))
 
@@ -775,9 +788,9 @@ func getenvDuration(key string, fallback time.Duration) time.Duration {
 
 const createCatalogMetadataSQL = `
 CREATE TABLE IF NOT EXISTS catalog_metadata (
-	key VARCHAR,
-	value VARCHAR,
-	updated_at TIMESTAMP
+	key VARCHAR NOT NULL,
+	value VARCHAR NOT NULL,
+	updated_at TIMESTAMP NOT NULL
 );
 `
 
@@ -830,22 +843,30 @@ func ensureCatalogNetworkTx(tx *sql.Tx, networkPassphrase string) error {
 	if networkPassphrase == "" {
 		return fmt.Errorf("ledger batch network_passphrase is required")
 	}
-	var existing string
-	err := tx.QueryRow("SELECT value FROM catalog_metadata WHERE key = 'network_passphrase' LIMIT 1").Scan(&existing)
-	if errors.Is(err, sql.ErrNoRows) {
+	existingCount, existingMin, existingMax, err := readCatalogNetworkMetadataTx(tx)
+	if err != nil {
+		return fmt.Errorf("read catalog network passphrase: %w", err)
+	}
+	if existingCount == 0 {
 		if _, err := tx.Exec(
 			"INSERT INTO catalog_metadata (key, value, updated_at) VALUES ('network_passphrase', ?, current_timestamp)",
 			networkPassphrase,
 		); err != nil {
 			return fmt.Errorf("record catalog network passphrase: %w", err)
 		}
-		return nil
+		existingCount, existingMin, existingMax, err = readCatalogNetworkMetadataTx(tx)
+		if err != nil {
+			return fmt.Errorf("read catalog network passphrase after insert: %w", err)
+		}
 	}
-	if err != nil {
-		return fmt.Errorf("read catalog network passphrase: %w", err)
+	if existingCount > 1 {
+		return fmt.Errorf("catalog network metadata has duplicate network_passphrase keys")
 	}
-	if existing != networkPassphrase {
-		return fmt.Errorf("catalog network mismatch: existing %q, batch %q", existing, networkPassphrase)
+	if !existingMin.Valid || !existingMax.Valid || existingMin.String != existingMax.String {
+		return fmt.Errorf("catalog network metadata is invalid for network_passphrase")
+	}
+	if existingMin.String != networkPassphrase {
+		return fmt.Errorf("catalog network mismatch: existing %q, batch %q", existingMin.String, networkPassphrase)
 	}
 	if _, err := tx.Exec(
 		"UPDATE catalog_metadata SET updated_at = current_timestamp WHERE key = 'network_passphrase'",
@@ -855,6 +876,15 @@ func ensureCatalogNetworkTx(tx *sql.Tx, networkPassphrase string) error {
 	return nil
 }
 
+func readCatalogNetworkMetadataTx(tx *sql.Tx) (int, sql.NullString, sql.NullString, error) {
+	var count int
+	var minValue, maxValue sql.NullString
+	err := tx.QueryRow(
+		"SELECT count(*), min(value), max(value) FROM catalog_metadata WHERE key = 'network_passphrase'",
+	).Scan(&count, &minValue, &maxValue)
+	return count, minValue, maxValue, err
+}
+
 func ensureCatalogNetworkSQL(catalog, networkPassphrase string) string {
 	return fmt.Sprintf(`INSERT INTO %s.catalog_metadata (key, value, updated_at)
 SELECT 'network_passphrase', %s, current_timestamp
@@ -862,6 +892,8 @@ WHERE NOT EXISTS (
 	SELECT 1 FROM %s.catalog_metadata WHERE key = 'network_passphrase'
 );
 SELECT CASE
+	WHEN (SELECT count(*) FROM %s.catalog_metadata WHERE key = 'network_passphrase') > 1
+		THEN error('catalog network metadata duplicate key')
 	WHEN EXISTS (
 		SELECT 1 FROM %s.catalog_metadata
 		WHERE key = 'network_passphrase' AND value <> %s
@@ -873,6 +905,7 @@ SET updated_at = current_timestamp
 WHERE key = 'network_passphrase'`,
 		catalog,
 		sqlLiteral(strings.TrimSpace(networkPassphrase)),
+		catalog,
 		catalog,
 		catalog,
 		sqlLiteral(strings.TrimSpace(networkPassphrase)),

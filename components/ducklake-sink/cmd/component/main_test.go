@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -368,6 +370,7 @@ func TestRemoteWriteSQLIncludesWatermarkAndNetworkCheck(t *testing.T) {
 	for _, want := range []string{
 		"BEGIN TRANSACTION",
 		"stellar_lake.catalog_metadata",
+		"catalog network metadata duplicate key",
 		"catalog network mismatch",
 		"DELETE FROM stellar_lake.ingest_watermarks",
 		"INSERT INTO stellar_lake.ingest_watermarks",
@@ -380,6 +383,20 @@ func TestRemoteWriteSQLIncludesWatermarkAndNetworkCheck(t *testing.T) {
 		if !strings.Contains(sqlText, want) {
 			t.Fatalf("remote write SQL missing %q in:\n%s", want, sqlText)
 		}
+	}
+}
+
+func TestRemoteWriteSQLRejectsBlankNetworkPassphrase(t *testing.T) {
+	sink := &DuckLakeSink{remoteCatalog: "stellar_lake"}
+	_, err := sink.remoteWriteSQL(&componentsv1.LedgerBatch{
+		NetworkPassphrase: " \t",
+		LedgerSequence:    987,
+	})
+	if err == nil {
+		t.Fatalf("remoteWriteSQL succeeded with blank network_passphrase")
+	}
+	if !strings.Contains(err.Error(), "network_passphrase") {
+		t.Fatalf("remoteWriteSQL error = %q, want network_passphrase guidance", err)
 	}
 }
 
@@ -417,9 +434,52 @@ func TestDuckLakeSinkRejectsNetworkMismatch(t *testing.T) {
 	}
 }
 
+func TestEnsureCatalogNetworkTxRejectsDuplicateMetadata(t *testing.T) {
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatalf("open duckdb: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec("CREATE TABLE catalog_metadata (key VARCHAR, value VARCHAR, updated_at TIMESTAMP)"); err != nil {
+		t.Fatalf("create legacy metadata table: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO catalog_metadata VALUES ('network_passphrase', 'testnet', current_timestamp), ('network_passphrase', 'testnet', current_timestamp)"); err != nil {
+		t.Fatalf("insert duplicate metadata: %v", err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback()
+
+	err = ensureCatalogNetworkTx(tx, "testnet")
+	if err == nil {
+		t.Fatalf("ensureCatalogNetworkTx succeeded with duplicate metadata")
+	}
+	if !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("ensureCatalogNetworkTx error = %q, want duplicate metadata failure", err)
+	}
+}
+
 func TestTypedTableSpecsResolveAllColumns(t *testing.T) {
 	if err := validateTypedTableSpecs(); err != nil {
 		t.Fatalf("validate typed table specs: %v", err)
+	}
+}
+
+func TestStartSinkHealthServerReturnsBindError(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	err = startSinkHealthServer(listener.Addr().String(), &DuckLakeSink{})
+	if err == nil {
+		t.Fatalf("startSinkHealthServer succeeded on an occupied address")
+	}
+	if !strings.Contains(err.Error(), "listen") {
+		t.Fatalf("startSinkHealthServer error = %q, want bind/listen failure", err)
 	}
 }
 

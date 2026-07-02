@@ -97,7 +97,10 @@ func run(ctx context.Context, cfg config) error {
 		}
 	}
 
-	healthServer := startHealthServer(sigCtx, cfg.HealthAddr, db, cfg.AttachName, cfg.URI)
+	healthServer, err := startHealthServer(sigCtx, cfg.HealthAddr, db, cfg.AttachName, cfg.URI)
+	if err != nil {
+		return fmt.Errorf("start health server: %w", err)
+	}
 	if healthServer != nil {
 		defer func() {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -144,6 +147,12 @@ func validateConfig(cfg config) error {
 	}
 	if cfg.AllowOtherHostname && !cfg.Insecure {
 		return fmt.Errorf("QUACK_ALLOW_OTHER_HOSTNAME=true requires explicit QUACK_INSECURE=true")
+	}
+	if cfg.EnableExternal && !cfg.Insecure {
+		return fmt.Errorf("QUACK_ENABLE_EXTERNAL_ACCESS=true requires explicit QUACK_INSECURE=true")
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.DisabledFilesystems), "none") && !cfg.Insecure {
+		return fmt.Errorf("QUACK_DISABLED_FILESYSTEMS=none requires explicit QUACK_INSECURE=true")
 	}
 	if cfg.MemoryLimit == "" {
 		return fmt.Errorf("QUACK_MEMORY_LIMIT is required")
@@ -201,9 +210,9 @@ func serveSQL(cfg config) string {
 	)
 }
 
-func startHealthServer(ctx context.Context, addr string, db *sql.DB, attachName, quackURI string) *http.Server {
+func startHealthServer(ctx context.Context, addr string, db *sql.DB, attachName, quackURI string) (*http.Server, error) {
 	if strings.TrimSpace(addr) == "" {
-		return nil
+		return nil, nil
 	}
 	quackAddr := quackTCPAddress(quackURI)
 	mux := http.NewServeMux()
@@ -226,7 +235,11 @@ func startHealthServer(ctx context.Context, addr string, db *sql.DB, attachName,
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
 	})
-	server := &http.Server{Addr: addr, Handler: mux}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen on %s: %w", addr, err)
+	}
+	server := &http.Server{Handler: mux}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -237,11 +250,11 @@ func startHealthServer(ctx context.Context, addr string, db *sql.DB, attachName,
 	}()
 	go func() {
 		log.Printf("health endpoint listening on %s", addr)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("health endpoint failed: %v", err)
 		}
 	}()
-	return server
+	return server, nil
 }
 
 func healthQuery(attachName string) string {
