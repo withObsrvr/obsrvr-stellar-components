@@ -51,6 +51,10 @@ provide history-loader-compatible analytical tables. Replaying the same ledger
 deletes and reinserts the envelope rows, typed rows, and watermark in one
 DuckLake transaction.
 
+DuckLake schema changes are tracked in `schema_migrations`. The bootstrap
+`bronze_schema.sql` is migration `001`, and future ordered migrations can evolve
+existing catalogs instead of relying on `CREATE TABLE IF NOT EXISTS` no-ops.
+
 Gap check:
 
 ```sql

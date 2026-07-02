@@ -1,35 +1,54 @@
-name: local-stellar-ledger-jsonl
-description: Local proof pipeline for raw ledgers to normalized JSONL batches.
+apiVersion: flowctl/v1
+kind: Pipeline
+metadata:
+  name: local-stellar-ledger-jsonl
+  description: Local process pipeline from public Stellar archive to normalized JSONL batches.
 
-components:
-  raw-ledger-source:
-    image: raw-ledger-source:0.2.2
-    type: source
-    outputs:
-      - stellar.ledger.v1
-    env:
-      NETWORK_PASSPHRASE: "Test SDF Network ; September 2015"
+spec:
+  driver: process
 
-  stellar-ledger-processor:
-    image: stellar-ledger-processor:0.1.0
-    type: processor
-    inputs:
-      - stellar.ledger.v1
-    outputs:
-      - stellar.ledger.batch.v1
-    env:
-      NETWORK_PASSPHRASE: "Test SDF Network ; September 2015"
+  sources:
+    - id: raw-ledger-source
+      type: source
+      command: ["./bin/raw-ledger-source"]
+      env:
+        FLOWCTL_COMPONENT_ID: "raw-ledger-source"
+        BACKEND_TYPE: "ARCHIVE"
+        ARCHIVE_STORAGE_TYPE: "S3"
+        ARCHIVE_BUCKET_NAME: "aws-public-blockchain"
+        ARCHIVE_PATH: "v1.1/stellar/ledgers/pubnet"
+        AWS_REGION: "us-east-2"
+        LEDGERS_PER_FILE: "1"
+        FILES_PER_PARTITION: "64000"
+        NETWORK_PASSPHRASE: "Public Global Stellar Network ; September 2015"
+        START_LEDGER: "62080000"
+        END_LEDGER: "62080000"
+        GRPC_PORT: "55571"
+        HEALTH_PORT: "19581"
+        FLOWCTL_ENDPOINT: "127.0.0.1:19580"
 
-  jsonl-sink:
-    image: jsonl-sink:0.1.0
-    type: sink
-    inputs:
-      - stellar.ledger.batch.v1
-    env:
-      JSONL_PATH: "./ledger_batches.jsonl"
+  processors:
+    - id: stellar-ledger-processor
+      type: processor
+      command: ["./bin/stellar-ledger-processor"]
+      inputs: ["raw-ledger-source"]
+      env:
+        COMPONENT_ID: "stellar-ledger-processor"
+        NETWORK_PASSPHRASE: "Public Global Stellar Network ; September 2015"
+        PORT: ":55572"
+        HEALTH_PORT: "19582"
+        ENABLE_FLOWCTL: "true"
+        FLOWCTL_ENDPOINT: "127.0.0.1:19580"
 
-edges:
-  - from: raw-ledger-source
-    to: stellar-ledger-processor
-  - from: stellar-ledger-processor
-    to: jsonl-sink
+  sinks:
+    - id: jsonl-sink
+      type: sink
+      command: ["./bin/jsonl-sink"]
+      inputs: ["stellar-ledger-processor"]
+      env:
+        COMPONENT_ID: "jsonl-sink"
+        JSONL_PATH: "./ledger_batches.jsonl"
+        PORT: ":55573"
+        HEALTH_PORT: "19583"
+        ENABLE_FLOWCTL: "true"
+        FLOWCTL_ENDPOINT: "127.0.0.1:19580"

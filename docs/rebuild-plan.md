@@ -178,11 +178,9 @@ obsrvr-stellar-components/
       ... generated protobuf code ...
 
   pkg/
-    ledgerdecode/       # RawLedger -> LedgerCloseMeta helpers
     normalize/          # LedgerCloseMeta -> LedgerBatch extraction
     scval/              # shared ScVal conversion helpers
     ids/                # TOID / stable id helpers
-    checkpoints/        # shared checkpoint abstractions if needed
 
   components/
     stellar-ledger-processor/

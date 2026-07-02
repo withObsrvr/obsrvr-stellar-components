@@ -32,6 +32,16 @@ var bronzeSchemaSQL string
 
 var writeRetryBackoff = 500 * time.Millisecond
 
+type duckLakeMigration struct {
+	Version int
+	Name    string
+	SQL     string
+}
+
+var duckLakeMigrations = []duckLakeMigration{
+	{Version: 1, Name: "bronze_schema", SQL: bronzeSchemaSQL},
+}
+
 func main() {
 	sink, err := NewDuckLakeSink(DuckLakeConfigFromEnv())
 	if err != nil {
@@ -280,11 +290,24 @@ func (s *DuckLakeSink) remoteInitSQL() string {
 		fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s.bronze", s.remoteCatalog),
 		qualifyCreateTableSQL(createCatalogMetadataSQL, s.remoteCatalog, ""),
 		qualifyCreateTableSQL(createIngestWatermarksSQL, s.remoteCatalog, ""),
+		qualifyCreateTableSQL(createSchemaMigrationsSQL, s.remoteCatalog, ""),
 		qualifyCreateTableSQL(createLedgerBatchesSQL, s.remoteCatalog, ""),
 		qualifyCreateTableSQL(createBronzeRowsSQL, s.remoteCatalog, ""),
 	}
-	for _, stmt := range splitSQLStatements(bronzeSchemaSQL) {
-		stmts = append(stmts, qualifyCreateTableSQL(stmt, s.remoteCatalog, "bronze"))
+	for _, migration := range duckLakeMigrations {
+		for _, stmt := range splitSQLStatements(migration.SQL) {
+			stmts = append(stmts, qualifyCreateTableSQL(stmt, s.remoteCatalog, "bronze"))
+		}
+		stmts = append(stmts, fmt.Sprintf(
+			`INSERT INTO %s.schema_migrations (version, name, applied_at)
+SELECT %d, %s, current_timestamp
+WHERE NOT EXISTS (SELECT 1 FROM %s.schema_migrations WHERE version = %d)`,
+			s.remoteCatalog,
+			migration.Version,
+			sqlLiteral(migration.Name),
+			s.remoteCatalog,
+			migration.Version,
+		))
 	}
 	return strings.Join(stmts, ";\n") + ";"
 }
@@ -294,14 +317,59 @@ func (s *DuckLakeSink) initBronzeSchema() error {
 		"CREATE SCHEMA IF NOT EXISTS bronze",
 		createCatalogMetadataSQL,
 		createIngestWatermarksSQL,
+		createSchemaMigrationsSQL,
 	}
-	stmts = append(stmts, splitSQLStatements(bronzeSchemaSQL)...)
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
 			return fmt.Errorf("ducklake bronze schema %q: %w", stmt, err)
 		}
 	}
+	return s.applyMigrations()
+}
+
+func (s *DuckLakeSink) applyMigrations() error {
+	for _, migration := range duckLakeMigrations {
+		applied, err := s.migrationApplied(migration)
+		if err != nil {
+			return err
+		}
+		if applied {
+			continue
+		}
+		tx, err := s.db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin DuckLake migration %03d: %w", migration.Version, err)
+		}
+		for _, stmt := range splitSQLStatements(migration.SQL) {
+			if _, err := tx.Exec(stmt); err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("apply DuckLake migration %03d %s statement %q: %w", migration.Version, migration.Name, stmt, err)
+			}
+		}
+		if _, err := tx.Exec(
+			"INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, current_timestamp)",
+			migration.Version,
+			migration.Name,
+		); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("record DuckLake migration %03d %s: %w", migration.Version, migration.Name, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit DuckLake migration %03d %s: %w", migration.Version, migration.Name, err)
+		}
+	}
 	return nil
+}
+
+func (s *DuckLakeSink) migrationApplied(migration duckLakeMigration) (bool, error) {
+	var count int
+	if err := s.db.QueryRow("SELECT count(*) FROM schema_migrations WHERE version = ?", migration.Version).Scan(&count); err != nil {
+		return false, fmt.Errorf("read DuckLake migration %03d %s: %w", migration.Version, migration.Name, err)
+	}
+	if count > 1 {
+		return false, fmt.Errorf("DuckLake migration %03d %s has duplicate records", migration.Version, migration.Name)
+	}
+	return count == 1, nil
 }
 
 func (s *DuckLakeSink) Close() error {
@@ -799,6 +867,14 @@ CREATE TABLE IF NOT EXISTS ingest_watermarks (
 	network_passphrase VARCHAR,
 	ledger_sequence UBIGINT,
 	written_at TIMESTAMP
+);
+`
+
+const createSchemaMigrationsSQL = `
+CREATE TABLE IF NOT EXISTS schema_migrations (
+	version INTEGER NOT NULL,
+	name VARCHAR NOT NULL,
+	applied_at TIMESTAMP NOT NULL
 );
 `
 

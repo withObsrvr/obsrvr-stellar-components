@@ -1,5 +1,5 @@
 create table if not exists stellar_ledgers (
-  id text primary key,
+  id text not null,
   network_passphrase text not null,
   ledger_sequence integer not null,
   closed_at_unix bigint not null,
@@ -9,11 +9,11 @@ create table if not exists stellar_ledgers (
   transaction_count integer not null,
   schema_version text not null,
   extraction_version text not null,
-  unique (network_passphrase, ledger_sequence)
+  primary key (network_passphrase, ledger_sequence)
 );
 
 create table if not exists stellar_transactions (
-  id text primary key,
+  id text not null,
   network_passphrase text not null,
   ledger_sequence integer not null,
   transaction_index integer not null,
@@ -22,19 +22,19 @@ create table if not exists stellar_transactions (
   envelope_xdr text not null,
   result_xdr text not null,
   meta_xdr text not null,
-  unique (network_passphrase, ledger_sequence, transaction_index)
+  primary key (network_passphrase, ledger_sequence, transaction_index)
 );
 
 create table if not exists stellar_operations (
-  id text primary key,
-  transaction_id text not null references stellar_transactions(id) on delete cascade,
+  id text not null,
+  transaction_id text not null,
   network_passphrase text not null,
   ledger_sequence integer not null,
   transaction_index integer not null,
   operation_index integer not null,
   operation_type text not null,
   operation_xdr text not null,
-  unique (network_passphrase, ledger_sequence, transaction_index, operation_index)
+  primary key (network_passphrase, ledger_sequence, transaction_index, operation_index)
 );
 
 create table if not exists stellar_bronze_rows (

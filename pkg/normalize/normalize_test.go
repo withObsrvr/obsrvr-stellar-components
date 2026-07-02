@@ -7,6 +7,7 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/network"
 	"github.com/stellar/go-stellar-sdk/xdr"
+	"github.com/withObsrvr/obsrvr-stellar-components/pkg/ids"
 )
 
 func TestLedgerBatchIncludesBronzeRows(t *testing.T) {
@@ -55,6 +56,19 @@ func TestNormalizeJSONReturnsMarshalError(t *testing.T) {
 	}{Bad: func() {}})
 	if err == nil {
 		t.Fatal("normalizeJSON succeeded for an unmarshalable value")
+	}
+}
+
+func TestBronzeRowIDIgnoresRowContent(t *testing.T) {
+	first := ids.BronzeRow("network", 123, "transactions_row_v2", 4)
+	second := ids.BronzeRow("network", 123, "transactions_row_v2", 4)
+	differentOrdinal := ids.BronzeRow("network", 123, "transactions_row_v2", 5)
+
+	if first != second {
+		t.Fatalf("same position produced different bronze IDs: %q != %q", first, second)
+	}
+	if first == differentOrdinal {
+		t.Fatalf("different ordinal produced same bronze ID: %q", first)
 	}
 }
 

@@ -1,4 +1,4 @@
-.PHONY: build lint proto test test-local-pipeline test-quack-chaos tidy clean
+.PHONY: build lint proto test test-local-pipeline test-quack-chaos validate-pipelines tidy clean
 
 GO ?= go
 GOFMT ?= gofmt
@@ -29,6 +29,9 @@ test-local-pipeline:
 
 test-quack-chaos:
 	@scripts/quack-chaos-harness.sh
+
+validate-pipelines:
+	@scripts/validate-pipelines.sh
 
 tidy:
 	@$(GO) mod tidy

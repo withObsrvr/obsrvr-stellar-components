@@ -461,6 +461,54 @@ func TestEnsureCatalogNetworkTxRejectsDuplicateMetadata(t *testing.T) {
 	}
 }
 
+func TestDuckLakeSinkRecordsBronzeSchemaMigrationOnce(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := DuckLakeConfig{
+		CatalogPath: filepath.Join(tmp, "stellar.ducklake"),
+		DataPath:    filepath.Join(tmp, "data"),
+		AttachName:  "test_lake",
+	}
+	sink, err := NewDuckLakeSink(cfg)
+	if err != nil {
+		t.Fatalf("new sink: %v", err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatalf("close first sink: %v", err)
+	}
+
+	sink, err = NewDuckLakeSink(cfg)
+	if err != nil {
+		t.Fatalf("reopen sink: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := sink.Close(); err != nil {
+			t.Fatalf("close second sink: %v", err)
+		}
+	})
+
+	var count int
+	if err := sink.db.QueryRow("SELECT count(*) FROM schema_migrations WHERE version = 1 AND name = 'bronze_schema'").Scan(&count); err != nil {
+		t.Fatalf("query schema migrations: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("migration records = %d, want 1", count)
+	}
+}
+
+func TestRemoteInitSQLRecordsBronzeSchemaMigration(t *testing.T) {
+	sink := &DuckLakeSink{remoteCatalog: "stellar_lake"}
+	sqlText := sink.remoteInitSQL()
+	for _, want := range []string{
+		"stellar_lake.schema_migrations",
+		"1, 'bronze_schema'",
+		"WHERE NOT EXISTS (SELECT 1 FROM stellar_lake.schema_migrations WHERE version = 1)",
+	} {
+		if !strings.Contains(sqlText, want) {
+			t.Fatalf("remote init SQL missing %q:\n%s", want, sqlText)
+		}
+	}
+}
+
 func TestTypedTableSpecsResolveAllColumns(t *testing.T) {
 	if err := validateTypedTableSpecs(); err != nil {
 		t.Fatalf("validate typed table specs: %v", err)
