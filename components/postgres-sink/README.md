@@ -24,9 +24,11 @@ Environment:
 - `POSTGRES_MAX_OPEN_CONNS`, default `8`
 - `POSTGRES_MAX_IDLE_CONNS`, default `POSTGRES_MAX_OPEN_CONNS`
 - `POSTGRES_CONN_MAX_LIFETIME`, default `30m`
+- `POSTGRES_STARTUP_TIMEOUT`, default `30s`
 - `PORT`, default `:50052`
 - `HEALTH_PORT`, default `8089`
 
 Startup fails if `POSTGRES_DSN` is empty or if `PingContext` cannot reach the
-database. The sink intentionally does not parse Stellar XDR. It writes rows from
+database within `POSTGRES_STARTUP_TIMEOUT`. Schema setup uses the same startup
+deadline. The sink intentionally does not parse Stellar XDR. It writes rows from
 `LedgerBatch`.

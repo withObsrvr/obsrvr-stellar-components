@@ -23,12 +23,13 @@ func TestPostgresConfigFromEnvParsesPoolSettings(t *testing.T) {
 	t.Setenv("POSTGRES_MAX_OPEN_CONNS", "3")
 	t.Setenv("POSTGRES_MAX_IDLE_CONNS", "2")
 	t.Setenv("POSTGRES_CONN_MAX_LIFETIME", "45s")
+	t.Setenv("POSTGRES_STARTUP_TIMEOUT", "5s")
 
 	cfg, err := postgresConfigFromEnv()
 	if err != nil {
 		t.Fatalf("postgresConfigFromEnv: %v", err)
 	}
-	if cfg.MaxOpenConns != 3 || cfg.MaxIdleConns != 2 || cfg.ConnMaxLifetime != 45*time.Second {
+	if cfg.MaxOpenConns != 3 || cfg.MaxIdleConns != 2 || cfg.ConnMaxLifetime != 45*time.Second || cfg.StartupTimeout != 5*time.Second {
 		t.Fatalf("config = %+v, want parsed pool settings", cfg)
 	}
 }

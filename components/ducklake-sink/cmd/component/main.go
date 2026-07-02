@@ -346,17 +346,45 @@ func (s *DuckLakeSink) applyMigrations() error {
 				return fmt.Errorf("apply DuckLake migration %03d %s statement %q: %w", migration.Version, migration.Name, stmt, err)
 			}
 		}
-		if _, err := tx.Exec(
-			"INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, current_timestamp)",
-			migration.Version,
-			migration.Name,
-		); err != nil {
+		if err := recordMigrationTx(tx, migration); err != nil {
 			_ = tx.Rollback()
-			return fmt.Errorf("record DuckLake migration %03d %s: %w", migration.Version, migration.Name, err)
+			return err
+		}
+		if err := ensureMigrationRecordedTx(tx, migration); err != nil {
+			_ = tx.Rollback()
+			return err
 		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit DuckLake migration %03d %s: %w", migration.Version, migration.Name, err)
 		}
+	}
+	return nil
+}
+
+func recordMigrationTx(tx *sql.Tx, migration duckLakeMigration) error {
+	if _, err := tx.Exec(
+		`INSERT INTO schema_migrations (version, name, applied_at)
+SELECT ?, ?, current_timestamp
+WHERE NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = ?)`,
+		migration.Version,
+		migration.Name,
+		migration.Version,
+	); err != nil {
+		return fmt.Errorf("record DuckLake migration %03d %s: %w", migration.Version, migration.Name, err)
+	}
+	return nil
+}
+
+func ensureMigrationRecordedTx(tx *sql.Tx, migration duckLakeMigration) error {
+	var count int
+	if err := tx.QueryRow("SELECT count(*) FROM schema_migrations WHERE version = ?", migration.Version).Scan(&count); err != nil {
+		return fmt.Errorf("verify DuckLake migration %03d %s: %w", migration.Version, migration.Name, err)
+	}
+	if count == 0 {
+		return fmt.Errorf("DuckLake migration %03d %s was not recorded", migration.Version, migration.Name)
+	}
+	if count > 1 {
+		return fmt.Errorf("DuckLake migration %03d %s has duplicate records", migration.Version, migration.Name)
 	}
 	return nil
 }

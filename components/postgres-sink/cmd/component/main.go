@@ -23,6 +23,7 @@ type postgresConfig struct {
 	MaxOpenConns    int
 	MaxIdleConns    int
 	ConnMaxLifetime time.Duration
+	StartupTimeout  time.Duration
 }
 
 func main() {
@@ -30,12 +31,15 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	db, err := openPostgres(context.Background(), cfg)
+	startupCtx, cancel := context.WithTimeout(context.Background(), cfg.StartupTimeout)
+	defer cancel()
+
+	db, err := openPostgres(startupCtx, cfg)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.Close()
-	if err := ensureSchema(context.Background(), db); err != nil {
+	if err := ensureSchema(startupCtx, db); err != nil {
 		log.Fatal(err)
 	}
 
@@ -73,11 +77,16 @@ func postgresConfigFromEnv() (postgresConfig, error) {
 	if err != nil {
 		return postgresConfig{}, err
 	}
+	startupTimeout, err := getenvDuration("POSTGRES_STARTUP_TIMEOUT", 30*time.Second)
+	if err != nil {
+		return postgresConfig{}, err
+	}
 	return postgresConfig{
 		DSN:             dsn,
 		MaxOpenConns:    maxOpen,
 		MaxIdleConns:    maxIdle,
 		ConnMaxLifetime: lifetime,
+		StartupTimeout:  startupTimeout,
 	}, nil
 }
 

@@ -495,6 +495,76 @@ func TestDuckLakeSinkRecordsBronzeSchemaMigrationOnce(t *testing.T) {
 	}
 }
 
+func TestRecordMigrationTxIsIdempotent(t *testing.T) {
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatalf("open duckdb: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(createSchemaMigrationsSQL); err != nil {
+		t.Fatalf("create schema_migrations: %v", err)
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	migration := duckLakeMigration{Version: 99, Name: "test_migration"}
+	if err := recordMigrationTx(tx, migration); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("record first migration: %v", err)
+	}
+	if err := recordMigrationTx(tx, migration); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("record duplicate migration: %v", err)
+	}
+	if err := ensureMigrationRecordedTx(tx, migration); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("ensure migration recorded: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	var count int
+	if err := db.QueryRow("SELECT count(*) FROM schema_migrations WHERE version = ?", migration.Version).Scan(&count); err != nil {
+		t.Fatalf("count migration records: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("migration records = %d, want 1", count)
+	}
+}
+
+func TestEnsureMigrationRecordedTxRejectsDuplicateRecords(t *testing.T) {
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatalf("open duckdb: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(createSchemaMigrationsSQL); err != nil {
+		t.Fatalf("create schema_migrations: %v", err)
+	}
+	if _, err := db.Exec(
+		"INSERT INTO schema_migrations (version, name, applied_at) VALUES (99, 'test_migration', current_timestamp), (99, 'test_migration', current_timestamp)",
+	); err != nil {
+		t.Fatalf("insert duplicate migrations: %v", err)
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback()
+
+	err = ensureMigrationRecordedTx(tx, duckLakeMigration{Version: 99, Name: "test_migration"})
+	if err == nil {
+		t.Fatalf("ensureMigrationRecordedTx succeeded with duplicate records")
+	}
+	if !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("ensureMigrationRecordedTx error = %q, want duplicate record failure", err)
+	}
+}
+
 func TestRemoteInitSQLRecordsBronzeSchemaMigration(t *testing.T) {
 	sink := &DuckLakeSink{remoteCatalog: "stellar_lake"}
 	sqlText := sink.remoteInitSQL()
