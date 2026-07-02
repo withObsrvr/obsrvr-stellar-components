@@ -558,10 +558,10 @@ shipped behavior. No new feature work in cool-downs.
 
 The Quack/replica topology may ship to production when:
 
-- [ ] Quack chaos harness passes: kill server mid-ingest → no partial
+- [x] Quack chaos harness passes: kill server mid-ingest → no partial
       ledgers, sink restart, replay heals, gap query empty (Cycle 1 demo).
-- [ ] Large-ledger (≥15MB batch) ingest through quack mode succeeds.
-- [ ] `tx_envelope`/`tx_result`/soroban columns non-NULL on new ingests.
+- [x] Large-ledger (≥15MB batch) ingest through quack mode succeeds.
+- [x] `tx_envelope`/`tx_result`/soroban columns non-NULL on new ingests.
 - [ ] Server refuses plaintext startup without explicit insecure opt-out;
       external access, filesystems, memory, and threads locked down.
 - [ ] Server liveness endpoint wired into the Nomad job spec.
@@ -569,7 +569,11 @@ The Quack/replica topology may ship to production when:
 - [ ] Schema-drift reconcile-or-fail demo passes (Cycle 2 demo).
 - [ ] No token material in replica checkpoint table or logs.
 - [ ] Watermark gap query returns empty after a 1k-ledger backfill.
-- [ ] flowctl-sdk upgrade plan written (even if v0.1.3 not yet shipped).
+- [x] flowctl-sdk upgrade plan written (even if v0.1.3 not yet shipped).
+
+Local production-gate evidence and remaining run commands are captured in
+`docs/production-gate-runbook.md`. The SDK follow-up plan is captured in
+`docs/flowctl-sdk-upgrade-plan.md`.
 
 The Postgres path additionally requires Cycle 3 before any production use or
 history replay after an extractor upgrade.

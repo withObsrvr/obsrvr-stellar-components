@@ -1,4 +1,4 @@
-.PHONY: build lint proto test test-local-pipeline test-quack-chaos validate-pipelines tidy clean
+.PHONY: build lint proto test test-local-pipeline test-quack-chaos validate-pipelines validate-nomad tidy clean
 
 GO ?= go
 GOFMT ?= gofmt
@@ -32,6 +32,10 @@ test-quack-chaos:
 
 validate-pipelines:
 	@scripts/validate-pipelines.sh
+
+validate-nomad:
+	@nomad fmt -check deploy/nomad/quack-ducklake-server.nomad
+	@nomad job validate deploy/nomad/quack-ducklake-server.nomad
 
 tidy:
 	@$(GO) mod tidy

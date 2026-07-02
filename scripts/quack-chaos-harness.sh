@@ -32,6 +32,7 @@ kill_after="${QUACK_CHAOS_KILL_AFTER:-5}"
 ingest_timeout="${QUACK_CHAOS_INGEST_TIMEOUT:-90}"
 replay_timeout="${QUACK_CHAOS_REPLAY_TIMEOUT:-180}"
 baseline_timeout="${QUACK_CHAOS_BASELINE_TIMEOUT:-180}"
+min_script_mib="${QUACK_CHAOS_MIN_SCRIPT_MIB:-15}"
 shutdown_grace="${QUACK_CHAOS_SHUTDOWN_GRACE:-10}"
 pipeline_path="${QUACK_CHAOS_PIPELINE_PATH:-$runtime_dir/local-archive-quack-ducklake-flowctl.yaml}"
 ingest_cmd="${QUACK_CHAOS_INGEST_CMD:-}"
@@ -275,6 +276,52 @@ start_server() {
   return 1
 }
 
+check_script_sizes() {
+  local log_file="$runtime_dir/script-sizes.log"
+  local summary_file="$runtime_dir/script-size-summary.env"
+
+  if [[ "$min_script_mib" == "0" ]]; then
+    echo "skipping remote script size threshold because QUACK_CHAOS_MIN_SCRIPT_MIB=0"
+    return 0
+  fi
+  if [[ ! -s "$log_file" ]]; then
+    echo "no remote DuckLake script size measurements were captured" >&2
+    return 1
+  fi
+
+  if ! awk -v min="$min_script_mib" -v summary="$summary_file" '
+    /remote DuckLake write script/ {
+      for (i = 1; i <= NF; i++) {
+        if ($i == "is") {
+          size = $(i + 1) + 0
+          count++
+          if (size > max) {
+            max = size
+          }
+        }
+      }
+    }
+    END {
+      if (count == 0) {
+        print "no script size measurements found" > "/dev/stderr"
+        exit 2
+      }
+      printf "max_remote_script_mib=%.2f\n", max > summary
+      printf "min_required_script_mib=%.2f\n", min >> summary
+      if (max < min) {
+        exit 1
+      }
+    }
+  ' "$log_file"; then
+    echo "remote script size gate failed; largest script was below ${min_script_mib} MiB" >&2
+    cat "$summary_file" >&2 || true
+    return 1
+  fi
+
+  cat "$summary_file"
+  echo "remote script size gate passed"
+}
+
 echo "starting initial quack server"
 start_server "$catalog_path" "$data_path" "$runtime_dir/quack-server-chaos.log"
 
@@ -320,6 +367,10 @@ fi
 
 if grep -ah "remote DuckLake write script" "$runtime_dir/ingest-before-kill.log" "$runtime_dir/replay.log" >"$runtime_dir/script-sizes.log" 2>/dev/null; then
   echo "captured remote script size measurements in $runtime_dir/script-sizes.log"
+  check_script_sizes
+elif [[ "$min_script_mib" != "0" ]]; then
+  echo "failed to capture remote script size measurements" >&2
+  exit 1
 fi
 
 if [[ -n "$server_pid" ]] && kill -0 "$server_pid" 2>/dev/null; then
@@ -452,6 +503,33 @@ SQL
 .headers on
 .once $runtime_dir/parity-diffs.csv
 SELECT * FROM parity_diffs WHERE diff_count <> 0 ORDER BY table_name;
+
+CREATE TEMP TABLE gate_failures(check_name VARCHAR, observed BIGINT, details VARCHAR);
+INSERT INTO gate_failures
+SELECT 'transactions_row_v2_rows', 0, 'no transaction rows were written'
+WHERE NOT EXISTS (SELECT 1 FROM chaos.bronze.transactions_row_v2);
+INSERT INTO gate_failures
+SELECT 'transactions_row_v2_xdr_not_null', count(*), 'tx_envelope, tx_result, or tx_meta had NULL values'
+FROM chaos.bronze.transactions_row_v2
+WHERE tx_envelope IS NULL OR tx_result IS NULL OR tx_meta IS NULL
+HAVING count(*) > 0;
+INSERT INTO gate_failures
+SELECT 'transactions_row_v2_soroban_fields', 0, 'no transaction rows populated soroban_resources_instructions'
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM chaos.bronze.transactions_row_v2
+  WHERE soroban_resources_instructions IS NOT NULL
+);
+INSERT INTO gate_failures
+SELECT 'operations_row_v2_soroban_fields', 0, 'no operation rows populated soroban_operation and soroban_arguments_json'
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM chaos.bronze.operations_row_v2
+  WHERE soroban_operation IS NOT NULL
+    AND soroban_arguments_json IS NOT NULL
+);
+.once $runtime_dir/gate-failures.csv
+SELECT * FROM gate_failures ORDER BY check_name;
 SQL
 
   echo "comparing chaos and never-failed baseline tables"
@@ -462,6 +540,12 @@ SQL
     return 1
   fi
   echo "chaos and baseline tables match"
+  if [[ -s "$runtime_dir/gate-failures.csv" ]] && [[ "$(wc -l <"$runtime_dir/gate-failures.csv")" -gt 1 ]]; then
+    echo "catalog gate failures found:" >&2
+    cat "$runtime_dir/gate-failures.csv" >&2
+    return 1
+  fi
+  echo "typed/XDR/Soroban catalog gates passed"
 }
 
 if command -v duckdb >/dev/null 2>&1; then
