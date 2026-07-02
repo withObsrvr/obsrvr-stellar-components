@@ -1,32 +1,67 @@
-name: fanout-stellar-ledger-postgres-ducklake
-description: Fan-out pipeline from one normalized ledger batch stream to operational and analytical sinks.
+apiVersion: flowctl/v1
+kind: Pipeline
+metadata:
+  name: fanout-stellar-ledger-postgres-ducklake
+  description: Fan-out process pipeline from public Stellar archive to Postgres and DuckLake.
 
-components:
-  raw-ledger-source:
-    image: raw-ledger-source:0.2.2
-    type: source
-    outputs: [stellar.ledger.v1]
+spec:
+  driver: process
 
-  stellar-ledger-processor:
-    image: stellar-ledger-processor:0.1.0
-    type: processor
-    inputs: [stellar.ledger.v1]
-    outputs: [stellar.ledger.batch.v1]
+  sources:
+    - id: raw-ledger-source
+      type: source
+      command: ["./bin/raw-ledger-source"]
+      env:
+        FLOWCTL_COMPONENT_ID: "raw-ledger-source"
+        BACKEND_TYPE: "ARCHIVE"
+        ARCHIVE_STORAGE_TYPE: "S3"
+        ARCHIVE_BUCKET_NAME: "aws-public-blockchain"
+        ARCHIVE_PATH: "v1.1/stellar/ledgers/pubnet"
+        AWS_REGION: "us-east-2"
+        LEDGERS_PER_FILE: "1"
+        FILES_PER_PARTITION: "64000"
+        NETWORK_PASSPHRASE: "Public Global Stellar Network ; September 2015"
+        START_LEDGER: "62080000"
+        END_LEDGER: "62080000"
+        GRPC_PORT: "55471"
+        HEALTH_PORT: "19481"
+        FLOWCTL_ENDPOINT: "127.0.0.1:19480"
 
-  postgres-sink:
-    image: postgres-sink:0.1.0
-    type: sink
-    inputs: [stellar.ledger.batch.v1]
+  processors:
+    - id: stellar-ledger-processor
+      type: processor
+      command: ["./bin/stellar-ledger-processor"]
+      inputs: ["raw-ledger-source"]
+      env:
+        COMPONENT_ID: "stellar-ledger-processor"
+        NETWORK_PASSPHRASE: "Public Global Stellar Network ; September 2015"
+        PORT: ":55472"
+        HEALTH_PORT: "19482"
+        ENABLE_FLOWCTL: "true"
+        FLOWCTL_ENDPOINT: "127.0.0.1:19480"
 
-  ducklake-sink:
-    image: ducklake-sink:0.1.0
-    type: sink
-    inputs: [stellar.ledger.batch.v1]
+  sinks:
+    - id: postgres-sink
+      type: sink
+      command: ["./bin/postgres-sink"]
+      inputs: ["stellar-ledger-processor"]
+      env:
+        COMPONENT_ID: "postgres-sink"
+        POSTGRES_DSN: "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable"
+        PORT: ":55473"
+        HEALTH_PORT: "19483"
+        ENABLE_FLOWCTL: "true"
+        FLOWCTL_ENDPOINT: "127.0.0.1:19480"
 
-edges:
-  - from: raw-ledger-source
-    to: stellar-ledger-processor
-  - from: stellar-ledger-processor
-    to: postgres-sink
-  - from: stellar-ledger-processor
-    to: ducklake-sink
+    - id: ducklake-sink
+      type: sink
+      command: ["./bin/ducklake-sink"]
+      inputs: ["stellar-ledger-processor"]
+      env:
+        COMPONENT_ID: "ducklake-sink"
+        DUCKLAKE_CATALOG_PATH: "./ducklake/stellar.ducklake"
+        DUCKLAKE_DATA_PATH: "./ducklake/data"
+        PORT: ":55474"
+        HEALTH_PORT: "19484"
+        ENABLE_FLOWCTL: "true"
+        FLOWCTL_ENDPOINT: "127.0.0.1:19480"

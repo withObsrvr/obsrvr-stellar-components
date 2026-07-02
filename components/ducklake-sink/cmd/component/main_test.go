@@ -461,6 +461,124 @@ func TestEnsureCatalogNetworkTxRejectsDuplicateMetadata(t *testing.T) {
 	}
 }
 
+func TestDuckLakeSinkRecordsBronzeSchemaMigrationOnce(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := DuckLakeConfig{
+		CatalogPath: filepath.Join(tmp, "stellar.ducklake"),
+		DataPath:    filepath.Join(tmp, "data"),
+		AttachName:  "test_lake",
+	}
+	sink, err := NewDuckLakeSink(cfg)
+	if err != nil {
+		t.Fatalf("new sink: %v", err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatalf("close first sink: %v", err)
+	}
+
+	sink, err = NewDuckLakeSink(cfg)
+	if err != nil {
+		t.Fatalf("reopen sink: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := sink.Close(); err != nil {
+			t.Fatalf("close second sink: %v", err)
+		}
+	})
+
+	var count int
+	if err := sink.db.QueryRow("SELECT count(*) FROM schema_migrations WHERE version = 1 AND name = 'bronze_schema'").Scan(&count); err != nil {
+		t.Fatalf("query schema migrations: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("migration records = %d, want 1", count)
+	}
+}
+
+func TestRecordMigrationTxIsIdempotent(t *testing.T) {
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatalf("open duckdb: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(createSchemaMigrationsSQL); err != nil {
+		t.Fatalf("create schema_migrations: %v", err)
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	migration := duckLakeMigration{Version: 99, Name: "test_migration"}
+	if err := recordMigrationTx(tx, migration); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("record first migration: %v", err)
+	}
+	if err := recordMigrationTx(tx, migration); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("record duplicate migration: %v", err)
+	}
+	if err := ensureMigrationRecordedTx(tx, migration); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("ensure migration recorded: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	var count int
+	if err := db.QueryRow("SELECT count(*) FROM schema_migrations WHERE version = ?", migration.Version).Scan(&count); err != nil {
+		t.Fatalf("count migration records: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("migration records = %d, want 1", count)
+	}
+}
+
+func TestEnsureMigrationRecordedTxRejectsDuplicateRecords(t *testing.T) {
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatalf("open duckdb: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(createSchemaMigrationsSQL); err != nil {
+		t.Fatalf("create schema_migrations: %v", err)
+	}
+	if _, err := db.Exec(
+		"INSERT INTO schema_migrations (version, name, applied_at) VALUES (99, 'test_migration', current_timestamp), (99, 'test_migration', current_timestamp)",
+	); err != nil {
+		t.Fatalf("insert duplicate migrations: %v", err)
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback()
+
+	err = ensureMigrationRecordedTx(tx, duckLakeMigration{Version: 99, Name: "test_migration"})
+	if err == nil {
+		t.Fatalf("ensureMigrationRecordedTx succeeded with duplicate records")
+	}
+	if !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("ensureMigrationRecordedTx error = %q, want duplicate record failure", err)
+	}
+}
+
+func TestRemoteInitSQLRecordsBronzeSchemaMigration(t *testing.T) {
+	sink := &DuckLakeSink{remoteCatalog: "stellar_lake"}
+	sqlText := sink.remoteInitSQL()
+	for _, want := range []string{
+		"stellar_lake.schema_migrations",
+		"1, 'bronze_schema'",
+		"WHERE NOT EXISTS (SELECT 1 FROM stellar_lake.schema_migrations WHERE version = 1)",
+	} {
+		if !strings.Contains(sqlText, want) {
+			t.Fatalf("remote init SQL missing %q:\n%s", want, sqlText)
+		}
+	}
+}
+
 func TestTypedTableSpecsResolveAllColumns(t *testing.T) {
 	if err := validateTypedTableSpecs(); err != nil {
 		t.Fatalf("validate typed table specs: %v", err)

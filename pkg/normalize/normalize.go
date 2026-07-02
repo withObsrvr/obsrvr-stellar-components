@@ -1,8 +1,6 @@
 package normalize
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -206,7 +204,7 @@ func appendRows[T any](batch *componentsv1.LedgerBatch, network string, sequence
 			return fmt.Errorf("normalize %s row %d: %w", table, i, err)
 		}
 		batch.BronzeRows = append(batch.BronzeRows, &componentsv1.BronzeRow{
-			Id:                bronzeID(network, sequence, table, i, rowJSON),
+			Id:                ids.BronzeRow(network, sequence, table, i),
 			TableName:         table,
 			NetworkPassphrase: network,
 			LedgerSequence:    sequence,
@@ -215,11 +213,6 @@ func appendRows[T any](batch *componentsv1.LedgerBatch, network string, sequence
 		})
 	}
 	return nil
-}
-
-func bronzeID(network string, sequence uint32, table string, index int, rowJSON string) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%s:%d:%s", network, sequence, table, index, rowJSON)))
-	return hex.EncodeToString(sum[:])
 }
 
 func normalizeJSON(value interface{}) (string, error) {
@@ -236,12 +229,4 @@ func errorsJoin(errs []error) error {
 
 func marshalBase64(value interface{}) (string, error) {
 	return xdr.MarshalBase64(value)
-}
-
-func jsonString(value interface{}) string {
-	data, err := json.Marshal(value)
-	if err != nil {
-		return "{}"
-	}
-	return string(data)
 }

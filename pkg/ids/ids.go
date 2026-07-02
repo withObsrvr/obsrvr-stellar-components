@@ -19,6 +19,10 @@ func Operation(network string, sequence uint32, txIndex uint32, opIndex uint32) 
 	return stable("op", network, fmt.Sprintf("%d", sequence), fmt.Sprintf("%d", txIndex), fmt.Sprintf("%d", opIndex))
 }
 
+func BronzeRow(network string, sequence uint32, table string, ordinal int) string {
+	return stable("bronze", network, fmt.Sprintf("%d", sequence), table, fmt.Sprintf("%d", ordinal))
+}
+
 func ContractEvent(network string, sequence uint32, txIndex uint32, eventIndex uint32) string {
 	return stable("contract-event", network, fmt.Sprintf("%d", sequence), fmt.Sprintf("%d", txIndex), fmt.Sprintf("%d", eventIndex))
 }

@@ -41,6 +41,11 @@ Rows use deterministic IDs:
 - ledger: network + ledger sequence
 - transaction: network + ledger sequence + transaction index + transaction hash
 - operation: network + ledger sequence + transaction index + operation index
-- bronze row: network + ledger sequence + table name + row ordinal + row JSON hash
+- bronze row: network + ledger sequence + table name + row ordinal
+
+Bronze row IDs are position-based and intentionally exclude row content. If a
+`stellar-extract` upgrade changes the JSON for a replayed ledger, the replay
+keeps the same bronze row identity and replaces the stored content instead of
+creating a second row.
 
 Sinks should treat these IDs as replay keys.
