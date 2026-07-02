@@ -19,8 +19,10 @@ those ledgers in the target table from the current primary table contents.
 - `REPLICA_NAME`, default `serving_replica`
 - `START_SNAPSHOT`, default `0`
 - `TARGET_MODE`, default `embedded`
-- `TARGET_DUCKLAKE_CATALOG_PATH`, default `ducklake/serving.ducklake`
-- `TARGET_DUCKLAKE_DATA_PATH`, default `ducklake/serving-data`
+- `TARGET_DUCKLAKE_CATALOG_PATH`, required absolute path when
+  `TARGET_MODE=embedded`
+- `TARGET_DUCKLAKE_DATA_PATH`, required absolute path when
+  `TARGET_MODE=embedded`
 - `TARGET_ATTACH_NAME`, default `serving_lake`
 - `TARGET_QUACK_URI`, required when `TARGET_MODE=quack`
 - `TARGET_QUACK_TOKEN`, required when `TARGET_MODE=quack`
@@ -63,8 +65,12 @@ ledgers, and commits the checkpoint. This keeps the target DuckLake attachment
 owned by the read-replica Quack server while replication is running.
 
 Changed ledgers are rebuilt in bounded batches controlled by
-`LEDGER_BATCH_SIZE`. The table checkpoint advances only after all batches for
-that table have completed.
+`LEDGER_BATCH_SIZE`. If the primary change-feed snapshot range has expired, the
+component performs a bounded full resync for that table by ledger range, writes
+the table checkpoint to the current primary snapshot, and continues with later
+tables. One table failure is recorded in `replica.sync_checkpoints` and does
+not prevent other tables from running; the process exits non-zero after all
+tables are attempted.
 
 ## Semantics
 
@@ -72,11 +78,14 @@ For each source table, the component:
 
 1. reads the latest primary DuckLake snapshot
 2. reads the table checkpoint from `replica.sync_checkpoints` in the target
-3. calls `table_changes(source_table, last_snapshot + 1, current_snapshot)`
-4. extracts changed ledger sequences
-5. deletes those ledgers from the target table
-6. inserts current primary rows for those ledgers into the target table
-7. advances the checkpoint only after the target transaction commits
+3. creates the target table from the primary shape if needed
+4. compares source and target column names and fails with a schema diff if they
+   do not match
+5. calls `table_changes(source_table, last_snapshot + 1, current_snapshot)`
+6. fails if any change-feed row has a NULL ledger column
+7. deletes changed ledgers from the target table
+8. inserts current primary rows for those ledgers by explicit column name
+9. advances the checkpoint only after the target transaction commits
 
 Derived target tables are rebuildable serving state. The primary DuckLake
 catalog remains authoritative.

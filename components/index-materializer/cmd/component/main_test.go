@@ -78,6 +78,60 @@ func TestMaterializeSQLRejectsUnsupportedIndex(t *testing.T) {
 	}
 }
 
+func TestMaterializeSQLRequiresExplicitLedgerRange(t *testing.T) {
+	for _, cfg := range []config{
+		{Catalog: "stellar_lake", IndexName: "tx_hash_index", EndLedger: "10"},
+		{Catalog: "stellar_lake", IndexName: "tx_hash_index", StartLedger: "0"},
+	} {
+		if _, err := materializeSQL(cfg); err == nil {
+			t.Fatalf("materializeSQL(%+v) succeeded without explicit ledger range", cfg)
+		}
+	}
+}
+
+func TestMaterializeChunksBoundsLargeRanges(t *testing.T) {
+	chunks, err := materializeChunks(config{
+		Catalog:         "stellar_lake",
+		IndexName:       "tx_hash_index",
+		StartLedger:     "100",
+		EndLedger:       "225",
+		LedgerChunkSize: 50,
+	})
+	if err != nil {
+		t.Fatalf("materialize chunks: %v", err)
+	}
+	if len(chunks) != 3 {
+		t.Fatalf("chunk count = %d, want 3", len(chunks))
+	}
+	wants := []ledgerRange{
+		{start: 100, end: 150},
+		{start: 150, end: 200},
+		{start: 200, end: 225},
+	}
+	for i, want := range wants {
+		if chunks[i].ledgerRange != want {
+			t.Fatalf("chunk %d = (%d, %d], want (%d, %d]", i, chunks[i].start, chunks[i].end, want.start, want.end)
+		}
+		if !strings.Contains(chunks[i].sql, "BEGIN TRANSACTION;") || !strings.Contains(chunks[i].sql, "COMMIT;") {
+			t.Fatalf("chunk %d does not have a bounded transaction:\n%s", i, chunks[i].sql)
+		}
+	}
+	if !strings.Contains(chunks[1].sql, "ledger_sequence > 150") || !strings.Contains(chunks[1].sql, "ledger_sequence <= 200") {
+		t.Fatalf("middle chunk has wrong bounds:\n%s", chunks[1].sql)
+	}
+}
+
+func TestLedgerChunkSizeAllowsLargeUint64(t *testing.T) {
+	large := uint64(1) << 40
+	got, err := ledgerChunkSize(config{LedgerChunkSize: large})
+	if err != nil {
+		t.Fatalf("ledger chunk size: %v", err)
+	}
+	if got != large {
+		t.Fatalf("ledger chunk size = %d, want %d", got, large)
+	}
+}
+
 // assertBoundsAppearTwice checks the range predicate is present in both the
 // DELETE and the INSERT clauses (i.e. each bound occurs at least twice).
 func assertBoundsAppearTwice(t *testing.T, sqlText, lower, upper string) {
