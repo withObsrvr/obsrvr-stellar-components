@@ -74,6 +74,29 @@ func TestTargetSQLHelpers(t *testing.T) {
 	}
 }
 
+func TestValidateConfigRequiresAbsoluteEmbeddedTargetPaths(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.TargetCatalogPath = "ducklake/serving.ducklake"
+
+	err := validateConfig(cfg)
+	if err == nil {
+		t.Fatal("expected relative target catalog path to fail")
+	}
+	if !strings.Contains(err.Error(), "TARGET_DUCKLAKE_CATALOG_PATH must be absolute") {
+		t.Fatalf("validateConfig error = %q", err)
+	}
+
+	cfg = validTestConfig()
+	cfg.TargetDataPath = "ducklake/serving-data"
+	err = validateConfig(cfg)
+	if err == nil {
+		t.Fatal("expected relative target data path to fail")
+	}
+	if !strings.Contains(err.Error(), "TARGET_DUCKLAKE_DATA_PATH must be absolute") {
+		t.Fatalf("validateConfig error = %q", err)
+	}
+}
+
 func TestUIntListSQL(t *testing.T) {
 	if got := uintListSQL([]uint64{3, 1, 2}); got != "3, 1, 2" {
 		t.Fatalf("uint list = %q", got)
@@ -97,6 +120,23 @@ func TestChangedLedgersSQL(t *testing.T) {
 	}
 }
 
+func TestChangedLedgerNullCountSQL(t *testing.T) {
+	cfg := config{SourceCatalog: "stellar_lake"}
+	table := sourceTable{Name: "bronze.transactions_row_v2", LedgerColumn: "ledger_sequence"}
+
+	sqlText := changedLedgerNullCountSQL(cfg, table, "bronze", "transactions_row_v2", 11, 22)
+	for _, want := range []string{
+		"USE stellar_lake; USE bronze;",
+		"SELECT count(*)",
+		"FROM table_changes('transactions_row_v2', 11, 22)",
+		`WHERE "ledger_sequence" IS NULL`,
+	} {
+		if !strings.Contains(sqlText, want) {
+			t.Fatalf("NULL changed ledgers SQL missing %q:\n%s", want, sqlText)
+		}
+	}
+}
+
 func TestRebuildTargetLedgerBatchQuackSQL(t *testing.T) {
 	cfg := config{
 		QuackURI:         "quack:primary:9494",
@@ -106,15 +146,17 @@ func TestRebuildTargetLedgerBatchQuackSQL(t *testing.T) {
 		TargetAttachName: "serving_lake",
 	}
 	table := sourceTable{Name: "bronze.transactions_row_v2", LedgerColumn: "ledger_sequence"}
+	columns := []string{"ledger_sequence", "transaction_hash"}
 
-	sqlText := rebuildTargetLedgerBatchQuackSQL(cfg, table, []uint64{100, 101})
+	sqlText := rebuildTargetLedgerBatchQuackSQL(cfg, table, []uint64{100, 101}, columns)
 	for _, want := range []string{
 		"ATTACH IF NOT EXISTS 'quack:primary:9494' AS replica_primary",
 		"CREATE SCHEMA IF NOT EXISTS serving_lake.bronze",
 		"CREATE TABLE IF NOT EXISTS serving_lake.bronze.transactions_row_v2",
 		"BEGIN TRANSACTION;",
 		`DELETE FROM serving_lake.bronze.transactions_row_v2 WHERE "ledger_sequence" IN (100, 101);`,
-		"INSERT INTO serving_lake.bronze.transactions_row_v2 SELECT * FROM replica_primary.query",
+		`INSERT INTO serving_lake.bronze.transactions_row_v2 ("ledger_sequence", "transaction_hash") SELECT "ledger_sequence", "transaction_hash" FROM replica_primary.query`,
+		`SELECT "ledger_sequence", "transaction_hash" FROM stellar_lake.bronze.transactions_row_v2 WHERE "ledger_sequence" IN (100, 101)`,
 		"COMMIT;",
 	} {
 		if !strings.Contains(sqlText, want) {
@@ -126,6 +168,88 @@ func TestRebuildTargetLedgerBatchQuackSQL(t *testing.T) {
 	}
 	if !strings.Contains(sqlText, "primary''s secret") {
 		t.Fatalf("quack rebuild SQL did not escape token literal:\n%s", sqlText)
+	}
+}
+
+func TestRebuildTargetLedgerRangeQuackSQL(t *testing.T) {
+	cfg := config{
+		QuackURI:         "quack:primary:9494",
+		QuackToken:       "secret",
+		DisableSSL:       true,
+		SourceCatalog:    "stellar_lake",
+		TargetAttachName: "serving_lake",
+	}
+	table := sourceTable{Name: "bronze.transactions_row_v2", LedgerColumn: "ledger_sequence"}
+
+	sqlText := rebuildTargetLedgerRangeQuackSQL(cfg, table, ledgerRangeChunk{start: 100, end: 199}, []string{"ledger_sequence", "transaction_hash"})
+	for _, want := range []string{
+		`DELETE FROM serving_lake.bronze.transactions_row_v2 WHERE "ledger_sequence" >= 100 AND "ledger_sequence" <= 199;`,
+		`INSERT INTO serving_lake.bronze.transactions_row_v2 ("ledger_sequence", "transaction_hash") SELECT "ledger_sequence", "transaction_hash" FROM replica_primary.query`,
+		`SELECT "ledger_sequence", "transaction_hash" FROM stellar_lake.bronze.transactions_row_v2 WHERE "ledger_sequence" >= 100 AND "ledger_sequence" <= 199`,
+	} {
+		if !strings.Contains(sqlText, want) {
+			t.Fatalf("quack range rebuild SQL missing %q:\n%s", want, sqlText)
+		}
+	}
+}
+
+func TestSourceLedgerBoundsSQL(t *testing.T) {
+	cfg := config{SourceCatalog: "stellar_lake"}
+	table := sourceTable{Name: "bronze.transactions_row_v2", LedgerColumn: "ledger_sequence"}
+
+	sqlText := sourceLedgerBoundsSQL(cfg, table)
+	for _, want := range []string{
+		"count(*) AS total_rows",
+		`coalesce(sum(CASE WHEN "ledger_sequence" IS NULL THEN 1 ELSE 0 END), 0) AS null_rows`,
+		`min("ledger_sequence") AS min_ledger`,
+		"FROM stellar_lake.bronze.transactions_row_v2",
+	} {
+		if !strings.Contains(sqlText, want) {
+			t.Fatalf("source ledger bounds SQL missing %q:\n%s", want, sqlText)
+		}
+	}
+}
+
+func TestColumnDiffNamesMissingAndExtraColumns(t *testing.T) {
+	diff := columnDiff(
+		[]string{"ledger_sequence", "transaction_hash", "successful"},
+		[]string{"ledger_sequence", "tx_hash"},
+	)
+	for _, want := range []string{
+		"missing target columns: successful, transaction_hash",
+		"extra target columns: tx_hash",
+	} {
+		if !strings.Contains(diff, want) {
+			t.Fatalf("column diff missing %q in %q", want, diff)
+		}
+	}
+}
+
+func TestInsertCheckpointSQLRedactsSecrets(t *testing.T) {
+	cfg := config{
+		TargetAttachName: "serving_lake",
+		ReplicaName:      "serving_replica",
+		SourceCatalog:    "stellar_lake",
+		QuackToken:       "primary's secret",
+		TargetQuackToken: "target secret",
+	}
+	table := sourceTable{Name: "bronze.transactions_row_v2", LedgerColumn: "ledger_sequence"}
+
+	sqlText := insertCheckpointSQL(cfg, table, 42, "error", "remote query failed with primary''s secret and target secret")
+	if strings.Contains(sqlText, "primary") || strings.Contains(sqlText, "target secret") {
+		t.Fatalf("checkpoint SQL leaked secret material:\n%s", sqlText)
+	}
+	if !strings.Contains(sqlText, "[REDACTED]") {
+		t.Fatalf("checkpoint SQL did not include redaction marker:\n%s", sqlText)
+	}
+}
+
+func TestIsMissingSnapshotError(t *testing.T) {
+	if !isMissingSnapshotError(assertErr("ducklake snapshot 12 not found")) {
+		t.Fatalf("expected missing snapshot error to be classified")
+	}
+	if isMissingSnapshotError(assertErr("network timeout reading table_changes")) {
+		t.Fatalf("non-snapshot error was classified as missing snapshot")
 	}
 }
 
@@ -159,4 +283,26 @@ func TestInitStepNameRedactsAttachSQL(t *testing.T) {
 	if got := initStepName(stmt); got != "attach Quack" {
 		t.Fatalf("init step name = %q", got)
 	}
+}
+
+func validTestConfig() config {
+	return config{
+		QuackURI:          "quack:127.0.0.1:9494",
+		QuackToken:        "secret",
+		QuackRemoteDB:     "remote_lake",
+		SourceCatalog:     "stellar_lake",
+		SourceTables:      []sourceTable{{Name: "bronze.transactions_row_v2", LedgerColumn: "ledger_sequence"}},
+		ReplicaName:       "serving_replica",
+		TargetMode:        "embedded",
+		TargetCatalogPath: "/tmp/serving.ducklake",
+		TargetDataPath:    "/tmp/serving-data",
+		TargetAttachName:  "serving_lake",
+		LedgerBatchSize:   1000,
+	}
+}
+
+type assertErr string
+
+func (e assertErr) Error() string {
+	return string(e)
 }

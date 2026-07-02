@@ -29,15 +29,17 @@ each transformer attaching the catalog independently.
 - `QUACK_DISABLE_SSL`, default `true`
 - `DUCKLAKE_ATTACH_NAME`, default `stellar_lake`
 - `INDEX_NAME`, default `tx_hash_index`
-- `START_LEDGER`, default `0`
-- `END_LEDGER`, default max int64
+- `START_LEDGER`, required
+- `END_LEDGER`, required
+- `LEDGER_CHUNK_SIZE`, default `100000`
 
-`START_LEDGER` and `END_LEDGER` must be unsigned integers with
+`START_LEDGER` and `END_LEDGER` must be set explicitly and must be unsigned integers with
 `START_LEDGER <= END_LEDGER`. Values are parsed as `uint64`, but the derived
 tables store `ledger_sequence` as signed `BIGINT`, so the effective usable range
 is `0 .. 9223372036854775807` (int64 max). Each run rebuilds the requested
 ledger range by deleting existing derived rows for `(START_LEDGER, END_LEDGER]`
-and inserting them again from bronze tables in the same remote transaction.
+and inserting them again from bronze tables. Large ranges are split into
+bounded chunks, and each chunk is committed in its own remote transaction.
 
 Reruns are idempotent at the row grain: replaying the same range yields the same
 rows. Data-bearing columns are derived from the source, including

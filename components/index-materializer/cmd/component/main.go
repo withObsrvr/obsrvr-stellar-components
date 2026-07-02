@@ -21,26 +21,30 @@ func main() {
 }
 
 type config struct {
-	QuackURI      string
-	QuackToken    string
-	QuackRemoteDB string
-	Catalog       string
-	IndexName     string
-	StartLedger   string
-	EndLedger     string
-	DisableSSL    bool
+	QuackURI        string
+	QuackToken      string
+	QuackRemoteDB   string
+	Catalog         string
+	IndexName       string
+	StartLedger     string
+	EndLedger       string
+	LedgerChunkSize int
+	DisableSSL      bool
 }
+
+const defaultLedgerChunkSize = 100000
 
 func configFromEnv() config {
 	return config{
-		QuackURI:      getenv("QUACK_URI", "quack:127.0.0.1:9494"),
-		QuackToken:    getenv("QUACK_TOKEN", ""),
-		QuackRemoteDB: sanitizeIdentifier(getenv("QUACK_REMOTE_DB", "remote_lake")),
-		Catalog:       sanitizeIdentifier(getenv("DUCKLAKE_ATTACH_NAME", "stellar_lake")),
-		IndexName:     getenv("INDEX_NAME", "tx_hash_index"),
-		StartLedger:   getenv("START_LEDGER", "0"),
-		EndLedger:     getenv("END_LEDGER", "9223372036854775807"),
-		DisableSSL:    getenvBool("QUACK_DISABLE_SSL", true),
+		QuackURI:        getenv("QUACK_URI", "quack:127.0.0.1:9494"),
+		QuackToken:      getenv("QUACK_TOKEN", ""),
+		QuackRemoteDB:   sanitizeIdentifier(getenv("QUACK_REMOTE_DB", "remote_lake")),
+		Catalog:         sanitizeIdentifier(getenv("DUCKLAKE_ATTACH_NAME", "stellar_lake")),
+		IndexName:       getenv("INDEX_NAME", "tx_hash_index"),
+		StartLedger:     strings.TrimSpace(os.Getenv("START_LEDGER")),
+		EndLedger:       strings.TrimSpace(os.Getenv("END_LEDGER")),
+		LedgerChunkSize: int(mustParseUintEnv("LEDGER_CHUNK_SIZE", strconv.FormatUint(defaultLedgerChunkSize, 10))),
+		DisableSSL:      getenvBool("QUACK_DISABLE_SSL", true),
 	}
 }
 
@@ -48,7 +52,7 @@ func run(ctx context.Context, cfg config) error {
 	if cfg.QuackToken == "" {
 		return fmt.Errorf("QUACK_TOKEN is required")
 	}
-	script, err := materializeSQL(cfg)
+	chunks, err := materializeChunks(cfg)
 	if err != nil {
 		return err
 	}
@@ -84,20 +88,22 @@ func run(ctx context.Context, cfg config) error {
 	}
 
 	remoteQuery := fmt.Sprintf("SELECT * FROM %s.query(?)", cfg.QuackRemoteDB)
-	if _, err := db.ExecContext(ctx, remoteQuery, script); err != nil {
-		// The BEGIN/DELETE/INSERT/COMMIT script runs as one server-side query,
-		// so a mid-script failure aborts the remote transaction. Attempt a
-		// best-effort ROLLBACK on the same (pinned) connection to clear any
-		// lingering transaction state, bounded so a degraded Quack link cannot
-		// block indefinitely, and surface a failed rollback instead of hiding it.
-		rbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if _, rbErr := db.ExecContext(rbCtx, remoteQuery, "ROLLBACK;"); rbErr != nil {
-			log.Printf("materialize %s: rollback after failure did not confirm clean state: %v", cfg.IndexName, rbErr)
+	for i, chunk := range chunks {
+		if _, err := db.ExecContext(ctx, remoteQuery, chunk.sql); err != nil {
+			// The BEGIN/DELETE/INSERT/COMMIT script runs as one server-side query,
+			// so a mid-script failure aborts the remote transaction. Attempt a
+			// best-effort ROLLBACK on the same (pinned) connection to clear any
+			// lingering transaction state, bounded so a degraded Quack link cannot
+			// block indefinitely, and surface a failed rollback instead of hiding it.
+			rbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if _, rbErr := db.ExecContext(rbCtx, remoteQuery, "ROLLBACK;"); rbErr != nil {
+				log.Printf("materialize %s chunk %d/%d: rollback after failure did not confirm clean state: %v", cfg.IndexName, i+1, len(chunks), rbErr)
+			}
+			cancel()
+			return fmt.Errorf("materialize %s chunk %d/%d ledgers (%d, %d]: %w", cfg.IndexName, i+1, len(chunks), chunk.start, chunk.end, err)
 		}
-		return fmt.Errorf("materialize %s: %w", cfg.IndexName, err)
 	}
-	log.Printf("materialized %s for ledgers (%s, %s]", cfg.IndexName, cfg.StartLedger, cfg.EndLedger)
+	log.Printf("materialized %s for ledgers (%s, %s] in %d chunk(s)", cfg.IndexName, cfg.StartLedger, cfg.EndLedger, len(chunks))
 	return nil
 }
 
@@ -109,7 +115,18 @@ type ledgerRange struct {
 	end   uint64
 }
 
+type materializeChunk struct {
+	ledgerRange
+	sql string
+}
+
 func parseLedgerRange(cfg config) (ledgerRange, error) {
+	if strings.TrimSpace(cfg.StartLedger) == "" {
+		return ledgerRange{}, fmt.Errorf("START_LEDGER is required")
+	}
+	if strings.TrimSpace(cfg.EndLedger) == "" {
+		return ledgerRange{}, fmt.Errorf("END_LEDGER is required")
+	}
 	start, err := strconv.ParseUint(cfg.StartLedger, 10, 64)
 	if err != nil {
 		return ledgerRange{}, fmt.Errorf("START_LEDGER must be an unsigned integer: %w", err)
@@ -125,18 +142,70 @@ func parseLedgerRange(cfg config) (ledgerRange, error) {
 }
 
 func materializeSQL(cfg config) (string, error) {
-	lr, err := parseLedgerRange(cfg)
+	chunks, err := materializeChunks(cfg)
 	if err != nil {
 		return "", err
 	}
-	switch cfg.IndexName {
-	case "tx_hash_index":
-		return txHashIndexSQL(cfg, lr), nil
-	case "contract_events_index":
-		return contractEventsIndexSQL(cfg, lr), nil
-	default:
-		return "", fmt.Errorf("unsupported INDEX_NAME %q", cfg.IndexName)
+	sqlParts := make([]string, len(chunks))
+	for i, chunk := range chunks {
+		sqlParts[i] = chunk.sql
 	}
+	return strings.Join(sqlParts, "\n"), nil
+}
+
+func materializeChunks(cfg config) ([]materializeChunk, error) {
+	lr, err := parseLedgerRange(cfg)
+	if err != nil {
+		return nil, err
+	}
+	chunkSize, err := ledgerChunkSize(cfg)
+	if err != nil {
+		return nil, err
+	}
+	ranges := chunkLedgerRange(lr, chunkSize)
+	chunks := make([]materializeChunk, 0, len(ranges))
+	for _, chunkRange := range ranges {
+		var sqlText string
+		switch cfg.IndexName {
+		case "tx_hash_index":
+			sqlText = txHashIndexSQL(cfg, chunkRange)
+		case "contract_events_index":
+			sqlText = contractEventsIndexSQL(cfg, chunkRange)
+		default:
+			return nil, fmt.Errorf("unsupported INDEX_NAME %q", cfg.IndexName)
+		}
+		chunks = append(chunks, materializeChunk{ledgerRange: chunkRange, sql: sqlText})
+	}
+	return chunks, nil
+}
+
+func ledgerChunkSize(cfg config) (uint64, error) {
+	if cfg.LedgerChunkSize == 0 {
+		return defaultLedgerChunkSize, nil
+	}
+	if cfg.LedgerChunkSize < 0 {
+		return 0, fmt.Errorf("LEDGER_CHUNK_SIZE must be positive")
+	}
+	return uint64(cfg.LedgerChunkSize), nil
+}
+
+func chunkLedgerRange(lr ledgerRange, size uint64) []ledgerRange {
+	if size == 0 {
+		size = defaultLedgerChunkSize
+	}
+	if lr.start == lr.end {
+		return []ledgerRange{lr}
+	}
+	var chunks []ledgerRange
+	for start := lr.start; start < lr.end; {
+		end := start + size
+		if end < start || end > lr.end {
+			end = lr.end
+		}
+		chunks = append(chunks, ledgerRange{start: start, end: end})
+		start = end
+	}
+	return chunks
 }
 
 func txHashIndexSQL(cfg config, lr ledgerRange) string {
@@ -204,10 +273,27 @@ COMMIT;
 }
 
 func getenv(key, fallback string) string {
-	if value := os.Getenv(key); value != "" {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 		return value
 	}
 	return fallback
+}
+
+func parseUintEnv(key, fallback string) (uint64, error) {
+	value := getenv(key, fallback)
+	parsed, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an unsigned integer: %w", key, err)
+	}
+	return parsed, nil
+}
+
+func mustParseUintEnv(key, fallback string) uint64 {
+	value, err := parseUintEnv(key, fallback)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return value
 }
 
 func getenvBool(key string, fallback bool) bool {
