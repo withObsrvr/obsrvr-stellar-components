@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -27,28 +29,66 @@ import (
 //go:embed bronze_schema.sql
 var bronzeSchemaSQL string
 
+var writeRetryBackoff = 500 * time.Millisecond
+
 func main() {
 	sink, err := NewDuckLakeSink(DuckLakeConfigFromEnv())
 	if err != nil {
 		panic(err)
 	}
 	defer sink.Close()
+	startSinkHealthServer(getenv("HEALTH_PORT", "8089"), sink)
 
+	writeGate := make(chan struct{}, 1)
 	consumer.Run(consumer.ConsumerConfig{
 		ConsumerName: "Stellar Ledger DuckLake Sink",
 		ComponentID:  getenv("COMPONENT_ID", "ducklake-sink"),
 		InputTypes:   []string{contracts.LedgerBatchEventType},
 		OnEvent: func(ctx context.Context, event *flowctlv1.Event) error {
-			if event.Type != contracts.LedgerBatchEventType {
-				return nil
+			writeGate <- struct{}{}
+			defer func() { <-writeGate }()
+
+			if err := handleLedgerBatchEvent(ctx, event, sink); err != nil {
+				log.Printf("fatal ledger batch handling error: %v", err)
+				os.Exit(1)
 			}
-			var batch componentsv1.LedgerBatch
-			if err := proto.Unmarshal(event.Payload, &batch); err != nil {
-				return fmt.Errorf("unmarshal ledger batch: %w", err)
-			}
-			return sink.WriteBatch(&batch)
+			return nil
 		},
 	})
+}
+
+type ledgerBatchWriter interface {
+	WriteBatch(*componentsv1.LedgerBatch) error
+}
+
+func handleLedgerBatchEvent(ctx context.Context, event *flowctlv1.Event, sink ledgerBatchWriter) error {
+	if event.Type != contracts.LedgerBatchEventType {
+		return nil
+	}
+	var batch componentsv1.LedgerBatch
+	if err := proto.Unmarshal(event.Payload, &batch); err != nil {
+		return fmt.Errorf("unmarshal ledger batch: %w", err)
+	}
+	var lastErr error
+	backoff := writeRetryBackoff
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err := sink.WriteBatch(&batch); err != nil {
+			lastErr = err
+			log.Printf("write ledger batch %d failed on attempt %d/3: %v", batch.LedgerSequence, attempt, err)
+			if attempt == 3 {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("write ledger batch %d canceled after attempt %d: %w", batch.LedgerSequence, attempt, ctx.Err())
+			case <-time.After(backoff):
+				backoff *= 2
+			}
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("write ledger batch %d failed after retries: %w", batch.LedgerSequence, lastErr)
 }
 
 type DuckLakeConfig struct {
@@ -60,6 +100,7 @@ type DuckLakeConfig struct {
 	QuackToken      string
 	QuackRemoteDB   string
 	QuackDisableSSL bool
+	RemoteTimeout   time.Duration
 }
 
 func DuckLakeConfigFromEnv() DuckLakeConfig {
@@ -71,7 +112,8 @@ func DuckLakeConfigFromEnv() DuckLakeConfig {
 		QuackURI:        getenv("QUACK_URI", "quack:127.0.0.1:9494"),
 		QuackToken:      getenv("QUACK_TOKEN", ""),
 		QuackRemoteDB:   getenv("QUACK_REMOTE_DB", "remote_lake"),
-		QuackDisableSSL: getenvBool("QUACK_DISABLE_SSL", true),
+		QuackDisableSSL: getenvBool("QUACK_DISABLE_SSL", false),
+		RemoteTimeout:   getenvDuration("DUCKLAKE_REMOTE_TIMEOUT", 30*time.Second),
 	}
 }
 
@@ -81,7 +123,15 @@ type DuckLakeSink struct {
 	remoteDB      string
 	remoteCatalog string
 	remoteMode    bool
+	quackURI      string
+	quackToken    string
+	quackNoSSL    bool
+	remoteTimeout time.Duration
 	mu            sync.Mutex
+	healthMu      sync.RWMutex
+	lastWriteAt   time.Time
+	lastWriteErr  string
+	lastLedger    uint32
 }
 
 func NewDuckLakeSink(cfg DuckLakeConfig) (*DuckLakeSink, error) {
@@ -109,6 +159,9 @@ func NewDuckLakeSink(cfg DuckLakeConfig) (*DuckLakeSink, error) {
 	if err := os.MkdirAll(cfg.DataPath, 0o755); err != nil {
 		return nil, fmt.Errorf("create DuckLake data directory: %w", err)
 	}
+	if err := validateTypedTableSpecs(); err != nil {
+		return nil, err
+	}
 
 	db, err := sql.Open("duckdb", "")
 	if err != nil {
@@ -133,6 +186,12 @@ func newQuackDuckLakeSink(cfg DuckLakeConfig) (*DuckLakeSink, error) {
 	if cfg.QuackToken == "" {
 		return nil, fmt.Errorf("QUACK_TOKEN is required when DUCKLAKE_MODE=quack")
 	}
+	if err := validateTypedTableSpecs(); err != nil {
+		return nil, err
+	}
+	if cfg.RemoteTimeout <= 0 {
+		cfg.RemoteTimeout = 30 * time.Second
+	}
 	db, err := sql.Open("duckdb", "")
 	if err != nil {
 		return nil, fmt.Errorf("open DuckDB Quack client: %w", err)
@@ -148,6 +207,10 @@ func newQuackDuckLakeSink(cfg DuckLakeConfig) (*DuckLakeSink, error) {
 		remoteDB:      sanitizeIdentifier(cfg.QuackRemoteDB),
 		remoteCatalog: sanitizeIdentifier(cfg.AttachName),
 		remoteMode:    true,
+		quackURI:      cfg.QuackURI,
+		quackToken:    cfg.QuackToken,
+		quackNoSSL:    cfg.QuackDisableSSL,
+		remoteTimeout: cfg.RemoteTimeout,
 	}
 	if err := sink.initQuack(cfg); err != nil {
 		db.Close()
@@ -192,10 +255,10 @@ func (s *DuckLakeSink) initQuack(cfg DuckLakeConfig) error {
 		"LOAD quack",
 		fmt.Sprintf(
 			"ATTACH '%s' AS %s (TOKEN '%s', DISABLE_SSL %t)",
-			escapeSQLString(cfg.QuackURI),
+			escapeSQLString(s.quackURI),
 			s.remoteDB,
-			escapeSQLString(cfg.QuackToken),
-			cfg.QuackDisableSSL,
+			escapeSQLString(s.quackToken),
+			s.quackNoSSL,
 		),
 	}
 	for _, stmt := range stmts {
@@ -212,6 +275,8 @@ func (s *DuckLakeSink) initQuack(cfg DuckLakeConfig) error {
 func (s *DuckLakeSink) remoteInitSQL() string {
 	stmts := []string{
 		fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s.bronze", s.remoteCatalog),
+		qualifyCreateTableSQL(createCatalogMetadataSQL, s.remoteCatalog, ""),
+		qualifyCreateTableSQL(createIngestWatermarksSQL, s.remoteCatalog, ""),
 		qualifyCreateTableSQL(createLedgerBatchesSQL, s.remoteCatalog, ""),
 		qualifyCreateTableSQL(createBronzeRowsSQL, s.remoteCatalog, ""),
 	}
@@ -222,7 +287,11 @@ func (s *DuckLakeSink) remoteInitSQL() string {
 }
 
 func (s *DuckLakeSink) initBronzeSchema() error {
-	stmts := []string{"CREATE SCHEMA IF NOT EXISTS bronze"}
+	stmts := []string{
+		"CREATE SCHEMA IF NOT EXISTS bronze",
+		createCatalogMetadataSQL,
+		createIngestWatermarksSQL,
+	}
 	stmts = append(stmts, splitSQLStatements(bronzeSchemaSQL)...)
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -239,9 +308,14 @@ func (s *DuckLakeSink) Close() error {
 	return s.db.Close()
 }
 
-func (s *DuckLakeSink) WriteBatch(batch *componentsv1.LedgerBatch) error {
+func (s *DuckLakeSink) WriteBatch(batch *componentsv1.LedgerBatch) (err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer func() {
+		if batch != nil {
+			s.recordWriteHealth(batch.LedgerSequence, err)
+		}
+	}()
 
 	if s.remoteMode {
 		return s.writeBatchRemote(batch)
@@ -258,6 +332,9 @@ func (s *DuckLakeSink) WriteBatch(batch *componentsv1.LedgerBatch) error {
 	}
 	defer tx.Rollback()
 
+	if err := ensureCatalogNetworkTx(tx, batch.NetworkPassphrase); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(
 		"DELETE FROM bronze_rows WHERE network_passphrase = ? AND ledger_sequence = ?",
 		batch.NetworkPassphrase,
@@ -271,6 +348,13 @@ func (s *DuckLakeSink) WriteBatch(batch *componentsv1.LedgerBatch) error {
 		batch.LedgerSequence,
 	); err != nil {
 		return fmt.Errorf("delete existing ledger batch: %w", err)
+	}
+	if _, err := tx.Exec(
+		"DELETE FROM ingest_watermarks WHERE network_passphrase = ? AND ledger_sequence = ?",
+		batch.NetworkPassphrase,
+		batch.LedgerSequence,
+	); err != nil {
+		return fmt.Errorf("delete existing ingest watermark: %w", err)
 	}
 	if err := deleteTypedRows(tx, batch.LedgerSequence); err != nil {
 		return err
@@ -299,6 +383,17 @@ func (s *DuckLakeSink) WriteBatch(batch *componentsv1.LedgerBatch) error {
 	); err != nil {
 		return fmt.Errorf("insert ledger batch: %w", err)
 	}
+	if _, err := tx.Exec(
+		`INSERT INTO ingest_watermarks (
+			network_passphrase,
+			ledger_sequence,
+			written_at
+		) VALUES (?, ?, current_timestamp)`,
+		batch.NetworkPassphrase,
+		batch.LedgerSequence,
+	); err != nil {
+		return fmt.Errorf("insert ingest watermark: %w", err)
+	}
 
 	stmt, err := tx.Prepare(`INSERT INTO bronze_rows (
 		network_passphrase,
@@ -314,6 +409,7 @@ func (s *DuckLakeSink) WriteBatch(batch *componentsv1.LedgerBatch) error {
 	}
 	defer stmt.Close()
 
+	enrichments := buildTypedRowEnrichments(batch)
 	for i, row := range batch.BronzeRows {
 		if _, err := stmt.Exec(
 			row.NetworkPassphrase,
@@ -326,7 +422,7 @@ func (s *DuckLakeSink) WriteBatch(batch *componentsv1.LedgerBatch) error {
 		); err != nil {
 			return fmt.Errorf("insert bronze row %d: %w", i, err)
 		}
-		if err := insertTypedBronzeRow(tx, row); err != nil {
+		if err := insertTypedBronzeRow(tx, row, enrichments); err != nil {
 			return fmt.Errorf("insert typed bronze row %d table %s: %w", i, row.TableName, err)
 		}
 	}
@@ -337,15 +433,111 @@ func (s *DuckLakeSink) WriteBatch(batch *componentsv1.LedgerBatch) error {
 	return nil
 }
 
+func (s *DuckLakeSink) recordWriteHealth(ledger uint32, err error) {
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+	s.lastWriteAt = time.Now().UTC()
+	s.lastLedger = ledger
+	if err != nil {
+		s.lastWriteErr = err.Error()
+		return
+	}
+	s.lastWriteErr = ""
+}
+
+func (s *DuckLakeSink) healthSnapshot(now time.Time) sinkHealthSnapshot {
+	s.healthMu.RLock()
+	defer s.healthMu.RUnlock()
+	snapshot := sinkHealthSnapshot{
+		Healthy:    s.lastWriteErr == "",
+		LastLedger: s.lastLedger,
+		LastError:  s.lastWriteErr,
+	}
+	if !s.lastWriteAt.IsZero() {
+		snapshot.LastWriteAt = s.lastWriteAt
+		snapshot.LastWriteAge = now.Sub(s.lastWriteAt)
+	}
+	return snapshot
+}
+
+type sinkHealthSnapshot struct {
+	Healthy      bool
+	LastWriteAt  time.Time
+	LastWriteAge time.Duration
+	LastLedger   uint32
+	LastError    string
+}
+
+func startSinkHealthServer(port string, sink *DuckLakeSink) {
+	addr := strings.TrimSpace(port)
+	if addr == "" {
+		return
+	}
+	if !strings.Contains(addr, ":") {
+		addr = ":" + addr
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		snapshot := sink.healthSnapshot(time.Now().UTC())
+		status := http.StatusOK
+		if !snapshot.Healthy {
+			status = http.StatusServiceUnavailable
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(status)
+		if snapshot.LastWriteAt.IsZero() {
+			_, _ = w.Write([]byte("healthy=true\nlast_write=never\n"))
+			return
+		}
+		_, _ = fmt.Fprintf(
+			w,
+			"healthy=%t\nlast_ledger=%d\nlast_write_at=%s\nlast_write_age_seconds=%.0f\nlast_error=%s\n",
+			snapshot.Healthy,
+			snapshot.LastLedger,
+			snapshot.LastWriteAt.Format(time.RFC3339),
+			snapshot.LastWriteAge.Seconds(),
+			snapshot.LastError,
+		)
+	})
+	go func() {
+		log.Printf("sink health endpoint listening on %s", addr)
+		if err := http.ListenAndServe(addr, mux); err != nil {
+			log.Printf("sink health endpoint failed: %v", err)
+		}
+	}()
+}
+
 func (s *DuckLakeSink) writeBatchRemote(batch *componentsv1.LedgerBatch) error {
-	payloadJSON, err := protojson.MarshalOptions{EmitUnpopulated: true}.Marshal(batch)
+	sqlText, err := s.remoteWriteSQL(batch)
 	if err != nil {
 		return err
+	}
+	log.Printf("remote DuckLake write script for ledger %d is %.2f MiB", batch.LedgerSequence, float64(len(sqlText))/(1024*1024))
+	if err := s.execRemoteScript(sqlText); err != nil {
+		// Best-effort ROLLBACK on the same pinned connection to clear any
+		// lingering transaction before this connection is reused for the next
+		// batch. Bound it so a degraded Quack link cannot stall the sink, and
+		// log a failed rollback rather than swallowing an unclean state.
+		rbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if rbErr := s.execRemoteScriptContext(rbCtx, "ROLLBACK;"); rbErr != nil {
+			log.Printf("remote DuckLake write batch ledger %d: rollback did not confirm clean state: %v", batch.LedgerSequence, rbErr)
+		}
+		return fmt.Errorf("remote DuckLake write batch ledger %d: %w", batch.LedgerSequence, err)
+	}
+	return nil
+}
+
+func (s *DuckLakeSink) remoteWriteSQL(batch *componentsv1.LedgerBatch) (string, error) {
+	payloadJSON, err := protojson.MarshalOptions{EmitUnpopulated: true}.Marshal(batch)
+	if err != nil {
+		return "", err
 	}
 
 	var stmts []string
 	stmts = append(stmts, "BEGIN TRANSACTION")
 	stmts = append(stmts,
+		ensureCatalogNetworkSQL(s.remoteCatalog, batch.NetworkPassphrase),
 		fmt.Sprintf(
 			"DELETE FROM %s.bronze_rows WHERE network_passphrase = %s AND ledger_sequence = %d",
 			s.remoteCatalog,
@@ -354,6 +546,12 @@ func (s *DuckLakeSink) writeBatchRemote(batch *componentsv1.LedgerBatch) error {
 		),
 		fmt.Sprintf(
 			"DELETE FROM %s.ledger_batches WHERE network_passphrase = %s AND ledger_sequence = %d",
+			s.remoteCatalog,
+			sqlLiteral(batch.NetworkPassphrase),
+			batch.LedgerSequence,
+		),
+		fmt.Sprintf(
+			"DELETE FROM %s.ingest_watermarks WHERE network_passphrase = %s AND ledger_sequence = %d",
 			s.remoteCatalog,
 			sqlLiteral(batch.NetworkPassphrase),
 			batch.LedgerSequence,
@@ -394,6 +592,16 @@ func (s *DuckLakeSink) writeBatchRemote(batch *componentsv1.LedgerBatch) error {
 		len(batch.BronzeRows),
 		sqlLiteral(string(payloadJSON)),
 	))
+	stmts = append(stmts, fmt.Sprintf(
+		`INSERT INTO %s.ingest_watermarks (
+			network_passphrase,
+			ledger_sequence,
+			written_at
+		) VALUES (%s, %d, current_timestamp)`,
+		s.remoteCatalog,
+		sqlLiteral(batch.NetworkPassphrase),
+		batch.LedgerSequence,
+	))
 
 	if len(batch.BronzeRows) > 0 {
 		values := make([]string, 0, len(batch.BronzeRows))
@@ -423,11 +631,12 @@ func (s *DuckLakeSink) writeBatchRemote(batch *componentsv1.LedgerBatch) error {
 		))
 	}
 
+	enrichments := buildTypedRowEnrichments(batch)
 	typedRows := map[string][]string{}
 	for _, row := range batch.BronzeRows {
-		valuesSQL, err := typedBronzeValuesSQL(row)
+		valuesSQL, err := typedBronzeValuesSQL(row, enrichments)
 		if err != nil {
-			return fmt.Errorf("prepare typed bronze row table %s: %w", row.TableName, err)
+			return "", fmt.Errorf("prepare typed bronze row table %s: %w", row.TableName, err)
 		}
 		if valuesSQL != "" {
 			typedRows[row.TableName] = append(typedRows[row.TableName], valuesSQL)
@@ -448,30 +657,55 @@ func (s *DuckLakeSink) writeBatchRemote(batch *componentsv1.LedgerBatch) error {
 		))
 	}
 	stmts = append(stmts, "COMMIT")
-
-	if err := s.execRemoteScript(strings.Join(stmts, ";\n") + ";"); err != nil {
-		// Best-effort ROLLBACK on the same pinned connection to clear any
-		// lingering transaction before this connection is reused for the next
-		// batch. Bound it so a degraded Quack link cannot stall the sink, and
-		// log a failed rollback rather than swallowing an unclean state.
-		rbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if rbErr := s.execRemoteScriptContext(rbCtx, "ROLLBACK;"); rbErr != nil {
-			log.Printf("remote DuckLake write batch ledger %d: rollback did not confirm clean state: %v", batch.LedgerSequence, rbErr)
-		}
-		return fmt.Errorf("remote DuckLake write batch ledger %d: %w", batch.LedgerSequence, err)
-	}
-	return nil
+	return strings.Join(stmts, ";\n") + ";", nil
 }
 
 func (s *DuckLakeSink) execRemoteScript(sqlText string) error {
-	return s.execRemoteScriptContext(context.Background(), sqlText)
+	timeout := s.remoteTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return s.execRemoteScriptContext(ctx, sqlText)
 }
 
 func (s *DuckLakeSink) execRemoteScriptContext(ctx context.Context, sqlText string) error {
 	query := fmt.Sprintf("SELECT * FROM %s.query(?)", s.remoteDB)
 	if _, err := s.db.ExecContext(ctx, query, sqlText); err != nil {
+		if reinitErr := s.reinitRemoteSession(context.Background()); reinitErr != nil {
+			log.Printf("remote DuckLake session re-init failed after query error: %v", reinitErr)
+		}
 		return err
+	}
+	return nil
+}
+
+func (s *DuckLakeSink) reinitRemoteSession(ctx context.Context) error {
+	if !s.remoteMode {
+		return nil
+	}
+	timeout := s.remoteTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("DETACH %s", s.remoteDB)); err != nil {
+		log.Printf("remote DuckLake detach during re-init did not complete cleanly: %v", err)
+	}
+	attach := fmt.Sprintf(
+		"ATTACH '%s' AS %s (TOKEN '%s', DISABLE_SSL %t)",
+		escapeSQLString(s.quackURI),
+		s.remoteDB,
+		escapeSQLString(s.quackToken),
+		s.quackNoSSL,
+	)
+	if _, err := s.db.ExecContext(ctx, attach); err != nil {
+		return fmt.Errorf("remote DuckLake attach: %w", err)
 	}
 	return nil
 }
@@ -523,6 +757,38 @@ func getenvBool(key string, fallback bool) bool {
 	}
 }
 
+func getenvDuration(key string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	value, err := time.ParseDuration(raw)
+	if err == nil {
+		return value
+	}
+	seconds, scanErr := time.ParseDuration(raw + "s")
+	if scanErr != nil {
+		log.Fatalf("%s must be a duration like 30s or a number of seconds, got %q", key, raw)
+	}
+	return seconds
+}
+
+const createCatalogMetadataSQL = `
+CREATE TABLE IF NOT EXISTS catalog_metadata (
+	key VARCHAR,
+	value VARCHAR,
+	updated_at TIMESTAMP
+);
+`
+
+const createIngestWatermarksSQL = `
+CREATE TABLE IF NOT EXISTS ingest_watermarks (
+	network_passphrase VARCHAR,
+	ledger_sequence UBIGINT,
+	written_at TIMESTAMP
+);
+`
+
 const createLedgerBatchesSQL = `
 CREATE TABLE IF NOT EXISTS ledger_batches (
 	network_passphrase VARCHAR,
@@ -550,12 +816,68 @@ CREATE TABLE IF NOT EXISTS bronze_rows (
 `
 
 type typedTableSpec struct {
-	TableName       string
-	Columns         []string
-	RowType         reflect.Type
-	LedgerColumn    string
-	ColumnOverrides map[string]string
-	ColumnDefaults  map[string]any
+	TableName           string
+	Columns             []string
+	RowType             reflect.Type
+	LedgerColumn        string
+	ColumnOverrides     map[string]string
+	ColumnJSONFallbacks map[string]string
+	ColumnDefaults      map[string]any
+}
+
+func ensureCatalogNetworkTx(tx *sql.Tx, networkPassphrase string) error {
+	networkPassphrase = strings.TrimSpace(networkPassphrase)
+	if networkPassphrase == "" {
+		return fmt.Errorf("ledger batch network_passphrase is required")
+	}
+	var existing string
+	err := tx.QueryRow("SELECT value FROM catalog_metadata WHERE key = 'network_passphrase' LIMIT 1").Scan(&existing)
+	if errors.Is(err, sql.ErrNoRows) {
+		if _, err := tx.Exec(
+			"INSERT INTO catalog_metadata (key, value, updated_at) VALUES ('network_passphrase', ?, current_timestamp)",
+			networkPassphrase,
+		); err != nil {
+			return fmt.Errorf("record catalog network passphrase: %w", err)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read catalog network passphrase: %w", err)
+	}
+	if existing != networkPassphrase {
+		return fmt.Errorf("catalog network mismatch: existing %q, batch %q", existing, networkPassphrase)
+	}
+	if _, err := tx.Exec(
+		"UPDATE catalog_metadata SET updated_at = current_timestamp WHERE key = 'network_passphrase'",
+	); err != nil {
+		return fmt.Errorf("refresh catalog network metadata: %w", err)
+	}
+	return nil
+}
+
+func ensureCatalogNetworkSQL(catalog, networkPassphrase string) string {
+	return fmt.Sprintf(`INSERT INTO %s.catalog_metadata (key, value, updated_at)
+SELECT 'network_passphrase', %s, current_timestamp
+WHERE NOT EXISTS (
+	SELECT 1 FROM %s.catalog_metadata WHERE key = 'network_passphrase'
+);
+SELECT CASE
+	WHEN EXISTS (
+		SELECT 1 FROM %s.catalog_metadata
+		WHERE key = 'network_passphrase' AND value <> %s
+	) THEN error('catalog network mismatch')
+	ELSE 1
+END;
+UPDATE %s.catalog_metadata
+SET updated_at = current_timestamp
+WHERE key = 'network_passphrase'`,
+		catalog,
+		sqlLiteral(strings.TrimSpace(networkPassphrase)),
+		catalog,
+		catalog,
+		sqlLiteral(strings.TrimSpace(networkPassphrase)),
+		catalog,
+	)
 }
 
 func deleteTypedRows(tx *sql.Tx, ledgerSequence uint32) error {
@@ -573,7 +895,30 @@ func deleteTypedRows(tx *sql.Tx, ledgerSequence uint32) error {
 	return nil
 }
 
-func insertTypedBronzeRow(tx *sql.Tx, row *componentsv1.BronzeRow) error {
+type typedRowEnrichment map[string]any
+type typedRowEnrichments map[string]typedRowEnrichment
+
+func buildTypedRowEnrichments(batch *componentsv1.LedgerBatch) typedRowEnrichments {
+	enrichments := typedRowEnrichments{}
+	if batch == nil {
+		return enrichments
+	}
+	for _, tx := range batch.Transactions {
+		key := transactionEnrichmentKey(tx.LedgerSequence, tx.TransactionHash)
+		enrichments[key] = typedRowEnrichment{
+			"tx_envelope": tx.EnvelopeXdr,
+			"tx_result":   tx.ResultXdr,
+			"tx_meta":     tx.MetaXdr,
+		}
+	}
+	return enrichments
+}
+
+func transactionEnrichmentKey(ledgerSequence uint32, transactionHash string) string {
+	return fmt.Sprintf("transactions_row_v2:%d:%s", ledgerSequence, transactionHash)
+}
+
+func insertTypedBronzeRow(tx *sql.Tx, row *componentsv1.BronzeRow, enrichments typedRowEnrichments) error {
 	spec, ok := typedTableSpecs[row.TableName]
 	if !ok {
 		return nil
@@ -583,7 +928,7 @@ func insertTypedBronzeRow(tx *sql.Tx, row *componentsv1.BronzeRow) error {
 		return fmt.Errorf("unmarshal typed row: %w", err)
 	}
 
-	values, err := typedValues(spec, value.Elem(), row)
+	values, err := typedValues(spec, value.Elem(), row, enrichments)
 	if err != nil {
 		return err
 	}
@@ -605,20 +950,90 @@ func insertTypedBronzeRow(tx *sql.Tx, row *componentsv1.BronzeRow) error {
 	return nil
 }
 
-func typedValues(spec typedTableSpec, value reflect.Value, bronzeRow *componentsv1.BronzeRow) ([]any, error) {
+func typedValues(spec typedTableSpec, value reflect.Value, bronzeRow *componentsv1.BronzeRow, enrichments typedRowEnrichments) ([]any, error) {
 	values := make([]any, 0, len(spec.Columns))
+	jsonValues, err := decodeTypedRowJSON(bronzeRow.RowJson)
+	if err != nil {
+		return nil, err
+	}
+	enrichment := typedRowEnrichmentFor(spec, bronzeRow, jsonValues, enrichments)
 	for _, col := range spec.Columns {
 		if defaultValue, ok := spec.ColumnDefaults[col]; ok {
 			values = append(values, defaultValue)
 			continue
 		}
+		if enrichedValue, ok := enrichment[col]; ok {
+			values = append(values, enrichedValue)
+			continue
+		}
 		fieldName := columnFieldName(spec, col)
 		field := value.FieldByName(fieldName)
-		if !field.IsValid() {
+		if field.IsValid() {
+			sqlValue, err := sqlValue(field)
+			if err != nil {
+				return nil, fmt.Errorf("column %s.%s: %w", spec.TableName, col, err)
+			}
+			values = append(values, sqlValue)
+			continue
+		}
+		jsonKey, ok := spec.ColumnJSONFallbacks[col]
+		if !ok {
+			return nil, fmt.Errorf("column %s.%s has no struct field %s or explicit JSON fallback", spec.TableName, col, fieldName)
+		}
+		value, ok := jsonValues[jsonKey]
+		if !ok {
 			values = append(values, nil)
 			continue
 		}
-		values = append(values, sqlValue(field))
+		values = append(values, value)
+	}
+	return values, nil
+}
+
+func typedRowEnrichmentFor(spec typedTableSpec, bronzeRow *componentsv1.BronzeRow, jsonValues map[string]any, enrichments typedRowEnrichments) typedRowEnrichment {
+	if spec.TableName != "transactions_row_v2" {
+		return nil
+	}
+	transactionHash, _ := jsonValues["TransactionHash"].(string)
+	if transactionHash == "" {
+		transactionHash, _ = jsonValues["transaction_hash"].(string)
+	}
+	return enrichments[transactionEnrichmentKey(bronzeRow.LedgerSequence, transactionHash)]
+}
+
+func decodeTypedRowJSON(rowJSON string) (map[string]any, error) {
+	raw := map[string]json.RawMessage{}
+	if err := json.Unmarshal([]byte(rowJSON), &raw); err != nil {
+		return nil, fmt.Errorf("unmarshal typed row JSON map: %w", err)
+	}
+	values := make(map[string]any, len(raw))
+	for key, data := range raw {
+		if string(data) == "null" {
+			values[key] = nil
+			continue
+		}
+		var text string
+		if err := json.Unmarshal(data, &text); err == nil {
+			values[key] = text
+			continue
+		}
+		var boolean bool
+		if err := json.Unmarshal(data, &boolean); err == nil {
+			values[key] = boolean
+			continue
+		}
+		var number json.Number
+		if err := json.Unmarshal(data, &number); err == nil {
+			if i, intErr := number.Int64(); intErr == nil {
+				values[key] = i
+				continue
+			}
+			if f, floatErr := number.Float64(); floatErr == nil {
+				values[key] = f
+				continue
+			}
+		}
+		values[key] = string(data)
 	}
 	return values, nil
 }
@@ -630,30 +1045,30 @@ func columnFieldName(spec typedTableSpec, column string) string {
 	return snakeToExported(column)
 }
 
-func sqlValue(value reflect.Value) any {
+func sqlValue(value reflect.Value) (any, error) {
 	if !value.IsValid() {
-		return nil
+		return nil, nil
 	}
 	if value.Kind() == reflect.Pointer {
 		if value.IsNil() {
-			return nil
+			return nil, nil
 		}
 		return sqlValue(value.Elem())
 	}
 	if value.Type() == reflect.TypeOf(time.Time{}) {
-		return value.Interface()
+		return value.Interface(), nil
 	}
 	if value.Kind() == reflect.Slice || value.Kind() == reflect.Map || value.Kind() == reflect.Struct {
 		data, err := json.Marshal(value.Interface())
 		if err != nil {
-			return nil
+			return nil, err
 		}
-		return string(data)
+		return string(data), nil
 	}
-	return value.Interface()
+	return value.Interface(), nil
 }
 
-func typedBronzeValuesSQL(row *componentsv1.BronzeRow) (string, error) {
+func typedBronzeValuesSQL(row *componentsv1.BronzeRow, enrichments typedRowEnrichments) (string, error) {
 	spec, ok := typedTableSpecs[row.TableName]
 	if !ok {
 		return "", nil
@@ -662,7 +1077,7 @@ func typedBronzeValuesSQL(row *componentsv1.BronzeRow) (string, error) {
 	if err := json.Unmarshal([]byte(row.RowJson), value.Interface()); err != nil {
 		return "", fmt.Errorf("unmarshal typed row: %w", err)
 	}
-	values, err := typedValues(spec, value.Elem(), row)
+	values, err := typedValues(spec, value.Elem(), row, enrichments)
 	if err != nil {
 		return "", err
 	}
@@ -757,15 +1172,51 @@ func splitSQLStatements(sqlText string) []string {
 	return statements
 }
 
-func tableSpec(table string, row any, ledgerColumn string, columns []string, overrides map[string]string) typedTableSpec {
-	return typedTableSpec{
-		TableName:       table,
-		Columns:         columns,
-		RowType:         reflect.TypeOf(row),
-		LedgerColumn:    ledgerColumn,
-		ColumnOverrides: overrides,
-		ColumnDefaults:  map[string]any{"version_label": contracts.ExtractionVersion},
+func validateTypedTableSpecs() error {
+	var missing []string
+	for _, spec := range typedTableSpecs {
+		for _, col := range spec.Columns {
+			if _, ok := spec.ColumnDefaults[col]; ok {
+				continue
+			}
+			fieldName := columnFieldName(spec, col)
+			if reflect.New(spec.RowType).Elem().FieldByName(fieldName).IsValid() {
+				continue
+			}
+			if _, ok := spec.ColumnJSONFallbacks[col]; ok {
+				continue
+			}
+			missing = append(missing, fmt.Sprintf("%s.%s -> %s", spec.TableName, col, fieldName))
+		}
 	}
+	if len(missing) > 0 {
+		return fmt.Errorf("typed DuckLake column mappings are incomplete: %s", strings.Join(missing, "; "))
+	}
+	return nil
+}
+
+func tableSpec(table string, row any, ledgerColumn string, columns []string, overrides map[string]string, jsonFallbacks ...map[string]string) typedTableSpec {
+	var fallback map[string]string
+	if len(jsonFallbacks) > 0 {
+		fallback = jsonFallbacks[0]
+	}
+	return typedTableSpec{
+		TableName:           table,
+		Columns:             columns,
+		RowType:             reflect.TypeOf(row),
+		LedgerColumn:        ledgerColumn,
+		ColumnOverrides:     overrides,
+		ColumnJSONFallbacks: fallback,
+		ColumnDefaults:      map[string]any{"version_label": contracts.ExtractionVersion},
+	}
+}
+
+func jsonFallbacks(columns ...string) map[string]string {
+	fallbacks := make(map[string]string, len(columns))
+	for _, col := range columns {
+		fallbacks[col] = snakeToExported(col)
+	}
+	return fallbacks
 }
 
 var typedTableSpecs = map[string]typedTableSpec{
@@ -774,10 +1225,43 @@ var typedTableSpecs = map[string]typedTableSpec{
 	}, nil),
 	"transactions_row_v2": tableSpec("transactions_row_v2", extract.TransactionData{}, "ledger_sequence", []string{
 		"ledger_sequence", "transaction_hash", "source_account", "fee_charged", "max_fee", "successful", "transaction_result_code", "operation_count", "memo_type", "memo", "created_at", "account_sequence", "ledger_range", "source_account_muxed", "fee_account_muxed", "inner_transaction_hash", "fee_bump_fee", "max_fee_bid", "inner_source_account", "timebounds_min_time", "timebounds_max_time", "ledgerbounds_min", "ledgerbounds_max", "min_sequence_number", "min_sequence_age", "soroban_resources_instructions", "soroban_resources_read_bytes", "soroban_resources_write_bytes", "soroban_data_size_bytes", "soroban_data_resources", "soroban_fee_base", "soroban_fee_resources", "soroban_fee_refund", "soroban_fee_charged", "soroban_fee_wasted", "soroban_host_function_type", "soroban_contract_id", "soroban_contract_events_count", "signatures_count", "new_account", "rent_fee_charged", "tx_envelope", "tx_result", "tx_meta", "tx_fee_meta", "tx_signers", "extra_signers", "era_id", "version_label", "transaction_id",
-	}, nil),
+	}, nil, jsonFallbacks(
+		"fee_account_muxed",
+		"inner_transaction_hash",
+		"fee_bump_fee",
+		"max_fee_bid",
+		"inner_source_account",
+		"ledgerbounds_min",
+		"ledgerbounds_max",
+		"min_sequence_number",
+		"min_sequence_age",
+		"soroban_data_size_bytes",
+		"soroban_data_resources",
+		"soroban_fee_base",
+		"soroban_fee_resources",
+		"soroban_fee_refund",
+		"soroban_fee_charged",
+		"soroban_fee_wasted",
+		"soroban_contract_events_count",
+		"tx_envelope",
+		"tx_result",
+		"tx_meta",
+		"tx_fee_meta",
+		"tx_signers",
+		"extra_signers",
+	)),
 	"operations_row_v2": tableSpec("operations_row_v2", extract.OperationData{}, "ledger_sequence", []string{
 		"transaction_hash", "operation_index", "ledger_sequence", "source_account", "type", "type_string", "created_at", "transaction_successful", "operation_result_code", "operation_trace_code", "ledger_range", "source_account_muxed", "asset", "asset_type", "asset_code", "asset_issuer", "source_asset", "source_asset_type", "source_asset_code", "source_asset_issuer", "amount", "source_amount", "destination_min", "starting_balance", "destination", "trustline_limit", "trustor", "authorize", "authorize_to_maintain_liabilities", "trust_line_flags", "balance_id", "claimants_count", "sponsored_id", "offer_id", "price", "price_r", "buying_asset", "buying_asset_type", "buying_asset_code", "buying_asset_issuer", "selling_asset", "selling_asset_type", "selling_asset_code", "selling_asset_issuer", "soroban_operation", "soroban_function", "soroban_contract_id", "soroban_auth_required", "bump_to", "set_flags", "clear_flags", "home_domain", "master_weight", "low_threshold", "medium_threshold", "high_threshold", "data_name", "data_value", "era_id", "version_label", "transaction_index", "soroban_arguments_json", "contract_calls_json", "contracts_involved", "max_call_depth", "transaction_id", "operation_id", "soroban_auth_credentials_types", "soroban_auth_addresses",
-	}, map[string]string{"type": "OpType"}),
+	}, map[string]string{"type": "OpType"}, jsonFallbacks(
+		"operation_trace_code",
+		"trustor",
+		"authorize",
+		"authorize_to_maintain_liabilities",
+		"trust_line_flags",
+		"claimants_count",
+		"soroban_auth_credentials_types",
+		"soroban_auth_addresses",
+	)),
 	"effects_row_v1": tableSpec("effects_row_v1", extract.EffectData{}, "ledger_sequence", []string{
 		"ledger_sequence", "transaction_hash", "operation_index", "effect_index", "effect_type", "effect_type_string", "account_id", "amount", "asset_code", "asset_issuer", "asset_type", "trustline_limit", "authorize_flag", "clawback_flag", "signer_account", "signer_weight", "offer_id", "seller_account", "created_at", "ledger_range", "era_id", "version_label", "details_json", "operation_id",
 	}, nil),

@@ -1,0 +1,57 @@
+apiVersion: flowctl/v1
+kind: Pipeline
+metadata:
+  name: local-archive-quack-ducklake
+  description: Local process pipeline from public Stellar archive to DuckLake through Quack.
+
+spec:
+  driver: process
+
+  sources:
+    - id: raw-ledger-source
+      type: source
+      command: ["./bin/raw-ledger-source"]
+      env:
+        FLOWCTL_COMPONENT_ID: "raw-ledger-source"
+        BACKEND_TYPE: "ARCHIVE"
+        ARCHIVE_STORAGE_TYPE: "S3"
+        ARCHIVE_BUCKET_NAME: "aws-public-blockchain"
+        ARCHIVE_PATH: "v1.1/stellar/ledgers/pubnet"
+        AWS_REGION: "us-east-2"
+        LEDGERS_PER_FILE: "1"
+        FILES_PER_PARTITION: "64000"
+        NETWORK_PASSPHRASE: "Public Global Stellar Network ; September 2015"
+        START_LEDGER: "62080000"
+        END_LEDGER: "62080002"
+        GRPC_PORT: "55271"
+        HEALTH_PORT: "19281"
+        FLOWCTL_ENDPOINT: "127.0.0.1:19280"
+
+  processors:
+    - id: stellar-ledger-processor
+      type: processor
+      command: ["./bin/stellar-ledger-processor"]
+      inputs: ["raw-ledger-source"]
+      env:
+        COMPONENT_ID: "stellar-ledger-processor"
+        NETWORK_PASSPHRASE: "Public Global Stellar Network ; September 2015"
+        PORT: ":55272"
+        HEALTH_PORT: "19282"
+        ENABLE_FLOWCTL: "true"
+        FLOWCTL_ENDPOINT: "127.0.0.1:19280"
+
+  sinks:
+    - id: ducklake-sink
+      type: sink
+      command: ["./bin/ducklake-sink"]
+      inputs: ["stellar-ledger-processor"]
+      env:
+        COMPONENT_ID: "ducklake-sink"
+        DUCKLAKE_MODE: "quack"
+        QUACK_URI: "quack:127.0.0.1:9494"
+        QUACK_TOKEN: "chaos_secret"
+        QUACK_DISABLE_SSL: "true"
+        PORT: ":55273"
+        HEALTH_PORT: "19283"
+        ENABLE_FLOWCTL: "true"
+        FLOWCTL_ENDPOINT: "127.0.0.1:19280"
