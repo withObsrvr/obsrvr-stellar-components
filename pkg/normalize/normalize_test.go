@@ -49,6 +49,15 @@ func TestLedgerBatchIncludesBronzeRows(t *testing.T) {
 	}
 }
 
+func TestNormalizeJSONReturnsMarshalError(t *testing.T) {
+	_, err := normalizeJSON(struct {
+		Bad func()
+	}{Bad: func() {}})
+	if err == nil {
+		t.Fatal("normalizeJSON succeeded for an unmarshalable value")
+	}
+}
+
 func minimalLedgerCloseMeta(t *testing.T, sequence uint32, closedAt time.Time) xdr.LedgerCloseMeta {
 	t.Helper()
 
