@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"database/sql"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -241,6 +244,54 @@ func TestInsertCheckpointSQLRedactsSecrets(t *testing.T) {
 	}
 	if !strings.Contains(sqlText, "[REDACTED]") {
 		t.Fatalf("checkpoint SQL did not include redaction marker:\n%s", sqlText)
+	}
+}
+
+func TestRecordTableErrorPersistsRedactedCheckpoint(t *testing.T) {
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatalf("open duckdb: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	ctx := context.Background()
+	cfg := config{
+		TargetAttachName: "memory",
+		ReplicaName:      "serving_replica",
+		SourceCatalog:    "stellar_lake",
+		TargetMode:       "embedded",
+		QuackToken:       "primary secret",
+	}
+	table := sourceTable{Name: "bronze.transactions_row_v2", LedgerColumn: "ledger_sequence"}
+	if err := initTargetMetadata(ctx, db, cfg); err != nil {
+		t.Fatalf("init target metadata: %v", err)
+	}
+
+	err = recordTableError(ctx, db, cfg, table, 42, errors.New("schema drift exposed primary secret"))
+	if err == nil {
+		t.Fatalf("recordTableError returned nil")
+	}
+	if strings.Contains(err.Error(), "primary secret") {
+		t.Fatalf("recordTableError leaked secret in returned error: %v", err)
+	}
+
+	var snapshot uint64
+	var status, message string
+	if err := db.QueryRow(`SELECT last_snapshot_id, status, error_message
+FROM memory.replica.sync_checkpoints
+WHERE replica_name = 'serving_replica'
+  AND source_catalog = 'stellar_lake'
+  AND source_table = 'bronze.transactions_row_v2'`).Scan(&snapshot, &status, &message); err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	if snapshot != 42 || status != "error" {
+		t.Fatalf("checkpoint = snapshot %d status %q, want 42/error", snapshot, status)
+	}
+	if strings.Contains(message, "primary secret") {
+		t.Fatalf("checkpoint error leaked secret: %q", message)
+	}
+	if !strings.Contains(message, "[REDACTED]") {
+		t.Fatalf("checkpoint error missing redaction marker: %q", message)
 	}
 }
 

@@ -28,7 +28,7 @@ type config struct {
 	IndexName       string
 	StartLedger     string
 	EndLedger       string
-	LedgerChunkSize int
+	LedgerChunkSize uint64
 	DisableSSL      bool
 }
 
@@ -43,7 +43,7 @@ func configFromEnv() config {
 		IndexName:       getenv("INDEX_NAME", "tx_hash_index"),
 		StartLedger:     strings.TrimSpace(os.Getenv("START_LEDGER")),
 		EndLedger:       strings.TrimSpace(os.Getenv("END_LEDGER")),
-		LedgerChunkSize: int(mustParseUintEnv("LEDGER_CHUNK_SIZE", strconv.FormatUint(defaultLedgerChunkSize, 10))),
+		LedgerChunkSize: mustParsePositiveUintEnv("LEDGER_CHUNK_SIZE", strconv.FormatUint(defaultLedgerChunkSize, 10)),
 		DisableSSL:      getenvBool("QUACK_DISABLE_SSL", true),
 	}
 }
@@ -183,10 +183,7 @@ func ledgerChunkSize(cfg config) (uint64, error) {
 	if cfg.LedgerChunkSize == 0 {
 		return defaultLedgerChunkSize, nil
 	}
-	if cfg.LedgerChunkSize < 0 {
-		return 0, fmt.Errorf("LEDGER_CHUNK_SIZE must be positive")
-	}
-	return uint64(cfg.LedgerChunkSize), nil
+	return cfg.LedgerChunkSize, nil
 }
 
 func chunkLedgerRange(lr ledgerRange, size uint64) []ledgerRange {
@@ -292,6 +289,14 @@ func mustParseUintEnv(key, fallback string) uint64 {
 	value, err := parseUintEnv(key, fallback)
 	if err != nil {
 		log.Fatal(err)
+	}
+	return value
+}
+
+func mustParsePositiveUintEnv(key, fallback string) uint64 {
+	value := mustParseUintEnv(key, fallback)
+	if value == 0 {
+		log.Fatalf("%s must be greater than zero", key)
 	}
 	return value
 }

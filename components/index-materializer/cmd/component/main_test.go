@@ -121,6 +121,17 @@ func TestMaterializeChunksBoundsLargeRanges(t *testing.T) {
 	}
 }
 
+func TestLedgerChunkSizeAllowsLargeUint64(t *testing.T) {
+	large := uint64(1) << 40
+	got, err := ledgerChunkSize(config{LedgerChunkSize: large})
+	if err != nil {
+		t.Fatalf("ledger chunk size: %v", err)
+	}
+	if got != large {
+		t.Fatalf("ledger chunk size = %d, want %d", got, large)
+	}
+}
+
 // assertBoundsAppearTwice checks the range predicate is present in both the
 // DELETE and the INSERT clauses (i.e. each bound occurs at least twice).
 func assertBoundsAppearTwice(t *testing.T, sqlText, lower, upper string) {

@@ -244,10 +244,6 @@ func syncTable(ctx context.Context, db *sql.DB, cfg config, table sourceTable, c
 	if err := validateSourceTable(table); err != nil {
 		return err
 	}
-	columns, err := ensureTargetSchema(ctx, db, cfg, table)
-	if err != nil {
-		return err
-	}
 	cp, err := loadCheckpoint(ctx, db, cfg, table)
 	if err != nil {
 		return err
@@ -256,8 +252,13 @@ func syncTable(ctx context.Context, db *sql.DB, cfg config, table sourceTable, c
 	if cp.Exists {
 		fromSnapshot = cp.SnapshotID
 	}
+	columns, err := ensureTargetSchema(ctx, db, cfg, table)
+	if err != nil {
+		return recordTableError(ctx, db, cfg, table, fromSnapshot, err)
+	}
 	if fromSnapshot > current {
-		return fmt.Errorf("checkpoint %d for %s is ahead of current snapshot %d", fromSnapshot, table.Name, current)
+		return recordTableError(ctx, db, cfg, table, fromSnapshot,
+			fmt.Errorf("checkpoint %d for %s is ahead of current snapshot %d", fromSnapshot, table.Name, current))
 	}
 	if fromSnapshot >= current {
 		log.Printf("table=%s already current snapshot=%d", table.Name, fromSnapshot)
@@ -267,15 +268,11 @@ func syncTable(ctx context.Context, db *sql.DB, cfg config, table sourceTable, c
 	ledgers, err := changedLedgers(ctx, db, cfg, table, fromSnapshot+1, current)
 	if err != nil {
 		if !isMissingSnapshotError(err) {
-			return err
+			return recordTableError(ctx, db, cfg, table, fromSnapshot, err)
 		}
 		log.Printf("table=%s snapshot range [%d,%d] unavailable; starting full resync", table.Name, fromSnapshot+1, current)
 		if err := fullResyncTable(ctx, db, cfg, table, columns); err != nil {
-			message := redactSecrets(cfg, err.Error())
-			if checkpointErr := saveCheckpoint(ctx, db, cfg, table, fromSnapshot, "error", message); checkpointErr != nil {
-				return fmt.Errorf("%s; additionally failed to record table error: %s", message, redactSecrets(cfg, checkpointErr.Error()))
-			}
-			return fmt.Errorf("%s", message)
+			return recordTableError(ctx, db, cfg, table, fromSnapshot, err)
 		}
 		if err := saveCheckpoint(ctx, db, cfg, table, current, "ok", ""); err != nil {
 			return err
@@ -292,17 +289,21 @@ func syncTable(ctx context.Context, db *sql.DB, cfg config, table sourceTable, c
 	}
 
 	if err := rebuildTargetLedgers(ctx, db, cfg, table, ledgers, columns); err != nil {
-		message := redactSecrets(cfg, err.Error())
-		if checkpointErr := saveCheckpoint(ctx, db, cfg, table, fromSnapshot, "error", message); checkpointErr != nil {
-			return fmt.Errorf("%s; additionally failed to record table error: %s", message, redactSecrets(cfg, checkpointErr.Error()))
-		}
-		return fmt.Errorf("%s", message)
+		return recordTableError(ctx, db, cfg, table, fromSnapshot, err)
 	}
 	if err := saveCheckpoint(ctx, db, cfg, table, current, "ok", ""); err != nil {
 		return err
 	}
 	log.Printf("table=%s changed_ledgers=%d checkpoint=%d", table.Name, len(ledgers), current)
 	return nil
+}
+
+func recordTableError(ctx context.Context, db *sql.DB, cfg config, table sourceTable, snapshot uint64, err error) error {
+	message := redactSecrets(cfg, err.Error())
+	if checkpointErr := saveCheckpoint(ctx, db, cfg, table, snapshot, "error", message); checkpointErr != nil {
+		return fmt.Errorf("%s; additionally failed to record table error: %s", message, redactSecrets(cfg, checkpointErr.Error()))
+	}
+	return fmt.Errorf("%s", message)
 }
 
 func initTargetMetadata(ctx context.Context, db *sql.DB, cfg config) error {
