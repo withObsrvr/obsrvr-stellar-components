@@ -76,3 +76,34 @@ replace that with a Nix/flake-built runner bundle or Docker image containing:
 The production job should keep the same runtime model: one scheduled allocation
 running `flowctl run`, with flowctl supervising component processes inside the
 allocation.
+
+## Runner Image
+
+`Dockerfile.flowctl-runner` builds a Docker image for the production-style
+Nomad job. It expects prebuilt binaries under `bin/`, including `bin/flowctl`.
+
+Build component binaries:
+
+```bash
+make build
+```
+
+Copy the external source and flowctl binaries into this repo's `bin/`
+directory:
+
+```bash
+cp /home/tillman/Documents/stellar-raw-ledger-origin/result/bin/raw-ledger-origin bin/raw-ledger-source
+cp /home/tillman/Documents/flowctl/bin/flowctl bin/flowctl
+```
+
+Build the runner image:
+
+```bash
+make docker-flowctl-runner
+```
+
+Push it under the tag used by the infra Nomad job:
+
+```bash
+docker push withobsrvr/obsrvr-flowctl-runner:latest
+```

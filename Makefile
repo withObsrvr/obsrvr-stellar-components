@@ -1,4 +1,4 @@
-.PHONY: build lint proto test test-local-pipeline test-quack-chaos validate-pipelines validate-nomad tidy clean
+.PHONY: build lint proto test test-local-pipeline test-quack-chaos validate-pipelines validate-nomad docker-flowctl-runner tidy clean
 
 GO ?= go
 GOFMT ?= gofmt
@@ -36,6 +36,12 @@ validate-pipelines:
 validate-nomad:
 	@nomad fmt -check deploy/nomad/quack-ducklake-server.nomad
 	@nomad job validate deploy/nomad/quack-ducklake-server.nomad
+
+docker-flowctl-runner:
+	@for bin in flowctl raw-ledger-source stellar-ledger-processor ducklake-sink postgres-sink jsonl-sink index-materializer; do \
+		test -x bin/$$bin || (echo "missing bin/$$bin; build or copy it into bin/$$bin first" && exit 1); \
+	done
+	@docker build -f Dockerfile.flowctl-runner -t withobsrvr/obsrvr-flowctl-runner:latest .
 
 tidy:
 	@$(GO) mod tidy
