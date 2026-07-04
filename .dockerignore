@@ -1,6 +1,14 @@
 .git
 .direnv
 bin
+!bin/
+!bin/flowctl
+!bin/raw-ledger-source
+!bin/stellar-ledger-processor
+!bin/ducklake-sink
+!bin/postgres-sink
+!bin/jsonl-sink
+!bin/index-materializer
 dist
 result
 result-*
