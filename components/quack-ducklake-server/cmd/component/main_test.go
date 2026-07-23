@@ -184,5 +184,25 @@ func validTestConfig() config {
 		LockConfiguration:   true,
 		MemoryLimit:         "4GB",
 		Threads:             4,
+		InlineRowLimit:      1024,
+	}
+}
+
+func TestInitStatementsApplyInlineRowLimit(t *testing.T) {
+	cfg := validTestConfig()
+	joined := strings.Join(initStatements(cfg, "/tmp/duckdb-home"), "\n")
+	want := "CALL stellar_lake.set_option('data_inlining_row_limit', '1024')"
+	if !strings.Contains(joined, want) {
+		t.Fatalf("init statements missing %q in:\n%s", want, joined)
+	}
+	attachIndex := strings.Index(joined, "ATTACH ")
+	if optionIndex := strings.Index(joined, want); optionIndex < attachIndex {
+		t.Fatalf("set_option must run after ATTACH:\n%s", joined)
+	}
+
+	cfg.InlineRowLimit = -1
+	joined = strings.Join(initStatements(cfg, "/tmp/duckdb-home"), "\n")
+	if strings.Contains(joined, "data_inlining_row_limit") {
+		t.Fatalf("negative limit should leave catalog config untouched:\n%s", joined)
 	}
 }

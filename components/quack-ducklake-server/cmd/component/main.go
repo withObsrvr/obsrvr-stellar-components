@@ -42,6 +42,8 @@ type config struct {
 	LockConfiguration   bool
 	MemoryLimit         string
 	Threads             int
+	InlineRowLimit      int
+	IngestPort          string
 }
 
 func configFromEnv() config {
@@ -62,6 +64,14 @@ func configFromEnv() config {
 		LockConfiguration:   getenvBool("QUACK_LOCK_CONFIGURATION", true),
 		MemoryLimit:         getenv("QUACK_MEMORY_LIMIT", "4GB"),
 		Threads:             getenvInt("QUACK_DUCKDB_THREADS", 4),
+		// Measured 2026-07-23: inlined commits cost ~0.18ms/row in the
+		// catalog database, so bulk inlining is slow — limit 20000 gave
+		// ~1.7s commits, 1024 ~0.55s (~1 parquet file/ledger), 256 ~85ms
+		// (~7 files/ledger, merged by ducklake-maintenance). 1024 balances
+		// commit latency against file churn; tune with the maintenance
+		// interval.
+		InlineRowLimit:      getenvInt("DUCKLAKE_INLINE_ROW_LIMIT", 1024),
+		IngestPort:          getenv("INGEST_PORT", ""),
 	}
 }
 
@@ -85,8 +95,14 @@ func run(ctx context.Context, cfg config) error {
 		return fmt.Errorf("open DuckDB: %w", err)
 	}
 	defer db.Close()
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	// The ingest service holds a dedicated second connection; everything else
+	// (init, health, quack_stop) shares the first.
+	poolSize := 1
+	if cfg.IngestPort != "" {
+		poolSize = 2
+	}
+	db.SetMaxOpenConns(poolSize)
+	db.SetMaxIdleConns(poolSize)
 
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -96,6 +112,12 @@ func run(ctx context.Context, cfg config) error {
 			return fmt.Errorf("init %q: %w", stmt, err)
 		}
 	}
+
+	stopIngest, err := startIngestServer(sigCtx, db, cfg)
+	if err != nil {
+		return fmt.Errorf("start ingest server: %w", err)
+	}
+	defer stopIngest()
 
 	healthServer, err := startHealthServer(sigCtx, cfg.HealthAddr, db, cfg.AttachName, cfg.URI)
 	if err != nil {
@@ -177,6 +199,16 @@ func initStatements(cfg config, duckDBHome string) []string {
 			escapeSQLString(cfg.DataPath),
 		),
 		fmt.Sprintf("USE %s", cfg.AttachName),
+	}
+	// Persisted in ducklake_metadata, so applying at every startup is an
+	// idempotent overwrite. A negative limit leaves whatever the catalog
+	// already has; 0 explicitly disables inlining.
+	if cfg.InlineRowLimit >= 0 {
+		stmts = append(stmts, fmt.Sprintf(
+			"CALL %s.set_option('data_inlining_row_limit', '%d')",
+			cfg.AttachName,
+			cfg.InlineRowLimit,
+		))
 	}
 	return append(stmts, lockdownStatements(cfg)...)
 }

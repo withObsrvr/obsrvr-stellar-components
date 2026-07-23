@@ -8,4 +8,7 @@ protoc \
   -I proto \
   --go_out=. \
   --go_opt=module=github.com/withObsrvr/obsrvr-stellar-components \
-  proto/stellar/components/v1/ledger_batch.proto
+  --go-grpc_out=. \
+  --go-grpc_opt=module=github.com/withObsrvr/obsrvr-stellar-components \
+  proto/stellar/components/v1/ledger_batch.proto \
+  proto/stellar/components/v1/ingest_service.proto

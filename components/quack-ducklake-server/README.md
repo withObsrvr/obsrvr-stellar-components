@@ -12,6 +12,15 @@ beside ingestion, index materializers, and query APIs rather than inside
 - `DUCKLAKE_CATALOG_PATH`, default `ducklake/stellar.ducklake`
 - `DUCKLAKE_DATA_PATH`, default `ducklake/data`
 - `DUCKLAKE_ATTACH_NAME`, default `stellar_lake`
+- `DUCKLAKE_INLINE_ROW_LIMIT`, default `1024`; applied idempotently at
+  startup via `set_option('data_inlining_row_limit', …)`. Inserts below this
+  row count are inlined into the catalog instead of writing Parquet.
+  Inlined commits cost ~0.18ms/row (measured), so the limit tiers writes:
+  small tables inline, large tables take the fast Parquet path, and
+  `ducklake-maintenance` merges the resulting files. Measured commit latency
+  per mainnet ledger: `20000` → ~1.7s (all inlined), `1024` → ~0.55s
+  (~1 file/ledger), `256` → ~85ms (~7 files/ledger). `0` disables inlining;
+  a negative value leaves the catalog's persisted setting untouched.
 - `QUACK_URI`, default `quack:127.0.0.1:9494`
 - `QUACK_TOKEN`, required
 - `QUACK_HEALTH_ADDR`, default `:8088`; serves `/healthz`

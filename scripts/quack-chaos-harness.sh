@@ -32,7 +32,12 @@ kill_after="${QUACK_CHAOS_KILL_AFTER:-5}"
 ingest_timeout="${QUACK_CHAOS_INGEST_TIMEOUT:-90}"
 replay_timeout="${QUACK_CHAOS_REPLAY_TIMEOUT:-180}"
 baseline_timeout="${QUACK_CHAOS_BASELINE_TIMEOUT:-180}"
-min_script_mib="${QUACK_CHAOS_MIN_SCRIPT_MIB:-15}"
+# Row data travels as staged Parquet, so the staged-bytes floor proves the
+# full typed surface is flowing (heavy mainnet ledgers stage multiple MiB),
+# while the script ceiling locks in the KB-scale transport: a script blowing
+# past it means row data leaked back into SQL text.
+min_staged_mib="${QUACK_CHAOS_MIN_STAGED_MIB:-1}"
+max_script_kib="${QUACK_CHAOS_MAX_SCRIPT_KIB:-256}"
 shutdown_grace="${QUACK_CHAOS_SHUTDOWN_GRACE:-10}"
 pipeline_path="${QUACK_CHAOS_PIPELINE_PATH:-$runtime_dir/local-archive-quack-ducklake-flowctl.yaml}"
 ingest_cmd="${QUACK_CHAOS_INGEST_CMD:-}"
@@ -132,6 +137,7 @@ spec:
       env:
         COMPONENT_ID: "ducklake-sink"
         DUCKLAKE_MODE: "quack"
+        DUCKLAKE_STAGING_PATH: "$runtime_dir/staging"
         QUACK_URI: "$uri"
         QUACK_TOKEN: "$token"
         QUACK_DISABLE_SSL: "true"
@@ -142,9 +148,10 @@ spec:
 YAML
 }
 
-echo "building quack-ducklake-server, ducklake-sink, and stellar-ledger-processor"
+echo "building quack-ducklake-server, ducklake-sink, ducklake-maintenance, and stellar-ledger-processor"
 CGO_ENABLED="${CGO_ENABLED:-1}" go build -o bin/quack-ducklake-server ./components/quack-ducklake-server/cmd/component
 CGO_ENABLED="${CGO_ENABLED:-1}" go build -o bin/ducklake-sink ./components/ducklake-sink/cmd/component
+CGO_ENABLED="${CGO_ENABLED:-1}" go build -o bin/ducklake-maintenance ./components/ducklake-maintenance/cmd/component
 CGO_ENABLED="${CGO_ENABLED:-1}" go build -o bin/stellar-ledger-processor ./components/stellar-ledger-processor/cmd/component
 if [[ ! -x bin/raw-ledger-source ]]; then
   echo "bin/raw-ledger-source is required; build or install raw-ledger-source@0.2.2 before running this harness" >&2
@@ -276,50 +283,66 @@ start_server() {
   return 1
 }
 
-check_script_sizes() {
+check_transport_sizes() {
   local log_file="$runtime_dir/script-sizes.log"
   local summary_file="$runtime_dir/script-size-summary.env"
 
-  if [[ "$min_script_mib" == "0" ]]; then
-    echo "skipping remote script size threshold because QUACK_CHAOS_MIN_SCRIPT_MIB=0"
+  if [[ "$min_staged_mib" == "0" && "$max_script_kib" == "0" ]]; then
+    echo "skipping transport size gates because both thresholds are 0"
     return 0
   fi
   if [[ ! -s "$log_file" ]]; then
-    echo "no remote DuckLake script size measurements were captured" >&2
+    echo "no remote DuckLake transport size measurements were captured" >&2
     return 1
   fi
 
-  if ! awk -v min="$min_script_mib" -v summary="$summary_file" '
+  if ! awk -v min_staged="$min_staged_mib" -v max_script="$max_script_kib" -v summary="$summary_file" '
+    /remote DuckLake staged parquet/ {
+      for (i = 1; i <= NF; i++) {
+        if ($i == "is") {
+          size = $(i + 1) + 0
+          staged_count++
+          if (size > staged_max) {
+            staged_max = size
+          }
+        }
+      }
+    }
     /remote DuckLake write script/ {
       for (i = 1; i <= NF; i++) {
         if ($i == "is") {
           size = $(i + 1) + 0
-          count++
-          if (size > max) {
-            max = size
+          script_count++
+          if (size > script_max) {
+            script_max = size
           }
         }
       }
     }
     END {
-      if (count == 0) {
-        print "no script size measurements found" > "/dev/stderr"
+      if (staged_count == 0 || script_count == 0) {
+        print "missing staged parquet or script size measurements" > "/dev/stderr"
         exit 2
       }
-      printf "max_remote_script_mib=%.2f\n", max > summary
-      printf "min_required_script_mib=%.2f\n", min >> summary
-      if (max < min) {
+      printf "max_staged_parquet_mib=%.2f\n", staged_max > summary
+      printf "min_required_staged_mib=%.2f\n", min_staged >> summary
+      printf "max_remote_script_kib=%.2f\n", script_max >> summary
+      printf "max_allowed_script_kib=%.2f\n", max_script >> summary
+      if (min_staged + 0 > 0 && staged_max < min_staged) {
         exit 1
+      }
+      if (max_script + 0 > 0 && script_max > max_script) {
+        exit 3
       }
     }
   ' "$log_file"; then
-    echo "remote script size gate failed; largest script was below ${min_script_mib} MiB" >&2
+    echo "transport size gates failed (staged floor ${min_staged_mib} MiB, script ceiling ${max_script_kib} KiB)" >&2
     cat "$summary_file" >&2 || true
     return 1
   fi
 
   cat "$summary_file"
-  echo "remote script size gate passed"
+  echo "transport size gates passed"
 }
 
 echo "starting initial quack server"
@@ -350,12 +373,31 @@ echo "ingest failed as expected after server kill"
 echo "restarting quack server"
 start_server "$catalog_path" "$data_path" "$runtime_dir/quack-server-replay.log"
 
-echo "running replay command"
+echo "running replay command with concurrent maintenance"
 set +e
 start_command "$replay_cmd" "$runtime_dir/replay.log"
+# Run a full maintenance cycle (flush inlined data, merge files, expire
+# snapshots) while the replay pipeline is actively writing. The parity gates
+# below then prove maintenance is invisible to logical table contents: the
+# baseline catalog never runs maintenance, so its rows stay inlined while the
+# chaos catalog's rows are flushed to Parquet.
+sleep 3
+QUACK_TOKEN="$token" \
+QUACK_URI="$uri" \
+QUACK_DISABLE_SSL=true \
+RUN_ONCE=true \
+HEALTH_PORT=0 \
+bin/ducklake-maintenance >"$runtime_dir/maintenance-during-replay.log" 2>&1
+maintenance_status="$?"
 wait_command "$replay_timeout"
 replay_status="$?"
 set -e
+if [[ "$maintenance_status" -ne 0 ]]; then
+  echo "maintenance run during replay failed with status $maintenance_status" >&2
+  cat "$runtime_dir/maintenance-during-replay.log" >&2 || true
+  exit 1
+fi
+echo "maintenance cycle during active ingest succeeded"
 if [[ "$replay_status" -ne 0 && "$replay_status" -ne 124 ]]; then
   echo "replay command failed with status $replay_status" >&2
   tail -n 160 "$runtime_dir/replay.log" >&2 || true
@@ -365,10 +407,10 @@ if [[ "$replay_status" -eq 124 ]]; then
   echo "replay command reached ${replay_timeout}s; continuing to catalog checks after stopping the pipeline"
 fi
 
-if grep -ah "remote DuckLake write script" "$runtime_dir/ingest-before-kill.log" "$runtime_dir/replay.log" >"$runtime_dir/script-sizes.log" 2>/dev/null; then
-  echo "captured remote script size measurements in $runtime_dir/script-sizes.log"
-  check_script_sizes
-elif [[ "$min_script_mib" != "0" ]]; then
+if grep -ahE "remote DuckLake (write script|staged parquet)" "$runtime_dir/ingest-before-kill.log" "$runtime_dir/replay.log" >"$runtime_dir/script-sizes.log" 2>/dev/null; then
+  echo "captured remote transport size measurements in $runtime_dir/script-sizes.log"
+  check_transport_sizes
+elif [[ "$min_staged_mib" != "0" || "$max_script_kib" != "0" ]]; then
   echo "failed to capture remote script size measurements" >&2
   exit 1
 fi
@@ -421,16 +463,6 @@ SELECT 'ledger_batches', count(*) FROM (
   (SELECT network_passphrase, ledger_sequence, closed_at_unix, schema_version, extraction_version, transaction_count, operation_count, bronze_row_count FROM baseline.ledger_batches
    EXCEPT ALL
    SELECT network_passphrase, ledger_sequence, closed_at_unix, schema_version, extraction_version, transaction_count, operation_count, bronze_row_count FROM chaos.ledger_batches)
-);
-INSERT INTO parity_diffs
-SELECT 'bronze_rows', count(*) FROM (
-  (SELECT network_passphrase, ledger_sequence, table_name, count(*) AS row_count FROM chaos.bronze_rows GROUP BY 1, 2, 3
-   EXCEPT ALL
-   SELECT network_passphrase, ledger_sequence, table_name, count(*) AS row_count FROM baseline.bronze_rows GROUP BY 1, 2, 3)
-  UNION ALL
-  (SELECT network_passphrase, ledger_sequence, table_name, count(*) AS row_count FROM baseline.bronze_rows GROUP BY 1, 2, 3
-   EXCEPT ALL
-   SELECT network_passphrase, ledger_sequence, table_name, count(*) AS row_count FROM chaos.bronze_rows GROUP BY 1, 2, 3)
 );
 INSERT INTO parity_diffs
 SELECT 'ingest_watermarks', count(*) FROM (

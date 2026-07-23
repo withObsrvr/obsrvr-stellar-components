@@ -48,6 +48,7 @@ spec:
       env:
         COMPONENT_ID: "ducklake-sink"
         DUCKLAKE_MODE: "quack"
+        DUCKLAKE_STAGING_PATH: "ducklake/staging"
         QUACK_URI: "quack:127.0.0.1:9494"
         QUACK_TOKEN: "chaos_secret"
         QUACK_DISABLE_SSL: "true"

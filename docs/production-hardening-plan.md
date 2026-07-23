@@ -95,7 +95,7 @@ events (restart, upgrade, misconfig); **minor** = quality/operability.
 | DL-6 | minor | `sqlValue` swallows `json.Marshal` errors → NULL cell, silent. | `main.go:646-651` |
 | DL-7 | minor | Dead no-op `strings.ReplaceAll(sqlText, "bronze.", "bronze.")`; fragile full-line-only comment stripping. | `main.go:741` |
 | DL-8 | minor | `INSTALL ducklake/quack` at startup needs extension-repo egress from a distroless container; verify the `quack` extension actually resolves from the intended repo. | `main.go:166-167,191` |
-| DL-9 | major* | Remote mode inlines whole batch (incl. `payload_json`) into one unbounded SQL script — a large mainnet ledger (measured 17.3MB protobuf) approaches the 50MB gRPC cap and unknown Quack limits. *Upgraded from minor: quack mode is now the production write path.* | `main.go:398-449` |
+| DL-9 | major* | Remote mode inlines whole batch (incl. `payload_json`) into one unbounded SQL script — a large mainnet ledger (measured 17.3MB protobuf) approaches the 50MB gRPC cap and unknown Quack limits. *Upgraded from minor: quack mode is now the production write path.* *Mitigated 2026-07-23: `payload_json` and `bronze_rows` are no longer persisted; scripts carry typed rows only (~9 MiB for a heavy mainnet ledger, ~70% smaller).* *Resolved 2026-07-23: quack transport now stages typed rows as Parquet and ships a KB-scale script referencing `read_parquet`; script size no longer scales with ledger content, and the chaos harness gates both a staged-bytes floor and a script-size ceiling.* | `main.go:398-449` |
 | DL-10 | minor | If the single pinned connection is recycled (`ErrBadConn`), the fresh session lacks `USE stellar_lake` — persistent failures, dropped per DEL-1. | `main.go:174` |
 
 ### QK — quack-ducklake-server
@@ -568,7 +568,7 @@ The Quack/replica topology may ship to production when:
 - [ ] Snapshot-expiry resync demo passes (Cycle 2 demo).
 - [ ] Schema-drift reconcile-or-fail demo passes (Cycle 2 demo).
 - [ ] No token material in replica checkpoint table or logs.
-- [ ] Watermark gap query returns empty after a 1k-ledger backfill.
+- [x] Watermark gap query returns empty after a 1k-ledger backfill.
 - [x] flowctl-sdk upgrade plan written (even if v0.1.3 not yet shipped).
 
 Local production-gate evidence and remaining run commands are captured in

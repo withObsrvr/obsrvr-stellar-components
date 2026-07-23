@@ -48,18 +48,34 @@ Local evidence captured on 2026-07-02:
   `soroban_resources_instructions`; `583` operation rows populated
   `soroban_operation` and `soroban_arguments_json`
 
-For a longer watermark run, use the same harness with a 1k-ledger range and
-larger timeouts:
+For a longer watermark run, use the same harness with a 1k-ledger range.
+The bounded pipeline currently remains resident after the source drains, so
+short replay/baseline timeouts are enough to let the harness proceed to catalog
+checks once `events_sent=1000` has been observed:
 
 ```bash
 QUACK_CHAOS_START_LEDGER=62080000 \
 QUACK_CHAOS_END_LEDGER=62080999 \
-QUACK_CHAOS_REPLAY_TIMEOUT=3600 \
-QUACK_CHAOS_BASELINE_TIMEOUT=3600 \
+QUACK_CHAOS_REPLAY_TIMEOUT=300 \
+QUACK_CHAOS_BASELINE_TIMEOUT=300 \
 GOCACHE=/tmp/obsrvr-go-build-cache \
 GOMODCACHE=/tmp/obsrvr-go-mod-cache \
 make test-quack-chaos
 ```
+
+Local 1k-ledger evidence captured on 2026-07-05:
+
+- command: `QUACK_CHAOS_START_LEDGER=62080000 QUACK_CHAOS_END_LEDGER=62080999 QUACK_CHAOS_REPLAY_TIMEOUT=300 QUACK_CHAOS_BASELINE_TIMEOUT=300 GOCACHE=/tmp/obsrvr-go-build-cache GOMODCACHE=/tmp/obsrvr-go-mod-cache make test-quack-chaos`
+- runtime: `/tmp/obsrvr-quack-chaos`
+- ledgers: `62080000` through `62080999`
+- replay sink writer: `events_sent=1000`, `send_errors=0`
+- baseline sink writer: `events_sent=1000`, `send_errors=0`
+- replay timeout: reached `300s` after drain; harness continued to catalog checks
+- baseline timeout: reached `300s` after drain; harness continued to catalog checks
+- remote script size: max `31.42 MiB`
+- parity compare: `parity-diffs.csv` contained only the CSV header
+- typed catalog gates: `gate-failures.csv` contained only the CSV header
+- watermark gap query: `0 rows`
 
 ## Nomad Liveness Gate
 
@@ -157,4 +173,5 @@ bin/ducklake-replica-sync
   the prod infra repo.
 - Replica snapshot-expiry/schema-drift/token-redaction demos: not yet run
   against live primary/target Quack endpoints.
-- 1k-ledger backfill gap query: not yet run.
+- 1k-ledger backfill gap query: passed on 2026-07-05 for ledgers
+  `62080000` through `62080999`.

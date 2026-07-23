@@ -5,7 +5,7 @@ GOFMT ?= gofmt
 PROTOC ?= protoc
 CGO_ENABLED ?= 1
 
-COMPONENTS := stellar-ledger-processor jsonl-sink postgres-sink ducklake-sink quack-ducklake-server index-materializer ducklake-replica-sync
+COMPONENTS := stellar-ledger-processor jsonl-sink postgres-sink ducklake-sink quack-ducklake-server index-materializer ducklake-replica-sync ducklake-maintenance
 
 build:
 	@mkdir -p bin
