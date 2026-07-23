@@ -1,4 +1,4 @@
-.PHONY: build lint proto test test-local-pipeline test-quack-chaos validate-pipelines validate-nomad docker-flowctl-runner tidy clean
+.PHONY: build lint proto test test-local-pipeline test-quack-chaos test-ingest-chaos validate-pipelines validate-nomad docker-flowctl-runner tidy clean
 
 GO ?= go
 GOFMT ?= gofmt
@@ -30,12 +30,17 @@ test-local-pipeline:
 test-quack-chaos:
 	@scripts/quack-chaos-harness.sh
 
+test-ingest-chaos:
+	@QUACK_CHAOS_SINK_MODE=ingest-rpc scripts/quack-chaos-harness.sh
+
 validate-pipelines:
 	@scripts/validate-pipelines.sh
 
 validate-nomad:
 	@nomad fmt -check deploy/nomad/quack-ducklake-server.nomad
 	@nomad job validate deploy/nomad/quack-ducklake-server.nomad
+	@nomad fmt -check deploy/nomad/ducklake-maintenance.nomad
+	@nomad job validate deploy/nomad/ducklake-maintenance.nomad
 
 docker-flowctl-runner:
 	@for bin in flowctl raw-ledger-source stellar-ledger-processor ducklake-sink postgres-sink jsonl-sink index-materializer; do \

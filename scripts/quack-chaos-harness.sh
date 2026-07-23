@@ -39,6 +39,11 @@ baseline_timeout="${QUACK_CHAOS_BASELINE_TIMEOUT:-180}"
 min_staged_mib="${QUACK_CHAOS_MIN_STAGED_MIB:-1}"
 max_script_kib="${QUACK_CHAOS_MAX_SCRIPT_KIB:-256}"
 shutdown_grace="${QUACK_CHAOS_SHUTDOWN_GRACE:-10}"
+# quack: staged-parquet transport over remote.query. ingest-rpc: the
+# BronzeIngestService gRPC path. The transport size gates only apply to
+# quack mode; parity/typed gates apply to both.
+sink_mode="${QUACK_CHAOS_SINK_MODE:-quack}"
+ingest_port="${QUACK_CHAOS_INGEST_PORT:-$((port_base + 58))}"
 pipeline_path="${QUACK_CHAOS_PIPELINE_PATH:-$runtime_dir/local-archive-quack-ducklake-flowctl.yaml}"
 ingest_cmd="${QUACK_CHAOS_INGEST_CMD:-}"
 replay_cmd="${QUACK_CHAOS_REPLAY_CMD:-$ingest_cmd}"
@@ -136,8 +141,9 @@ spec:
       inputs: ["stellar-ledger-processor"]
       env:
         COMPONENT_ID: "ducklake-sink"
-        DUCKLAKE_MODE: "quack"
+        DUCKLAKE_MODE: "$sink_mode"
         DUCKLAKE_STAGING_PATH: "$runtime_dir/staging"
+        INGEST_ENDPOINT: "127.0.0.1:$ingest_port"
         QUACK_URI: "$uri"
         QUACK_TOKEN: "$token"
         QUACK_DISABLE_SSL: "true"
@@ -254,6 +260,10 @@ start_server() {
   local active_data_path="$2"
   local log_file="$3"
 
+  local ingest_port_env=""
+  if [[ "$sink_mode" == "ingest-rpc" ]]; then
+    ingest_port_env="$ingest_port"
+  fi
   QUACK_TOKEN="$token" \
   QUACK_URI="$uri" \
   QUACK_HEALTH_ADDR="$health_addr" \
@@ -261,6 +271,7 @@ start_server() {
   QUACK_DISABLE_SSL=true \
   QUACK_ENABLE_EXTERNAL_ACCESS=true \
   QUACK_DISABLED_FILESYSTEMS=none \
+  INGEST_PORT="$ingest_port_env" \
   DUCKLAKE_CATALOG_PATH="$active_catalog_path" \
   DUCKLAKE_DATA_PATH="$active_data_path" \
   bin/quack-ducklake-server >"$log_file" 2>&1 &
@@ -363,7 +374,7 @@ if [[ "$ingest_status" -eq 0 ]]; then
   echo "ingest command succeeded after server kill; expected non-zero crash-and-replay signal" >&2
   exit 1
 fi
-if ! grep -Eq "fatal ledger batch handling error|Process failed.*ducklake-sink|remote DuckLake write batch" "$runtime_dir/ingest-before-kill.log"; then
+if ! grep -Eq "fatal ledger batch handling error|Process failed.*ducklake-sink|remote DuckLake write batch|to ingest service|ingest ack for ledger" "$runtime_dir/ingest-before-kill.log"; then
   echo "ingest command failed, but the log did not prove a ducklake-sink write failure" >&2
   tail -n 120 "$runtime_dir/ingest-before-kill.log" >&2 || true
   exit 1
@@ -407,7 +418,9 @@ if [[ "$replay_status" -eq 124 ]]; then
   echo "replay command reached ${replay_timeout}s; continuing to catalog checks after stopping the pipeline"
 fi
 
-if grep -ahE "remote DuckLake (write script|staged parquet)" "$runtime_dir/ingest-before-kill.log" "$runtime_dir/replay.log" >"$runtime_dir/script-sizes.log" 2>/dev/null; then
+if [[ "$sink_mode" == "ingest-rpc" ]]; then
+  echo "skipping transport size gates for ingest-rpc mode (no staged parquet transport)"
+elif grep -ahE "remote DuckLake (write script|staged parquet)" "$runtime_dir/ingest-before-kill.log" "$runtime_dir/replay.log" >"$runtime_dir/script-sizes.log" 2>/dev/null; then
   echo "captured remote transport size measurements in $runtime_dir/script-sizes.log"
   check_transport_sizes
 elif [[ "$min_staged_mib" != "0" || "$max_script_kib" != "0" ]]; then

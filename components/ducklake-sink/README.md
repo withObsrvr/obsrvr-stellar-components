@@ -2,10 +2,17 @@
 
 Consumes `stellar.ledger.batch.v1` events and writes them into a DuckLake catalog.
 
-The sink supports two modes:
+The sink supports three modes:
 
 - `DUCKLAKE_MODE=embedded`, default: attach DuckLake directly from this process.
-- `DUCKLAKE_MODE=quack`: send write SQL to a `quack-ducklake-server` that owns the DuckLake attachment.
+- `DUCKLAKE_MODE=quack`: stage typed rows as Parquet and send a KB-scale write
+  script to a `quack-ducklake-server` that owns the DuckLake attachment.
+- `DUCKLAKE_MODE=ingest-rpc`: forward batches to the server's
+  `BronzeIngestService` gRPC stream; the server commits each ledger in-process
+  (measured ~250–320ms ledger-arrival → queryable with
+  `DUCKLAKE_INLINE_ROW_LIMIT=256`). One ledger in flight at a time, per-ledger
+  acks, watermark-gated replay semantics server-side. This sink holds no local
+  DuckDB in this mode.
 
 Environment:
 
@@ -23,6 +30,10 @@ Environment:
 - `DUCKLAKE_STAGING_REMOTE_PATH`, default same as `DUCKLAKE_STAGING_PATH`;
   the staging path as the quack server sees it, when the shared directory is
   mounted at a different path in the server process.
+- `INGEST_ENDPOINT`, default `127.0.0.1:9495`; the server's
+  `BronzeIngestService` address when `DUCKLAKE_MODE=ingest-rpc`. The shared
+  `QUACK_TOKEN` authenticates the stream (plaintext transport — localhost/LAN
+  or a TLS-terminating proxy).
 - `QUACK_DISABLE_SSL`, default `false`; set only for an explicitly insecure dev server
 - `DUCKLAKE_REMOTE_TIMEOUT`, default `30s`
 - `PORT`, default `:50052`

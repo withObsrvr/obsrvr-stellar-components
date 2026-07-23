@@ -18,6 +18,10 @@ job "obsrvr-stellar-ducklake-primary" {
       port "health" {
         to = 8088
       }
+
+      port "ingest" {
+        to = 9495
+      }
     }
 
     volume "ducklake-primary" {
@@ -41,12 +45,18 @@ job "obsrvr-stellar-ducklake-primary" {
       }
     }
 
+    service {
+      name     = "quack-ducklake-ingest"
+      provider = "nomad"
+      port     = "ingest"
+    }
+
     task "server" {
       driver = "docker"
 
       config {
         image = var.quack_image
-        ports = ["quack", "health"]
+        ports = ["quack", "health", "ingest"]
       }
 
       volume_mount {
@@ -68,6 +78,12 @@ job "obsrvr-stellar-ducklake-primary" {
         QUACK_DISABLE_SSL            = "true"
         QUACK_ENABLE_EXTERNAL_ACCESS = "true"
         QUACK_DISABLED_FILESYSTEMS   = "none"
+
+        # BronzeIngestService: sub-400ms commits need the 256 inline limit,
+        # which produces ~7 small parquet files per ledger — the
+        # ducklake-maintenance job's interval (2m) is paired with this value.
+        INGEST_PORT               = "${NOMAD_PORT_ingest}"
+        DUCKLAKE_INLINE_ROW_LIMIT = "256"
       }
 
       template {

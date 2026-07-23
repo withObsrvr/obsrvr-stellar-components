@@ -36,6 +36,15 @@ beside ingestion, index materializers, and query APIs rather than inside
 - `QUACK_MEMORY_LIMIT`, default `4GB`
 - `QUACK_DUCKDB_THREADS`, default `4`
 - `QUACK_DUCKDB_PATH`, optional DuckDB local database path
+- `INGEST_PORT`, default empty (disabled); serves `BronzeIngestService` — a
+  gRPC stream that commits ledger batches in-process, one DuckLake
+  transaction per ledger with per-ledger acks, watermark-gated delete-skip
+  for fresh ledgers, and replay-on-uncertainty after failures. Rows stage
+  through native memory tables via the DuckDB Appender and land via
+  `INSERT..SELECT`, so data inlining applies. Authenticated with
+  `QUACK_TOKEN` via `x-ingest-token` metadata. For sub-400ms commits pair
+  with `DUCKLAKE_INLINE_ROW_LIMIT=256` and a 1–5 minute
+  `ducklake-maintenance` interval.
 
 ## Local Example
 
