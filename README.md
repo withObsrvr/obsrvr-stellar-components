@@ -45,4 +45,5 @@ See:
 - `docs/rebuild-plan.md`
 - `docs/architecture.md`
 - `docs/event-contracts.md`
+- `docs/flow-ops-bridge.md`
 - `docs/nomad-migration.md`

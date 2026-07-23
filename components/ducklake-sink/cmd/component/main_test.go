@@ -92,14 +92,6 @@ func TestDuckLakeSinkMaterializesTypedBronzeTables(t *testing.T) {
 
 	for _, tableName := range tableNames {
 		spec := typedTableSpecs[tableName]
-		var envelopeCount int
-		if err := sink.db.QueryRow(
-			"SELECT count(*) FROM bronze_rows WHERE ledger_sequence = ? AND table_name = ?",
-			ledgerSequence,
-			tableName,
-		).Scan(&envelopeCount); err != nil {
-			t.Fatalf("count envelope rows for %s: %v", tableName, err)
-		}
 		var typedCount int
 		query := fmt.Sprintf(
 			"SELECT count(*) FROM bronze.%s WHERE %s = ?",
@@ -109,9 +101,31 @@ func TestDuckLakeSinkMaterializesTypedBronzeTables(t *testing.T) {
 		if err := sink.db.QueryRow(query, ledgerSequence).Scan(&typedCount); err != nil {
 			t.Fatalf("count typed rows for %s: %v", tableName, err)
 		}
-		if typedCount != envelopeCount {
-			t.Fatalf("%s count mismatch: typed=%d envelope=%d", tableName, typedCount, envelopeCount)
+		if typedCount != 1 {
+			t.Fatalf("%s typed count = %d, want 1", tableName, typedCount)
 		}
+	}
+
+	var envelopeCount int
+	if err := sink.db.QueryRow(
+		"SELECT count(*) FROM bronze_rows WHERE ledger_sequence = ?",
+		ledgerSequence,
+	).Scan(&envelopeCount); err != nil {
+		t.Fatalf("count envelope rows: %v", err)
+	}
+	if envelopeCount != 0 {
+		t.Fatalf("bronze_rows count = %d, want 0 (envelope rows are no longer persisted)", envelopeCount)
+	}
+
+	var payloadNulls int
+	if err := sink.db.QueryRow(
+		"SELECT count(*) FROM ledger_batches WHERE ledger_sequence = ? AND payload_json IS NOT NULL",
+		ledgerSequence,
+	).Scan(&payloadNulls); err != nil {
+		t.Fatalf("count non-null payloads: %v", err)
+	}
+	if payloadNulls != 0 {
+		t.Fatalf("found %d ledger_batches rows with payload_json set, want 0", payloadNulls)
 	}
 
 	var watermarkCount int
@@ -363,7 +377,10 @@ func TestRemoteWriteSQLIncludesWatermarkAndNetworkCheck(t *testing.T) {
 			LedgerRange:       0,
 			RowJson:           transactionRowJSONWithoutXDR(987, "tx-hash"),
 		}},
-	})
+	}, []stagedTable{{
+		TableName:  "transactions_row_v2",
+		RemotePath: "/staging/987_1/transactions_row_v2.parquet",
+	}})
 	if err != nil {
 		t.Fatalf("remote write SQL: %v", err)
 	}
@@ -375,14 +392,105 @@ func TestRemoteWriteSQLIncludesWatermarkAndNetworkCheck(t *testing.T) {
 		"DELETE FROM stellar_lake.ingest_watermarks",
 		"INSERT INTO stellar_lake.ingest_watermarks",
 		"INSERT INTO stellar_lake.bronze.transactions_row_v2",
-		"'batch-envelope-xdr'",
-		"'batch-result-xdr'",
-		"'batch-meta-xdr'",
+		"FROM read_parquet('/staging/987_1/transactions_row_v2.parquet')",
 		"COMMIT;",
 	} {
 		if !strings.Contains(sqlText, want) {
 			t.Fatalf("remote write SQL missing %q in:\n%s", want, sqlText)
 		}
+	}
+	// Row data travels as Parquet, never as SQL literals.
+	for _, absent := range []string{
+		"INSERT INTO stellar_lake.bronze_rows",
+		"batch-envelope-xdr",
+		"batch-result-xdr",
+		"batch-meta-xdr",
+	} {
+		if strings.Contains(sqlText, absent) {
+			t.Fatalf("remote write SQL unexpectedly contains %q", absent)
+		}
+	}
+	if !strings.Contains(sqlText, "NULL)") {
+		t.Fatalf("remote write SQL should insert NULL payload_json in:\n%s", sqlText)
+	}
+	if size := len(sqlText); size > 64*1024 {
+		t.Fatalf("remote write SQL is %d bytes; the staged transport must keep scripts small", size)
+	}
+}
+
+func TestStageBatchParquetWritesTypedRowsAndRollsBack(t *testing.T) {
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatalf("open duckdb: %v", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	sink := &DuckLakeSink{
+		db:                db,
+		stagingPath:       t.TempDir(),
+		stagingRemotePath: "/mnt/shared/staging",
+	}
+	if err := sink.initLocalStagingSchema(); err != nil {
+		t.Fatalf("init local staging schema: %v", err)
+	}
+
+	const ledgerSequence = 424242
+	batch := &componentsv1.LedgerBatch{
+		NetworkPassphrase: "testnet",
+		LedgerSequence:    ledgerSequence,
+		Transactions: []*componentsv1.TransactionRow{{
+			LedgerSequence:  ledgerSequence,
+			TransactionHash: "tx-hash",
+			EnvelopeXdr:     "envelope-xdr",
+			ResultXdr:       "result-xdr",
+			MetaXdr:         "meta-xdr",
+		}},
+		BronzeRows: []*componentsv1.BronzeRow{{
+			Id:                "row-1",
+			TableName:         "transactions_row_v2",
+			NetworkPassphrase: "testnet",
+			LedgerSequence:    ledgerSequence,
+			LedgerRange:       420000,
+			RowJson:           transactionRowJSONWithoutXDR(ledgerSequence, "tx-hash"),
+		}},
+	}
+
+	stagingDir, staged, err := sink.stageBatchParquet(batch)
+	if err != nil {
+		t.Fatalf("stage batch: %v", err)
+	}
+	if len(staged) != 1 || staged[0].TableName != "transactions_row_v2" {
+		t.Fatalf("staged tables = %+v, want transactions_row_v2 only", staged)
+	}
+	if !strings.HasPrefix(staged[0].RemotePath, "/mnt/shared/staging/") {
+		t.Fatalf("remote path %q does not use the staging remote prefix", staged[0].RemotePath)
+	}
+
+	var rowCount int
+	var envelope string
+	if err := db.QueryRow(fmt.Sprintf(
+		"SELECT count(*), max(tx_envelope) FROM read_parquet('%s')",
+		escapeSQLString(staged[0].LocalPath),
+	)).Scan(&rowCount, &envelope); err != nil {
+		t.Fatalf("read staged parquet: %v", err)
+	}
+	if rowCount != 1 {
+		t.Fatalf("staged parquet has %d rows, want 1", rowCount)
+	}
+	if envelope != "envelope-xdr" {
+		t.Fatalf("staged tx_envelope = %q, want enrichment from the batch", envelope)
+	}
+
+	var localRows int
+	if err := db.QueryRow("SELECT count(*) FROM bronze.transactions_row_v2").Scan(&localRows); err != nil {
+		t.Fatalf("count local staging rows: %v", err)
+	}
+	if localRows != 0 {
+		t.Fatalf("local staging table kept %d rows after rollback, want 0", localRows)
+	}
+
+	if err := os.RemoveAll(stagingDir); err != nil {
+		t.Fatalf("cleanup staging dir: %v", err)
 	}
 }
 
@@ -391,7 +499,7 @@ func TestRemoteWriteSQLRejectsBlankNetworkPassphrase(t *testing.T) {
 	_, err := sink.remoteWriteSQL(&componentsv1.LedgerBatch{
 		NetworkPassphrase: " \t",
 		LedgerSequence:    987,
-	})
+	}, nil)
 	if err == nil {
 		t.Fatalf("remoteWriteSQL succeeded with blank network_passphrase")
 	}

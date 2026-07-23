@@ -32,7 +32,7 @@ The full bronze extractor surface is carried in:
 
 Each `BronzeRow` has the destination table name and a JSON serialization of the matching `stellar-extract` row type. This covers the row families used by `stellar-history-loader` and `stellar-postgres-ingester`, including effects, trades, accounts, offers, trustlines, account signers, claimable balances, liquidity pools, config settings, TTL entries, native balances, contract events, contract data, contract code, contract creations, token transfers, evicted keys, and restored keys.
 
-`ducklake-sink` preserves that envelope in `bronze_rows` and also materializes the same rows into typed `bronze.*` tables compatible with the `stellar-history-loader` bronze schema.
+`ducklake-sink` materializes those rows into typed `bronze.*` tables compatible with the `stellar-history-loader` bronze schema. The envelope itself is transport-only: `ducklake-sink` does not persist `bronze_rows` or the raw batch payload (the upstream archive is the replay source).
 
 ## Idempotency
 

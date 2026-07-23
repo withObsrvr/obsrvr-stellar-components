@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package stellar.components.v1;
+
+import "stellar/components/v1/ledger_batch.proto";
+
+option go_package = "github.com/withObsrvr/obsrvr-stellar-components/gen/go/stellar/components/v1;componentsv1";
+
+// BronzeIngestService is served by quack-ducklake-server. It accepts ledger
+// batches over an ordered stream and commits each batch as one DuckLake
+// transaction before acknowledging it. Exactly one ledger is in flight at a
+// time: the client must wait for the ack of ledger N before sending N+1.
+service BronzeIngestService {
+  rpc IngestLedgerBatches(stream IngestLedgerBatchRequest) returns (stream IngestLedgerBatchAck);
+}
+
+message IngestLedgerBatchRequest {
+  LedgerBatch batch = 1;
+}
+
+message IngestLedgerBatchAck {
+  uint32 ledger_sequence = 1;
+  // True when the server took the replay path (delete-then-insert) because
+  // the ledger was at or below the committed watermark.
+  bool replayed = 2;
+}

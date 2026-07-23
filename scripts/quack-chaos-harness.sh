@@ -32,7 +32,18 @@ kill_after="${QUACK_CHAOS_KILL_AFTER:-5}"
 ingest_timeout="${QUACK_CHAOS_INGEST_TIMEOUT:-90}"
 replay_timeout="${QUACK_CHAOS_REPLAY_TIMEOUT:-180}"
 baseline_timeout="${QUACK_CHAOS_BASELINE_TIMEOUT:-180}"
+# Row data travels as staged Parquet, so the staged-bytes floor proves the
+# full typed surface is flowing (heavy mainnet ledgers stage multiple MiB),
+# while the script ceiling locks in the KB-scale transport: a script blowing
+# past it means row data leaked back into SQL text.
+min_staged_mib="${QUACK_CHAOS_MIN_STAGED_MIB:-1}"
+max_script_kib="${QUACK_CHAOS_MAX_SCRIPT_KIB:-256}"
 shutdown_grace="${QUACK_CHAOS_SHUTDOWN_GRACE:-10}"
+# quack: staged-parquet transport over remote.query. ingest-rpc: the
+# BronzeIngestService gRPC path. The transport size gates only apply to
+# quack mode; parity/typed gates apply to both.
+sink_mode="${QUACK_CHAOS_SINK_MODE:-quack}"
+ingest_port="${QUACK_CHAOS_INGEST_PORT:-$((port_base + 58))}"
 pipeline_path="${QUACK_CHAOS_PIPELINE_PATH:-$runtime_dir/local-archive-quack-ducklake-flowctl.yaml}"
 ingest_cmd="${QUACK_CHAOS_INGEST_CMD:-}"
 replay_cmd="${QUACK_CHAOS_REPLAY_CMD:-$ingest_cmd}"
@@ -130,7 +141,9 @@ spec:
       inputs: ["stellar-ledger-processor"]
       env:
         COMPONENT_ID: "ducklake-sink"
-        DUCKLAKE_MODE: "quack"
+        DUCKLAKE_MODE: "$sink_mode"
+        DUCKLAKE_STAGING_PATH: "$runtime_dir/staging"
+        INGEST_ENDPOINT: "127.0.0.1:$ingest_port"
         QUACK_URI: "$uri"
         QUACK_TOKEN: "$token"
         QUACK_DISABLE_SSL: "true"
@@ -141,9 +154,10 @@ spec:
 YAML
 }
 
-echo "building quack-ducklake-server, ducklake-sink, and stellar-ledger-processor"
+echo "building quack-ducklake-server, ducklake-sink, ducklake-maintenance, and stellar-ledger-processor"
 CGO_ENABLED="${CGO_ENABLED:-1}" go build -o bin/quack-ducklake-server ./components/quack-ducklake-server/cmd/component
 CGO_ENABLED="${CGO_ENABLED:-1}" go build -o bin/ducklake-sink ./components/ducklake-sink/cmd/component
+CGO_ENABLED="${CGO_ENABLED:-1}" go build -o bin/ducklake-maintenance ./components/ducklake-maintenance/cmd/component
 CGO_ENABLED="${CGO_ENABLED:-1}" go build -o bin/stellar-ledger-processor ./components/stellar-ledger-processor/cmd/component
 if [[ ! -x bin/raw-ledger-source ]]; then
   echo "bin/raw-ledger-source is required; build or install raw-ledger-source@0.2.2 before running this harness" >&2
@@ -246,6 +260,10 @@ start_server() {
   local active_data_path="$2"
   local log_file="$3"
 
+  local ingest_port_env=""
+  if [[ "$sink_mode" == "ingest-rpc" ]]; then
+    ingest_port_env="$ingest_port"
+  fi
   QUACK_TOKEN="$token" \
   QUACK_URI="$uri" \
   QUACK_HEALTH_ADDR="$health_addr" \
@@ -253,6 +271,7 @@ start_server() {
   QUACK_DISABLE_SSL=true \
   QUACK_ENABLE_EXTERNAL_ACCESS=true \
   QUACK_DISABLED_FILESYSTEMS=none \
+  INGEST_PORT="$ingest_port_env" \
   DUCKLAKE_CATALOG_PATH="$active_catalog_path" \
   DUCKLAKE_DATA_PATH="$active_data_path" \
   bin/quack-ducklake-server >"$log_file" 2>&1 &
@@ -275,6 +294,68 @@ start_server() {
   return 1
 }
 
+check_transport_sizes() {
+  local log_file="$runtime_dir/script-sizes.log"
+  local summary_file="$runtime_dir/script-size-summary.env"
+
+  if [[ "$min_staged_mib" == "0" && "$max_script_kib" == "0" ]]; then
+    echo "skipping transport size gates because both thresholds are 0"
+    return 0
+  fi
+  if [[ ! -s "$log_file" ]]; then
+    echo "no remote DuckLake transport size measurements were captured" >&2
+    return 1
+  fi
+
+  if ! awk -v min_staged="$min_staged_mib" -v max_script="$max_script_kib" -v summary="$summary_file" '
+    /remote DuckLake staged parquet/ {
+      for (i = 1; i <= NF; i++) {
+        if ($i == "is") {
+          size = $(i + 1) + 0
+          staged_count++
+          if (size > staged_max) {
+            staged_max = size
+          }
+        }
+      }
+    }
+    /remote DuckLake write script/ {
+      for (i = 1; i <= NF; i++) {
+        if ($i == "is") {
+          size = $(i + 1) + 0
+          script_count++
+          if (size > script_max) {
+            script_max = size
+          }
+        }
+      }
+    }
+    END {
+      if (staged_count == 0 || script_count == 0) {
+        print "missing staged parquet or script size measurements" > "/dev/stderr"
+        exit 2
+      }
+      printf "max_staged_parquet_mib=%.2f\n", staged_max > summary
+      printf "min_required_staged_mib=%.2f\n", min_staged >> summary
+      printf "max_remote_script_kib=%.2f\n", script_max >> summary
+      printf "max_allowed_script_kib=%.2f\n", max_script >> summary
+      if (min_staged + 0 > 0 && staged_max < min_staged) {
+        exit 1
+      }
+      if (max_script + 0 > 0 && script_max > max_script) {
+        exit 3
+      }
+    }
+  ' "$log_file"; then
+    echo "transport size gates failed (staged floor ${min_staged_mib} MiB, script ceiling ${max_script_kib} KiB)" >&2
+    cat "$summary_file" >&2 || true
+    return 1
+  fi
+
+  cat "$summary_file"
+  echo "transport size gates passed"
+}
+
 echo "starting initial quack server"
 start_server "$catalog_path" "$data_path" "$runtime_dir/quack-server-chaos.log"
 
@@ -293,7 +374,7 @@ if [[ "$ingest_status" -eq 0 ]]; then
   echo "ingest command succeeded after server kill; expected non-zero crash-and-replay signal" >&2
   exit 1
 fi
-if ! grep -Eq "fatal ledger batch handling error|Process failed.*ducklake-sink|remote DuckLake write batch" "$runtime_dir/ingest-before-kill.log"; then
+if ! grep -Eq "fatal ledger batch handling error|Process failed.*ducklake-sink|remote DuckLake write batch|to ingest service|ingest ack for ledger" "$runtime_dir/ingest-before-kill.log"; then
   echo "ingest command failed, but the log did not prove a ducklake-sink write failure" >&2
   tail -n 120 "$runtime_dir/ingest-before-kill.log" >&2 || true
   exit 1
@@ -303,12 +384,31 @@ echo "ingest failed as expected after server kill"
 echo "restarting quack server"
 start_server "$catalog_path" "$data_path" "$runtime_dir/quack-server-replay.log"
 
-echo "running replay command"
+echo "running replay command with concurrent maintenance"
 set +e
 start_command "$replay_cmd" "$runtime_dir/replay.log"
+# Run a full maintenance cycle (flush inlined data, merge files, expire
+# snapshots) while the replay pipeline is actively writing. The parity gates
+# below then prove maintenance is invisible to logical table contents: the
+# baseline catalog never runs maintenance, so its rows stay inlined while the
+# chaos catalog's rows are flushed to Parquet.
+sleep 3
+QUACK_TOKEN="$token" \
+QUACK_URI="$uri" \
+QUACK_DISABLE_SSL=true \
+RUN_ONCE=true \
+HEALTH_PORT=0 \
+bin/ducklake-maintenance >"$runtime_dir/maintenance-during-replay.log" 2>&1
+maintenance_status="$?"
 wait_command "$replay_timeout"
 replay_status="$?"
 set -e
+if [[ "$maintenance_status" -ne 0 ]]; then
+  echo "maintenance run during replay failed with status $maintenance_status" >&2
+  cat "$runtime_dir/maintenance-during-replay.log" >&2 || true
+  exit 1
+fi
+echo "maintenance cycle during active ingest succeeded"
 if [[ "$replay_status" -ne 0 && "$replay_status" -ne 124 ]]; then
   echo "replay command failed with status $replay_status" >&2
   tail -n 160 "$runtime_dir/replay.log" >&2 || true
@@ -318,8 +418,14 @@ if [[ "$replay_status" -eq 124 ]]; then
   echo "replay command reached ${replay_timeout}s; continuing to catalog checks after stopping the pipeline"
 fi
 
-if grep -ah "remote DuckLake write script" "$runtime_dir/ingest-before-kill.log" "$runtime_dir/replay.log" >"$runtime_dir/script-sizes.log" 2>/dev/null; then
-  echo "captured remote script size measurements in $runtime_dir/script-sizes.log"
+if [[ "$sink_mode" == "ingest-rpc" ]]; then
+  echo "skipping transport size gates for ingest-rpc mode (no staged parquet transport)"
+elif grep -ahE "remote DuckLake (write script|staged parquet)" "$runtime_dir/ingest-before-kill.log" "$runtime_dir/replay.log" >"$runtime_dir/script-sizes.log" 2>/dev/null; then
+  echo "captured remote transport size measurements in $runtime_dir/script-sizes.log"
+  check_transport_sizes
+elif [[ "$min_staged_mib" != "0" || "$max_script_kib" != "0" ]]; then
+  echo "failed to capture remote script size measurements" >&2
+  exit 1
 fi
 
 if [[ -n "$server_pid" ]] && kill -0 "$server_pid" 2>/dev/null; then
@@ -370,16 +476,6 @@ SELECT 'ledger_batches', count(*) FROM (
   (SELECT network_passphrase, ledger_sequence, closed_at_unix, schema_version, extraction_version, transaction_count, operation_count, bronze_row_count FROM baseline.ledger_batches
    EXCEPT ALL
    SELECT network_passphrase, ledger_sequence, closed_at_unix, schema_version, extraction_version, transaction_count, operation_count, bronze_row_count FROM chaos.ledger_batches)
-);
-INSERT INTO parity_diffs
-SELECT 'bronze_rows', count(*) FROM (
-  (SELECT network_passphrase, ledger_sequence, table_name, count(*) AS row_count FROM chaos.bronze_rows GROUP BY 1, 2, 3
-   EXCEPT ALL
-   SELECT network_passphrase, ledger_sequence, table_name, count(*) AS row_count FROM baseline.bronze_rows GROUP BY 1, 2, 3)
-  UNION ALL
-  (SELECT network_passphrase, ledger_sequence, table_name, count(*) AS row_count FROM baseline.bronze_rows GROUP BY 1, 2, 3
-   EXCEPT ALL
-   SELECT network_passphrase, ledger_sequence, table_name, count(*) AS row_count FROM chaos.bronze_rows GROUP BY 1, 2, 3)
 );
 INSERT INTO parity_diffs
 SELECT 'ingest_watermarks', count(*) FROM (
@@ -452,6 +548,33 @@ SQL
 .headers on
 .once $runtime_dir/parity-diffs.csv
 SELECT * FROM parity_diffs WHERE diff_count <> 0 ORDER BY table_name;
+
+CREATE TEMP TABLE gate_failures(check_name VARCHAR, observed BIGINT, details VARCHAR);
+INSERT INTO gate_failures
+SELECT 'transactions_row_v2_rows', 0, 'no transaction rows were written'
+WHERE NOT EXISTS (SELECT 1 FROM chaos.bronze.transactions_row_v2);
+INSERT INTO gate_failures
+SELECT 'transactions_row_v2_xdr_not_null', count(*), 'tx_envelope, tx_result, or tx_meta had NULL values'
+FROM chaos.bronze.transactions_row_v2
+WHERE tx_envelope IS NULL OR tx_result IS NULL OR tx_meta IS NULL
+HAVING count(*) > 0;
+INSERT INTO gate_failures
+SELECT 'transactions_row_v2_soroban_fields', 0, 'no transaction rows populated soroban_resources_instructions'
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM chaos.bronze.transactions_row_v2
+  WHERE soroban_resources_instructions IS NOT NULL
+);
+INSERT INTO gate_failures
+SELECT 'operations_row_v2_soroban_fields', 0, 'no operation rows populated soroban_operation and soroban_arguments_json'
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM chaos.bronze.operations_row_v2
+  WHERE soroban_operation IS NOT NULL
+    AND soroban_arguments_json IS NOT NULL
+);
+.once $runtime_dir/gate-failures.csv
+SELECT * FROM gate_failures ORDER BY check_name;
 SQL
 
   echo "comparing chaos and never-failed baseline tables"
@@ -462,6 +585,12 @@ SQL
     return 1
   fi
   echo "chaos and baseline tables match"
+  if [[ -s "$runtime_dir/gate-failures.csv" ]] && [[ "$(wc -l <"$runtime_dir/gate-failures.csv")" -gt 1 ]]; then
+    echo "catalog gate failures found:" >&2
+    cat "$runtime_dir/gate-failures.csv" >&2
+    return 1
+  fi
+  echo "typed/XDR/Soroban catalog gates passed"
 }
 
 if command -v duckdb >/dev/null 2>&1; then

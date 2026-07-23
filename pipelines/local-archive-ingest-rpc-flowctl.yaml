@@ -1,8 +1,8 @@
 apiVersion: flowctl/v1
 kind: Pipeline
 metadata:
-  name: local-archive-quack-ducklake
-  description: Local process pipeline from public Stellar archive to DuckLake through Quack.
+  name: local-archive-ingest-rpc
+  description: Local process pipeline from public Stellar archive into DuckLake through the BronzeIngestService gRPC path. Start quack-ducklake-server with INGEST_PORT=9495 (and DUCKLAKE_INLINE_ROW_LIMIT=256 for sub-400ms commits) first.
 
 spec:
   driver: process
@@ -47,11 +47,9 @@ spec:
       inputs: ["stellar-ledger-processor"]
       env:
         COMPONENT_ID: "ducklake-sink"
-        DUCKLAKE_MODE: "quack"
-        DUCKLAKE_STAGING_PATH: "ducklake/staging"
-        QUACK_URI: "quack:127.0.0.1:9494"
+        DUCKLAKE_MODE: "ingest-rpc"
+        INGEST_ENDPOINT: "127.0.0.1:9495"
         QUACK_TOKEN: "chaos_secret"
-        QUACK_DISABLE_SSL: "true"
         PORT: ":55273"
         HEALTH_PORT: "19283"
         ENABLE_FLOWCTL: "true"

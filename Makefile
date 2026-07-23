@@ -1,11 +1,11 @@
-.PHONY: build lint proto test test-local-pipeline test-quack-chaos validate-pipelines tidy clean
+.PHONY: build lint proto test test-local-pipeline test-quack-chaos test-ingest-chaos validate-pipelines validate-nomad docker-flowctl-runner tidy clean
 
 GO ?= go
 GOFMT ?= gofmt
 PROTOC ?= protoc
 CGO_ENABLED ?= 1
 
-COMPONENTS := stellar-ledger-processor jsonl-sink postgres-sink ducklake-sink quack-ducklake-server index-materializer ducklake-replica-sync
+COMPONENTS := stellar-ledger-processor jsonl-sink postgres-sink ducklake-sink quack-ducklake-server index-materializer ducklake-replica-sync ducklake-maintenance
 
 build:
 	@mkdir -p bin
@@ -30,8 +30,23 @@ test-local-pipeline:
 test-quack-chaos:
 	@scripts/quack-chaos-harness.sh
 
+test-ingest-chaos:
+	@QUACK_CHAOS_SINK_MODE=ingest-rpc scripts/quack-chaos-harness.sh
+
 validate-pipelines:
 	@scripts/validate-pipelines.sh
+
+validate-nomad:
+	@nomad fmt -check deploy/nomad/quack-ducklake-server.nomad
+	@nomad job validate deploy/nomad/quack-ducklake-server.nomad
+	@nomad fmt -check deploy/nomad/ducklake-maintenance.nomad
+	@nomad job validate deploy/nomad/ducklake-maintenance.nomad
+
+docker-flowctl-runner:
+	@for bin in flowctl raw-ledger-source stellar-ledger-processor ducklake-sink postgres-sink jsonl-sink index-materializer; do \
+		test -x bin/$$bin || (echo "missing bin/$$bin; build or copy it into bin/$$bin first" && exit 1); \
+	done
+	@docker build -f Dockerfile.flowctl-runner -t withobsrvr/obsrvr-flowctl-runner:latest .
 
 tidy:
 	@$(GO) mod tidy

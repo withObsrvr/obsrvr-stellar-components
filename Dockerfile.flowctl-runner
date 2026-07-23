@@ -1,0 +1,36 @@
+# Runtime image for managed Flow/flowctl Nomad jobs.
+#
+# This image intentionally copies prebuilt binaries from ./bin so it can bundle
+# flowctl plus allowlisted component binaries from multiple repos without
+# relying on Docker build-time access to sibling checkouts.
+#
+# Expected files before building:
+#   bin/flowctl
+#   bin/raw-ledger-source
+#   bin/stellar-ledger-processor
+#   bin/ducklake-sink
+#   bin/postgres-sink
+#   bin/jsonl-sink
+#   bin/index-materializer
+
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates tzdata \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY bin/flowctl /app/bin/flowctl
+COPY bin/raw-ledger-source /app/bin/raw-ledger-source
+COPY bin/stellar-ledger-processor /app/bin/stellar-ledger-processor
+COPY bin/ducklake-sink /app/bin/ducklake-sink
+COPY bin/postgres-sink /app/bin/postgres-sink
+COPY bin/jsonl-sink /app/bin/jsonl-sink
+COPY bin/index-materializer /app/bin/index-materializer
+
+RUN chmod +x /app/bin/*
+
+ENV PATH="/app/bin:${PATH}"
+
+ENTRYPOINT ["/app/bin/flowctl"]

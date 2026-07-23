@@ -12,6 +12,15 @@ beside ingestion, index materializers, and query APIs rather than inside
 - `DUCKLAKE_CATALOG_PATH`, default `ducklake/stellar.ducklake`
 - `DUCKLAKE_DATA_PATH`, default `ducklake/data`
 - `DUCKLAKE_ATTACH_NAME`, default `stellar_lake`
+- `DUCKLAKE_INLINE_ROW_LIMIT`, default `1024`; applied idempotently at
+  startup via `set_option('data_inlining_row_limit', …)`. Inserts below this
+  row count are inlined into the catalog instead of writing Parquet.
+  Inlined commits cost ~0.18ms/row (measured), so the limit tiers writes:
+  small tables inline, large tables take the fast Parquet path, and
+  `ducklake-maintenance` merges the resulting files. Measured commit latency
+  per mainnet ledger: `20000` → ~1.7s (all inlined), `1024` → ~0.55s
+  (~1 file/ledger), `256` → ~85ms (~7 files/ledger). `0` disables inlining;
+  a negative value leaves the catalog's persisted setting untouched.
 - `QUACK_URI`, default `quack:127.0.0.1:9494`
 - `QUACK_TOKEN`, required
 - `QUACK_HEALTH_ADDR`, default `:8088`; serves `/healthz`
@@ -27,6 +36,15 @@ beside ingestion, index materializers, and query APIs rather than inside
 - `QUACK_MEMORY_LIMIT`, default `4GB`
 - `QUACK_DUCKDB_THREADS`, default `4`
 - `QUACK_DUCKDB_PATH`, optional DuckDB local database path
+- `INGEST_PORT`, default empty (disabled); serves `BronzeIngestService` — a
+  gRPC stream that commits ledger batches in-process, one DuckLake
+  transaction per ledger with per-ledger acks, watermark-gated delete-skip
+  for fresh ledgers, and replay-on-uncertainty after failures. Rows stage
+  through native memory tables via the DuckDB Appender and land via
+  `INSERT..SELECT`, so data inlining applies. Authenticated with
+  `QUACK_TOKEN` via `x-ingest-token` metadata. For sub-400ms commits pair
+  with `DUCKLAKE_INLINE_ROW_LIMIT=256` and a 1–5 minute
+  `ducklake-maintenance` interval.
 
 ## Local Example
 
