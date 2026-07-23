@@ -342,7 +342,8 @@ func startIngestServer(ctx context.Context, db *sql.DB, cfg config) (func(), err
 	if err != nil {
 		return nil, err
 	}
-	listener, err := net.Listen("tcp", ":"+cfg.IngestPort)
+	ingestAddr := ":" + strings.TrimPrefix(cfg.IngestPort, ":")
+	listener, err := net.Listen("tcp", ingestAddr)
 	if err != nil {
 		srv.conn.Close()
 		return nil, fmt.Errorf("listen on ingest port %s: %w", cfg.IngestPort, err)

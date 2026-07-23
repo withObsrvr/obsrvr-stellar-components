@@ -122,6 +122,9 @@ func InsertDecodedRowsChunkedTxIn(tx *sql.Tx, decoded []DecodedRow, catalog stri
 				stmt.Close()
 			}
 			if err != nil {
+				if fullChunkStmt != nil {
+					fullChunkStmt.Close()
+				}
 				return fmt.Errorf("insert rows %d-%d for %s: %w", start, end-1, tableName, err)
 			}
 		}

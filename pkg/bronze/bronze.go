@@ -517,7 +517,6 @@ func QuoteIdentifier(value string) string {
 }
 
 func SplitSQLStatements(sqlText string) []string {
-	sqlText = strings.ReplaceAll(sqlText, "bronze.", "bronze.")
 	var statements []string
 	for _, stmt := range strings.Split(sqlText, ";") {
 		var cleaned []string
