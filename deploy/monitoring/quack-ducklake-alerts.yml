@@ -17,8 +17,9 @@ groups:
         annotations:
           summary: DuckLake ingest p99 has exceeded 400ms for 15 minutes
 
-      # These are the initial experimental limits from the production-gate
-      # plan. Keep the rules aligned when measured soft/hard limits change.
+      # Recovery/parity gates selected these 64MiB soft and 512MiB hard
+      # candidates for the disabled controller/cadence experiment. They are
+      # not a production controller policy or hard latency-SLO proof.
       - alert: DuckLakeCatalogWALAboveSoftLimit
         expr: min_over_time(obsrvr_ducklake_catalog_wal_bytes{nomad_service="quack-ducklake-metrics"}[15m]) >= 67108864
         for: 0m

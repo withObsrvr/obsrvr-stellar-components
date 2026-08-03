@@ -10,9 +10,10 @@ nix shell nixpkgs#prometheus.cli -c \
   promtool check rules deploy/monitoring/quack-ducklake-alerts.yml
 ```
 
-The 64 MiB WAL soft limit, 512 MiB hard limit, 10-minute checkpoint age, and
-four-second idle budget are experimental candidates from the production-gate
-plan. Change them only after the WAL-size gate produces retained evidence.
+The recovery/parity gates selected 64 MiB soft and 512 MiB hard WAL candidates
+for the disabled controller/cadence experiment. The 10-minute checkpoint age
+and four-second idle budget remain experimental. These values are not a
+production controller policy or hard latency-SLO proof.
 
 Every rule is scoped to
 `nomad_service="quack-ducklake-metrics"`. The Prometheus Nomad discovery

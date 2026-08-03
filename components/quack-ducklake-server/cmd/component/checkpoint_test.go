@@ -50,6 +50,9 @@ func TestCheckpointHoldsWriterCoordinatorAndRecordsSuccess(t *testing.T) {
 		coordinator.Unlock()
 		t.Fatal("writer coordinator was available while checkpoint was running")
 	}
+	if body := scrapeMetrics(t, registry); !strings.Contains(body, "obsrvr_ducklake_checkpoint_inflight 1\n") {
+		t.Fatalf("checkpoint inflight gauge was not set while execution blocked:\n%s", body)
+	}
 	close(release)
 	if err := <-done; err != nil {
 		t.Fatalf("checkpoint: %v", err)
@@ -59,6 +62,7 @@ func TestCheckpointHoldsWriterCoordinatorAndRecordsSuccess(t *testing.T) {
 	for _, want := range []string{
 		`obsrvr_ducklake_checkpoint_duration_seconds_count{result="success",trigger="manual"} 1`,
 		`obsrvr_ducklake_checkpoint_total{result="success",trigger="manual"} 1`,
+		"obsrvr_ducklake_checkpoint_inflight 0\n",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("metrics missing %q:\n%s", want, body)
@@ -92,6 +96,72 @@ func TestCheckpointDefersWhenIngestOwnsCoordinator(t *testing.T) {
 	body := scrapeMetrics(t, registry)
 	if !strings.Contains(body, `obsrvr_ducklake_checkpoint_deferred_total{reason="ingest_active"} 1`) {
 		t.Fatalf("deferred metric missing:\n%s", body)
+	}
+}
+
+func TestCheckpointRetriesAreBoundedAndRecoverHealth(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	metrics := newServerMetrics(registry, t.TempDir()+"/catalog.ducklake")
+	attempts := 0
+	controller := &checkpointController{
+		executor: checkpointExecFunc(func(context.Context, string, ...any) (sql.Result, error) {
+			attempts++
+			if attempts < 3 {
+				return nil, errors.New("transient checkpoint failure")
+			}
+			return nil, nil
+		}),
+		coordinator:        &writerCoordinator{},
+		metadataAttachName: "__ducklake_metadata_stellar_lake",
+		timeout:            time.Second,
+		metrics:            metrics,
+	}
+
+	_, err := controller.checkpointWithRetry(context.Background(), "manual", checkpointRetryPolicy{
+		MaxAttempts:    3,
+		InitialBackoff: time.Millisecond,
+		MaxBackoff:     2 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("checkpointWithRetry: %v", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("attempts = %d, want 3", attempts)
+	}
+	if !controller.Healthy() || controller.State().ConsecutiveFailures != 0 {
+		t.Fatalf("controller did not recover health: %+v", controller.State())
+	}
+	body := scrapeMetrics(t, registry)
+	for _, want := range []string{
+		`obsrvr_ducklake_checkpoint_total{result="error",trigger="manual"} 2`,
+		`obsrvr_ducklake_checkpoint_total{result="success",trigger="manual"} 1`,
+		`obsrvr_ducklake_checkpoint_deferred_total{reason="retry_backoff"} 2`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("retry metrics missing %q:\n%s", want, body)
+		}
+	}
+}
+
+func TestCheckpointRetriesStopAtAttemptLimit(t *testing.T) {
+	attempts := 0
+	controller := &checkpointController{
+		executor: checkpointExecFunc(func(context.Context, string, ...any) (sql.Result, error) {
+			attempts++
+			return nil, errors.New("persistent checkpoint failure")
+		}),
+		coordinator:        &writerCoordinator{},
+		metadataAttachName: "__ducklake_metadata_stellar_lake",
+	}
+	_, err := controller.checkpointWithRetry(context.Background(), "manual", checkpointRetryPolicy{MaxAttempts: 2})
+	if err == nil {
+		t.Fatal("persistent checkpoint failure returned nil")
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	if controller.Healthy() || controller.State().ConsecutiveFailures != 2 {
+		t.Fatalf("controller failure state = %+v, healthy=%t", controller.State(), controller.Healthy())
 	}
 }
 

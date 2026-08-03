@@ -94,8 +94,8 @@ server/sink retries:             0 / 0
 ```
 
 The gate verifies that ingest and manual checkpointing share one writer
-coordinator and that the checkpoint metric/file evidence agrees. It does not
-yet prove crash recovery or checkpoint duration at the candidate maximum WAL.
+coordinator and that the checkpoint metric/file evidence agrees. The later
+maximum-WAL scenarios below own parity and crash-recovery proof.
 
 Raw evidence: `/tmp/obsrvr-ducklake-manual-checkpoint-gate-20260803`.
 
@@ -117,11 +117,55 @@ zero gaps, and zero ingest retries. All observed durations pass the proposed
 `<3s` explicit-checkpoint target.
 
 The over-budget ingest counts are independent evidence that saturated ingest is
-not a hard 400ms contract. Full logical parity/resume and crash scenarios remain
-open.
+not a hard 400ms contract.
+
+The strengthened 64MiB and 512MiB runs additionally exported every logical
+table excluding volatile timestamp columns, compared sorted-row SHA-256
+fingerprints against no-checkpoint baselines, resumed with the next ledger, and
+rechecked the original range. Both had zero parity differences and 1,029/1,029
+contiguous watermarks at the hard candidate. The hard-candidate checkpoint saw
+`620,092,928` bytes and completed in `1.266759255s`.
 
 Raw evidence:
-`/tmp/obsrvr-ducklake-checkpoint-gate-{64,128,256,512}mib-20260803`.
+`/tmp/obsrvr-ducklake-checkpoint-gate-{64,128,256,512}mib-20260803`,
+`/tmp/obsrvr-ducklake-checkpoint-parity-{64,512}mib-20260803`.
+
+## Maximum-WAL recovery and interruption gates
+
+The 512MiB hard candidate was tested at an observed ~620MB catalog WAL:
+
+| Scenario | Observed WAL | Recovery | Parity differences | Partial commits | Final watermarks |
+|---|---:|---:|---:|---:|---:|
+| `SIGKILL` before checkpoint | 620,090,984 B | 5.058841s | 0 | 0 | 1,029 contiguous |
+| `SIGKILL` during checkpoint | 620,093,010 B | 4.440246s | 0 | 0 | 1,029 contiguous |
+
+The interruption harness waited for
+`obsrvr_ducklake_checkpoint_inflight 1`, proved the HTTP checkpoint request was
+interrupted rather than successful, sent `SIGKILL`, and restarted against the
+same files. WAL remained `620,093,059` bytes after recovery, proving the process
+was killed before checkpoint truncation. The next ledger then committed and all
+original logical fingerprints matched the no-failure baseline.
+
+Both scenarios pass the `<30s` recovery objective with zero gaps, parity
+differences, partial commits, or retries.
+
+Raw evidence:
+`/tmp/obsrvr-ducklake-crash-recovery-512mib-20260803` and
+`/tmp/obsrvr-ducklake-kill-checkpoint-512mib-20260803`.
+
+## Real checkpoint failure and bounded retry gate
+
+A real DuckDB catalog error was injected by targeting an absent metadata
+database. The endpoint made exactly three bounded attempts with two exponential
+backoffs, returned HTTP 500, cleared the inflight gauge, and left `/healthz` at
+503 across repeated checks. Restarting with the correct hidden metadata target
+completed one checkpoint, restored health 200, and reduced WAL from 182 bytes
+to zero.
+
+Raw evidence: `/tmp/obsrvr-ducklake-checkpoint-failure-gate-20260803`.
+
+These results select 64MiB soft and 512MiB hard candidates for the disabled
+idle-controller/cadence experiment. They do not prove a hard 400ms SLO.
 
 ## 1,000-ledger ingest-RPC chaos gate
 

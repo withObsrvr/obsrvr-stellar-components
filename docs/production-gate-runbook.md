@@ -162,7 +162,9 @@ The default target is 64 MiB. Override `CHECKPOINT_GATE_WAL_MIB`,
 `CHECKPOINT_GATE_LEDGER_COUNT`, `CHECKPOINT_GATE_TIMEOUT`, and
 `CHECKPOINT_GATE_RUNTIME_DIR` for later candidates. The harness requires the
 pre-checkpoint WAL to reach the target, triggers the coordinated metadata
-checkpoint, verifies WAL reduction, then checks watermark count/min/max/gaps.
+checkpoint, compares deterministic logical rows against a no-checkpoint
+baseline, resumes with the next ledger, and requires WAL reduction, zero parity
+differences, and contiguous watermarks.
 
 All explicit candidates passed on 2026-08-03:
 
@@ -180,8 +182,36 @@ ingest observations mean this saturated sweep is not a hard latency-SLO proof.
 Evidence directories follow
 `/tmp/obsrvr-ducklake-checkpoint-gate-<candidate>mib-20260803`.
 
-Logical baseline parity, post-checkpoint resume, and crash/kill-during-checkpoint
-scenarios remain open.
+The strengthened 64MiB and 512MiB gates also passed exact deterministic logical
+fingerprinting against no-checkpoint baselines and committed the next ledger
+with zero gaps. At the 512MiB candidate, an observed `620,092,928`-byte WAL
+checkpointed to zero in `1.267s`; all 1,029 watermarks were contiguous.
+
+## Crash and Checkpoint-Interruption Gates
+
+```bash
+make test-crash-recovery-gate
+make test-kill-checkpoint-gate
+make test-checkpoint-failure-gate
+```
+
+Override `RECOVERY_GATE_WAL_MIB` or `KILL_CHECKPOINT_GATE_WAL_MIB` to select a
+candidate. Both hard-limit 512MiB scenarios passed against observed ~620MB WALs:
+
+- pre-checkpoint `SIGKILL`: recovery and next-ledger resume in `5.059s`
+- `SIGKILL` after `obsrvr_ducklake_checkpoint_inflight` became `1`: recovery in
+  `4.440s`, followed by successful next-ledger resume
+- both: zero logical parity differences, partial commits, watermark gaps, or
+  retries across 1,029 contiguous watermarks
+
+The engine-level failure gate targets a deliberately absent metadata database.
+It requires HTTP 500, persistent health 503, exactly three bounded attempts and
+two retry backoffs, then restarts with the correct metadata target and requires
+a successful checkpoint, health 200, and WAL reduction.
+
+These results select 64MiB soft and 512MiB hard candidates for the idle
+controller/cadence experiment. They do not enable that controller or prove the
+hard 400ms SLO.
 
 ## Historical evidence (superseded SQL-literal transport)
 

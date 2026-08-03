@@ -114,11 +114,16 @@ The topology is not production-approved until these are complete:
    zero without racing ingest. The complete 64/128/256/512MiB explicit sweep
    passed; checkpoint duration scaled from 172ms at 67MB WAL to 1.369s at
    620MB, with every WAL reduced to zero and no watermark gaps or retries.
-   Latitude testnet now runs a healthy checkpoint-disabled digest-pinned
-   canary: its dedicated metrics target is `UP`, protocol targets are dropped,
-   279 DuckLake series are queryable, and all eight service-scoped rules are
-   healthy with zero firing. Grafana visual acceptance, logical parity/resume,
-   crash recovery, and any mainnet promotion remain open.
+   Strengthened 64/512MiB gates now prove deterministic logical parity and
+   next-ledger resume. At ~620MB WAL, pre-checkpoint crash recovery completed in
+   5.059s and synchronized kill-during-checkpoint recovery in 4.440s, both with
+   zero parity differences, partial commits, gaps, or retries. Real failure
+   injection proves three bounded attempts/two backoffs, persistent 503 health,
+   and successful recovery. Latitude testnet runs a healthy checkpoint-disabled
+   digest-pinned canary: its metrics target is `UP`, protocol targets are
+   dropped, and all eight scoped rules are healthy. The measured controller
+   candidates are 64MiB soft/512MiB hard. The controller and cadence-shaped SLO
+   gate remain disabled/open; Grafana and mainnet promotion are deferred.
 5. Upgrade from `flowctl-sdk v0.1.2` after the planned runtime delivery,
    backpressure, registration, and health fixes are released.
 

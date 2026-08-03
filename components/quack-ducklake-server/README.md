@@ -72,10 +72,11 @@ metrics. Catalog and `<catalog>.wal` byte gauges read file size at scrape time.
 Manual checkpoints use a dedicated DuckDB connection and the same writer
 coordinator as ingest. If ingest owns the coordinator, the endpoint returns
 HTTP 409 and records an `ingest_active` deferral rather than racing the ledger
-transaction. Successful and failed executions update checkpoint duration,
-result, and last-success metrics. A failed execution persists checkpoint error
-state and makes `/healthz` return 503 until a later successful checkpoint clears
-the failure.
+transaction. Successful and failed executions update checkpoint duration, inflight state,
+result, retry-backoff, and last-success metrics. Manual requests make at most
+three attempts with bounded exponential backoff. A failed execution persists
+checkpoint error state and makes `/healthz` return 503 until a later successful
+checkpoint clears the failure.
 
 The initial rules and Grafana dashboard live under `deploy/monitoring/`. The
 Nomad server template registers `quack-ducklake-metrics` on the health port so

@@ -13,7 +13,11 @@ start_ledger="${TELEMETRY_GATE_START_LEDGER:-62080000}"
 end_ledger="${TELEMETRY_GATE_END_LEDGER:-62080029}"
 timeout_seconds="${TELEMETRY_GATE_TIMEOUT:-180}"
 manual_checkpoint="${TELEMETRY_GATE_MANUAL_CHECKPOINT:-false}"
+checkpoint_enabled="${TELEMETRY_GATE_CHECKPOINT_ENABLED:-$manual_checkpoint}"
 minimum_wal_bytes="${TELEMETRY_GATE_MIN_WAL_BYTES:-0}"
+reset_runtime="${TELEMETRY_GATE_RESET_RUNTIME:-true}"
+server_shutdown="${TELEMETRY_GATE_SERVER_SHUTDOWN:-graceful}"
+hold_after_ingest="${TELEMETRY_GATE_HOLD_AFTER_INGEST:-false}"
 network="${TELEMETRY_GATE_NETWORK:-Public Global Stellar Network ; September 2015}"
 # This is an isolated local fixture token, not an operator credential. Keeping
 # it fixed prevents an ambient QUACK_TOKEN from being written into evidence.
@@ -79,6 +83,22 @@ if [[ "$manual_checkpoint" != "true" && "$manual_checkpoint" != "false" ]]; then
   echo "TELEMETRY_GATE_MANUAL_CHECKPOINT must be true or false" >&2
   exit 2
 fi
+if [[ "$checkpoint_enabled" != "true" && "$checkpoint_enabled" != "false" ]]; then
+  echo "TELEMETRY_GATE_CHECKPOINT_ENABLED must be true or false" >&2
+  exit 2
+fi
+if [[ "$reset_runtime" != "true" && "$reset_runtime" != "false" ]]; then
+  echo "TELEMETRY_GATE_RESET_RUNTIME must be true or false" >&2
+  exit 2
+fi
+if [[ "$hold_after_ingest" != "true" && "$hold_after_ingest" != "false" ]]; then
+  echo "TELEMETRY_GATE_HOLD_AFTER_INGEST must be true or false" >&2
+  exit 2
+fi
+if [[ "$server_shutdown" != "graceful" && "$server_shutdown" != "kill" ]]; then
+  echo "TELEMETRY_GATE_SERVER_SHUTDOWN must be graceful or kill" >&2
+  exit 2
+fi
 if (( expected <= 0 )); then
   echo "TELEMETRY_GATE_END_LEDGER must be >= TELEMETRY_GATE_START_LEDGER" >&2
   exit 2
@@ -92,7 +112,9 @@ for command in go curl awk grep stat flowctl; do
 done
 [[ -x bin/raw-ledger-source ]] || { echo "bin/raw-ledger-source is required" >&2; exit 2; }
 
-rm -rf "$runtime_dir"
+if [[ "$reset_runtime" == "true" ]]; then
+  rm -rf "$runtime_dir"
+fi
 mkdir -p "$runtime_dir" "$data_path" bin
 
 cat >"$pipeline_path" <<YAML
@@ -167,7 +189,11 @@ cleanup() {
     wait "$pipeline_pid" 2>/dev/null || true
   fi
   if [[ -n "$server_pid" ]] && kill -0 "$server_pid" 2>/dev/null; then
-    kill "$server_pid" 2>/dev/null || true
+    if [[ "$server_shutdown" == "kill" ]]; then
+      kill -KILL "$server_pid" 2>/dev/null || true
+    else
+      kill "$server_pid" 2>/dev/null || true
+    fi
     wait "$server_pid" 2>/dev/null || true
   fi
 }
@@ -210,6 +236,7 @@ CGO_ENABLED="${CGO_ENABLED:-1}" go build -o bin/quack-ducklake-server ./componen
 CGO_ENABLED="${CGO_ENABLED:-1}" go build -o bin/ducklake-sink ./components/ducklake-sink/cmd/component
 CGO_ENABLED="${CGO_ENABLED:-1}" go build -o bin/stellar-ledger-processor ./components/stellar-ledger-processor/cmd/component
 
+server_start_ns="$(date +%s%N)"
 QUACK_TOKEN="$token" \
 QUACK_URI="quack:127.0.0.1:$quack_port" \
 QUACK_HEALTH_ADDR="127.0.0.1:$server_health_port" \
@@ -219,7 +246,7 @@ QUACK_ENABLE_EXTERNAL_ACCESS=true \
 QUACK_DISABLED_FILESYSTEMS=none \
 DUCKDB_CHECKPOINT_THRESHOLD=1GB \
 DUCKLAKE_INLINE_ROW_LIMIT=256 \
-CHECKPOINT_ENABLED="$manual_checkpoint" \
+CHECKPOINT_ENABLED="$checkpoint_enabled" \
 CHECKPOINT_TIMEOUT=30s \
 CHECKPOINT_ADMIN_TOKEN="$token" \
 INGEST_PORT="$ingest_port" \
@@ -239,6 +266,8 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 curl -fsS "http://127.0.0.1:$server_health_port/healthz" >/dev/null
+server_healthy_ns="$(date +%s%N)"
+server_startup_seconds="$(awk -v start="$server_start_ns" -v healthy="$server_healthy_ns" 'BEGIN { printf "%.6f", (healthy - start) / 1000000000 }')"
 
 setsid flowctl run \
   --no-persistence \
@@ -273,6 +302,21 @@ if [[ "$completed" != true ]]; then
   tail -n 160 "$pipeline_log" >&2 || true
   tail -n 160 "$server_log" >&2 || true
   exit 1
+fi
+
+if [[ "$hold_after_ingest" == true ]]; then
+  cat >"$runtime_dir/after-ingest-ready.env" <<EOF
+server_pid=$server_pid
+server_startup_seconds=$server_startup_seconds
+health_port=$server_health_port
+EOF
+  while [[ ! -e "$runtime_dir/after-ingest-continue" ]]; do
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      echo "held telemetry server exited; ending synchronized gate"
+      exit 0
+    fi
+    sleep 0.01
+  done
 fi
 
 checkpoint_triggered=false
@@ -321,8 +365,14 @@ if [[ "$manual_checkpoint" == "true" ]]; then
   checkpoint_triggered=true
 fi
 
-server_log_acks="$(grep -c 'ingest committed ledger' "$server_log" || true)"
-sink_log_acks="$(grep -c 'ingest-rpc committed ledger' "$pipeline_log" || true)"
+# Metrics can become visible just before flowctl flushes the component log line.
+# Bound the reconciliation wait rather than racing a successful acknowledgement.
+for _ in $(seq 1 50); do
+  server_log_acks="$(grep -c 'ingest committed ledger' "$server_log" || true)"
+  sink_log_acks="$(grep -c 'ingest-rpc committed ledger' "$pipeline_log" || true)"
+  [[ "$server_log_acks" == "$expected" && "$sink_log_acks" == "$expected" ]] && break
+  sleep 0.1
+done
 server_success="$(metric_labeled_sum "$server_metrics" obsrvr_ducklake_ingest_batches_total 'result="success"')"
 server_errors="$(metric_labeled_sum "$server_metrics" obsrvr_ducklake_ingest_batches_total 'result="error"')"
 server_retries="$(metric_value "$server_metrics" obsrvr_ducklake_ingest_retries_total)"
@@ -380,6 +430,7 @@ assert_equal catalog_wal_gauge "$wal_metric" "$wal_stat"
 cat >"$summary" <<EOF
 start_ledger=$start_ledger
 end_ledger=$end_ledger
+server_startup_seconds=$server_startup_seconds
 expected_acknowledgements=$expected
 server_log_acknowledgements=$server_log_acks
 sink_log_acknowledgements=$sink_log_acks
