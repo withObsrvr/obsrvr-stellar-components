@@ -28,6 +28,7 @@ port_range_is_free() {
       return 1
     fi
   done
+  return 0
 }
 
 if [[ -n "$port_base" ]]; then
