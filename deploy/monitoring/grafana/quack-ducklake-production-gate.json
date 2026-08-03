@@ -1,0 +1,60 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Ingest phase p99",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [{"color": "green"}, {"color": "red", "value": 0.4}]}}, "overrides": []},
+      "targets": [{"expr": "histogram_quantile(0.99, sum by (le, phase) (rate(obsrvr_ducklake_ingest_phase_seconds_bucket[$__rate_interval])))", "legendFormat": "{{phase}}", "refId": "A"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Ingest total percentiles",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [{"color": "green"}, {"color": "red", "value": 0.4}]}}, "overrides": []},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (le) (rate(obsrvr_ducklake_ingest_phase_seconds_bucket{phase=\"total\"}[$__rate_interval])))", "legendFormat": "p50", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(obsrvr_ducklake_ingest_phase_seconds_bucket{phase=\"total\"}[$__rate_interval])))", "legendFormat": "p95", "refId": "B"},
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(obsrvr_ducklake_ingest_phase_seconds_bucket{phase=\"total\"}[$__rate_interval])))", "legendFormat": "p99", "refId": "C"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Catalog and WAL size",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+      "targets": [
+        {"expr": "obsrvr_ducklake_catalog_file_bytes", "legendFormat": "catalog", "refId": "A"},
+        {"expr": "obsrvr_ducklake_catalog_wal_bytes", "legendFormat": "WAL", "refId": "B"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Checkpoint duration",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "targets": [{"expr": "histogram_quantile(0.99, sum by (le, trigger, result) (rate(obsrvr_ducklake_checkpoint_duration_seconds_bucket[$__rate_interval])))", "legendFormat": "{{trigger}} {{result}}", "refId": "A"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Ingest retries, errors, and over-budget batches",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
+      "targets": [
+        {"expr": "rate(obsrvr_ducklake_ingest_retries_total[$__rate_interval])", "legendFormat": "retries", "refId": "A"},
+        {"expr": "sum(rate(obsrvr_ducklake_ingest_batches_total{result=\"error\"}[$__rate_interval]))", "legendFormat": "errors", "refId": "B"},
+        {"expr": "rate(obsrvr_ducklake_ingest_over_budget_total[$__rate_interval])", "legendFormat": "over budget", "refId": "C"}
+      ]
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["obsrvr", "ducklake", "production-gate"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "timezone": "browser",
+  "title": "Quack DuckLake Production Gate",
+  "uid": "obsrvr-ducklake-gate",
+  "version": 1
+}

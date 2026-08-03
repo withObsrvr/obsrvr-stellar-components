@@ -565,10 +565,14 @@ The Quack/replica topology may ship to production when:
 - [ ] Server refuses plaintext startup without explicit insecure opt-out;
       external access, filesystems, memory, and threads locked down.
 - [ ] Server liveness endpoint wired into the Nomad job spec.
-- [ ] Snapshot-expiry resync demo passes (Cycle 2 demo).
-- [ ] Schema-drift reconcile-or-fail demo passes (Cycle 2 demo).
-- [ ] No token material in replica checkpoint table or logs.
-- [x] Watermark gap query returns empty after a 1k-ledger backfill.
+- [x] Snapshot-expiry resync demo passes (Cycle 2 demo; live local two-Quack
+      gate 2026-08-03).
+- [x] Schema-drift reconcile-or-fail demo passes (Cycle 2 demo; live local
+      two-Quack gate 2026-08-03).
+- [x] No token material in replica checkpoint table or logs (live local
+      two-Quack gate 2026-08-03).
+- [x] Watermark gap query returns empty after a 1k-ledger backfill (ingest-RPC
+      gate rerun 2026-08-03).
 - [x] flowctl-sdk upgrade plan written (even if v0.1.3 not yet shipped).
 
 Local production-gate evidence and remaining run commands are captured in

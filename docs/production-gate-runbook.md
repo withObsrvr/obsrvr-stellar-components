@@ -1,7 +1,7 @@
 # Production Gate Runbook
 
-Date: 2026-07-02. Revised: 2026-07-23 (write-path rewrite: envelope removal,
-inline-first tiering + maintenance, Parquet-staged transport, BronzeIngestService).
+Date: 2026-07-02. Revised: 2026-08-03 (telemetry reconciliation, shared writer
+coordination, corrected metadata-WAL checkpoint target, and first 64MiB gate).
 
 This runbook turns the production-hardening plan gate into repeatable checks.
 It records which checks can run locally, which require the Latitude mainnet
@@ -68,7 +68,120 @@ replay-on-uncertainty, stream reset and retry, and byte-identical recovery.
 
 Performance reference for the ingest path (2026-07-23, local, 6-ledger run,
 `DUCKLAKE_INLINE_ROW_LIMIT=256`): 232–318ms per ledger server-side commit,
-zero watermark gaps, exact count parity, XDR enrichment intact.
+zero watermark gaps, exact count parity, XDR enrichment intact. The 1,000-ledger
+run on 2026-08-03 exposed synchronous DuckDB catalog auto-checkpoints as the
+primary source of multi-second tails. `DUCKDB_CHECKPOINT_THRESHOLD=1GB` is an
+interim mitigation; see `docs/ingest-latency-diagnosis-2026-08-03.md` before
+using the short-run numbers as a hard SLO.
+
+## Local Telemetry Reconciliation Gate
+
+Run a 30-ledger real-mainnet sample through the ingest RPC and scrape both
+processes before shutdown:
+
+```bash
+make test-telemetry-gate
+```
+
+Override the retained evidence directory, range, or timeout with
+`TELEMETRY_GATE_RUNTIME_DIR`, `TELEMETRY_GATE_START_LEDGER`,
+`TELEMETRY_GATE_END_LEDGER`, and `TELEMETRY_GATE_TIMEOUT`; the runtime
+directory must resolve beneath `/tmp`. The gate:
+
+1. builds and starts the server with the 1GB interim checkpoint threshold and
+   inline row limit 256
+2. runs real archive ledgers through processor, sink, and ingest RPC
+3. waits for the expected server last-ledger gauge and sink acknowledgement
+   histogram count
+4. scrapes server and sink `/metrics`
+5. requires every phase, total, server success, sink round trip, and both logs
+   to account for every requested ledger exactly once
+6. requires zero error batches and retries
+7. compares total histogram sum with the six phase sums using a bounded
+   request/ack-overhead tolerance
+8. compares catalog and WAL gauges byte-for-byte with `stat`
+
+Evidence captured 2026-08-03 for real mainnet ledgers `62080000`–`62080029`:
+all seven server histogram counts, both logs, server successes, and sink round
+trips were `30`; errors/retries and over-budget ledgers were zero; total server
+sum was `7.957392s` versus `7.952608s` across the six phases, leaving `4.785ms`
+(`0.060%`) unaccounted; catalog and WAL gauges exactly matched `12,288` and
+`10,621,253` bytes on disk. Raw evidence:
+`/tmp/obsrvr-ducklake-telemetry-gate-20260803`.
+
+This proves local metric accounting. A real Nomad allocation and target
+Prometheus/Grafana rule import remain required before the scrape/dashboard/alert
+acceptance item is closed. The Latitude mainnet/testnet Prometheus pack working
+tree now explicitly drops the Quack and ingest protocol services, leaving the
+health-port metrics service eligible. Mainnet's scrape timeout was corrected
+from 10 seconds to match its 5-second interval. Both packs now render and pass
+full Prometheus 3.13.1 configuration validation.
+
+## Coordinated Manual Checkpoint Gate
+
+Run the real-ledger telemetry gate with the shared writer coordinator and
+manual checkpoint enabled:
+
+```bash
+make test-manual-checkpoint-gate
+```
+
+The server enables `POST /admin/checkpoint` only when `CHECKPOINT_ENABLED=true`
+and `CHECKPOINT_ADMIN_TOKEN` is configured. The request uses a bearer token;
+never place that token in a jobspec or evidence file. If ingest owns the writer
+coordinator, the endpoint returns HTTP 409 and records an `ingest_active`
+deferral.
+
+The gate waits for all ingest acknowledgements, records pre-checkpoint WAL
+bytes, triggers one coordinated checkpoint, and requires success metrics plus a
+strict WAL reduction. It targets the hidden DuckDB metadata attachment:
+
+```sql
+CHECKPOINT __ducklake_metadata_stellar_lake;
+```
+
+Do not substitute `CHECKPOINT stellar_lake`: DuckLake maps that logical
+attachment checkpoint to maintenance including physical cleanup, rather than a
+metadata-WAL checkpoint.
+
+Evidence captured 2026-08-03 for 30 real mainnet ledgers: one successful manual
+checkpoint completed in `54.984ms`, reduced WAL from `10,621,220` bytes to zero,
+and left a `10,498,048`-byte catalog. All 30 ingest acknowledgements remained
+accounted for with zero retries/errors. Raw evidence:
+`/tmp/obsrvr-ducklake-manual-checkpoint-gate-20260803`.
+
+## Maximum-WAL Explicit Checkpoint Candidates
+
+Run the first candidate gate:
+
+```bash
+make test-checkpoint-gate
+```
+
+The default target is 64 MiB. Override `CHECKPOINT_GATE_WAL_MIB`,
+`CHECKPOINT_GATE_LEDGER_COUNT`, `CHECKPOINT_GATE_TIMEOUT`, and
+`CHECKPOINT_GATE_RUNTIME_DIR` for later candidates. The harness requires the
+pre-checkpoint WAL to reach the target, triggers the coordinated metadata
+checkpoint, verifies WAL reduction, then checks watermark count/min/max/gaps.
+
+All explicit candidates passed on 2026-08-03:
+
+| Candidate | Observed WAL | Duration | Ledgers | Gaps | Ingest >400ms |
+|---|---:|---:|---:|---:|---:|
+| 64 MiB | 67,307,196 B | 0.172s | 132 | 0 | 1 |
+| 128 MiB | 153,589,657 B | 0.372s | 260 | 0 | 2 |
+| 256 MiB | 300,343,110 B | 0.700s | 516 | 0 | 25 |
+| 512 MiB | 620,088,779 B | 1.369s | 1,028 | 0 | 30 |
+
+Every checkpoint reduced WAL to zero with no checkpoint errors or ingest
+retries, and watermark count/min/max/gaps matched. The largest candidate remains
+below the proposed three-second checkpoint target. Independent over-budget
+ingest observations mean this saturated sweep is not a hard latency-SLO proof.
+Evidence directories follow
+`/tmp/obsrvr-ducklake-checkpoint-gate-<candidate>mib-20260803`.
+
+Logical baseline parity, post-checkpoint resume, and crash/kill-during-checkpoint
+scenarios remain open.
 
 ## Historical evidence (superseded SQL-literal transport)
 
@@ -135,6 +248,13 @@ which the maintenance job's `MAINTENANCE_INTERVAL=2m` merges. Widen both
 together, never independently. `SNAPSHOT_RETENTION` (48h) must exceed
 replica-sync's worst-case checkpoint lag or replicas fall back to full resync.
 
+Container packaging uses `gcr.io/distroless/cc-debian12`; the plain distroless
+base lacks `libstdc++.so.6` required by DuckDB's CGO binary. The Nomad template
+also sets `QUACK_ALLOW_OTHER_HOSTNAME=true` because its Quack URI binds
+`0.0.0.0`; this remains guarded by `QUACK_INSECURE=true`. A local server image
+smoke passed health, metrics, and authenticated manual checkpointing, but no
+immutable registry image has been published from this working tree.
+
 Current Quack beta limitation: file-backed DuckLake catalogs require explicit
 `QUACK_INSECURE=true`, `QUACK_DISABLE_SSL=true`,
 `QUACK_ENABLE_EXTERNAL_ACCESS=true`, and `QUACK_DISABLED_FILESYSTEMS=none`.
@@ -151,8 +271,8 @@ go test ./components/ducklake-replica-sync/cmd/component
 go test ./components/index-materializer/cmd/component
 ```
 
-Production-gate integration still requires live primary and target Quack
-endpoints:
+The live two-Quack integration gate was run locally on 2026-08-03 with real
+primary and serving Quack endpoints. To repeat it:
 
 1. run replica sync once to establish checkpoints
 2. expire primary snapshots past a table checkpoint
@@ -176,6 +296,23 @@ LEDGER_BATCH_SIZE=1000 \
 bin/ducklake-replica-sync
 ```
 
+Evidence captured 2026-08-03:
+
+- two source tables established target checkpoints
+- expiring snapshots behind both checkpoints triggered bounded full resync for
+  both tables and advanced both checkpoints
+- source/target `EXCEPT ALL` row differences were zero after recovery
+- adding source-only column `drift_probe` failed with the exact schema diff while
+  the later source table still advanced, proving per-table isolation
+- neither Quack token appeared in captured logs or persisted checkpoint output
+- the run exposed DuckLake's exact missing-snapshot message (`No snapshot found
+  at version N`); the classifier was fixed and that engine message is now a
+  regression test
+
+Evidence directory: `/tmp/obsrvr-two-quack-replica-gate-20260803`. The retained
+summary for this and the 1,000-ledger ingest gate is
+`docs/production-gate-evidence-2026-08-03.md`.
+
 Note: inlined (not-yet-flushed) rows are visible to `table_changes` — verified
 2026-07-23 — so replica freshness does not depend on maintenance cadence.
 
@@ -189,9 +326,24 @@ Note: inlined (not-yet-flushed) rows are visible to `table_changes` — verified
   passed.
 - Typed XDR/Soroban shape: passed 2026-07-23.
 - Watermark gap query: passed 2026-07-23.
-- Nomad liveness wiring: both jobs validated as repo templates; not yet
-  applied to the prod infra repo.
-- Replica snapshot-expiry/schema-drift/token-redaction demos: not yet run
-  against live primary/target Quack endpoints.
-- 1k-ledger backfill gap query: passed 2026-07-05 (pre-rewrite transport);
-  re-run against the ingest-rpc path before shipping.
+- Local Workstream 1 telemetry reconciliation: passed 2026-08-03 for 30 real
+  mainnet ledgers; all acknowledgement/histogram counts matched, phase sums
+  reconciled within 0.060%, and catalog/WAL gauges matched `stat` exactly.
+- Coordinated manual checkpoint: passed 2026-08-03; the shared writer
+  coordinator kept checkpointing off active ingest, and the corrected hidden
+  metadata checkpoint reduced a 10.6MB WAL to zero in 54.984ms.
+- Explicit WAL candidate sweep: 64/128/256/512MiB candidates passed; observed
+  checkpoint duration remained below 1.37s through a 620MB WAL, with every WAL
+  reduced to zero and no watermark gaps/retries. Logical parity/resume and
+  crash recovery remain open.
+- Nomad liveness and metrics wiring: jobs validate as repo templates; not yet
+  applied to the prod infra repo or scraped by the target Prometheus stack.
+- Replica snapshot-expiry/schema-drift/token-redaction demos: passed 2026-08-03
+  against live local primary/target Quack endpoints; source/target row diffs
+  were zero after full-resync recovery.
+- 1k-ledger ingest-RPC chaos/replay gate: passed 2026-08-03 for ledgers
+  `62080000`–`62080999`; both replay and baseline committed 1,000 ledgers,
+  watermark count/min/max matched the requested range, gap and parity results
+  were empty, and typed gates passed. Evidence:
+  `/tmp/obsrvr-ingest-rpc-1k-20260803`; retained summary:
+  `docs/production-gate-evidence-2026-08-03.md`.

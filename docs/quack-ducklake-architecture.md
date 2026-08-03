@@ -23,9 +23,12 @@ It should not live inside `stellar-query-api` or `obsrvr-gateway`:
 raw-ledger-source
   -> stellar-ledger-processor
   -> ducklake-sink
-       DUCKLAKE_MODE=quack
-       QUACK_URI=quack:quack-ducklake-server:9494
+       DUCKLAKE_MODE=ingest-rpc
+       INGEST_ENDPOINT=quack-ducklake-server:9495
+       -> ordered BronzeIngestService stream
+          -> quack-ducklake-server commits one ledger transaction
 
+# Quack remains the server-side SQL/operations surface:
 index-materializer
   INDEX_NAME=tx_hash_index
   -> server-side range rebuild through Quack
@@ -110,6 +113,10 @@ Recommended shape:
 Derived index tables may live in a read/serving replica, but they should not be
 treated as authoritative state. Their correctness should come from replaying
 primary DuckLake snapshots or ledger ranges.
+
+The sink's `DUCKLAKE_MODE=quack` staged-Parquet transport remains available as
+a fallback. The preferred production ingest path is `ingest-rpc`, because it
+avoids client-side DuckDB staging and commits inside the catalog-owning process.
 
 `ducklake-replica-sync` is the first component for this pattern. It keeps its
 own per-table checkpoints in the target DuckLake, discovers changed ledgers with

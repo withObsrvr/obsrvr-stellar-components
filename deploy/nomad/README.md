@@ -1,5 +1,14 @@
 # Nomad Flowctl Runner Jobs
 
+## DuckLake production-gate monitoring
+
+`quack-ducklake-server.nomad` registers a dedicated
+`quack-ducklake-metrics` service on the health port with `/metrics` as its HTTP
+check. Initial Prometheus alert rules and a Grafana dashboard are in
+`deploy/monitoring/`. The WAL alert thresholds are the experimental 64 MiB soft
+and 512 MiB hard candidates; update the rules after the maximum-WAL gate selects
+production limits.
+
 These jobs test the managed Flow runtime shape where Nomad schedules one
 allocation and `flowctl run` manages the pipeline components inside that
 allocation.

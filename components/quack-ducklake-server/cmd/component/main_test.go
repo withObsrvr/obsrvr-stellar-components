@@ -3,8 +3,14 @@ package main
 import (
 	"context"
 	"net"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func TestValidateConfigRequiresExplicitInsecureForPlaintext(t *testing.T) {
@@ -119,6 +125,27 @@ func TestInitStatementsAttachCatalogBeforeLockdown(t *testing.T) {
 	}
 }
 
+func TestConfigDerivesHiddenDuckLakeMetadataAttachName(t *testing.T) {
+	t.Setenv("DUCKLAKE_ATTACH_NAME", "stellar-lake")
+	t.Setenv("DUCKLAKE_METADATA_ATTACH_NAME", "")
+	cfg := configFromEnv()
+	if cfg.AttachName != "stellar_lake" {
+		t.Fatalf("attach name = %q", cfg.AttachName)
+	}
+	if cfg.MetadataAttachName != "__ducklake_metadata_stellar_lake" {
+		t.Fatalf("metadata attach name = %q", cfg.MetadataAttachName)
+	}
+}
+
+func TestInitStatementsApplyCheckpointThreshold(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.CheckpointThreshold = "1GB"
+	joined := strings.Join(initStatements(cfg, "/tmp/duckdb-home"), "\n")
+	if !strings.Contains(joined, "SET checkpoint_threshold='1GB'") {
+		t.Fatalf("init statements did not apply checkpoint threshold:\n%s", joined)
+	}
+}
+
 func TestLockConfigurationStatement(t *testing.T) {
 	if got := lockConfigurationStatement(); got != "SET lock_configuration=true" {
 		t.Fatalf("lockConfigurationStatement = %q", got)
@@ -156,7 +183,7 @@ func TestStartHealthServerReturnsBindError(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = listener.Close() })
 
-	server, err := startHealthServer(context.Background(), listener.Addr().String(), nil, "stellar_lake", "")
+	server, err := startHealthServer(context.Background(), listener.Addr().String(), nil, "stellar_lake", "", nil, nil, "")
 	if err == nil {
 		if server != nil {
 			_ = server.Close()
@@ -168,23 +195,79 @@ func TestStartHealthServerReturnsBindError(t *testing.T) {
 	}
 }
 
+func TestMetricsUseIsolatedRegistryAndExposeFileGauges(t *testing.T) {
+	catalogPath := filepath.Join(t.TempDir(), "catalog.ducklake")
+	if err := os.WriteFile(catalogPath, []byte("catalog-bytes"), 0o600); err != nil {
+		t.Fatalf("write catalog fixture: %v", err)
+	}
+	if err := os.WriteFile(catalogPath+".wal", []byte("wal"), 0o600); err != nil {
+		t.Fatalf("write WAL fixture: %v", err)
+	}
+
+	registry := prometheus.NewRegistry()
+	metrics := newServerMetrics(registry, catalogPath)
+	srv := &ingestServer{metrics: metrics}
+	srv.observeAcknowledged(123, false, ingestPhaseDurations{
+		decode:   10 * time.Millisecond,
+		staging:  20 * time.Millisecond,
+		preface:  30 * time.Millisecond,
+		transfer: 40 * time.Millisecond,
+		commit:   50 * time.Millisecond,
+		cleanup:  5 * time.Millisecond,
+	}, 450*time.Millisecond)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest("GET", "/metrics", nil)
+	newServerHTTPHandler(nil, "stellar_lake", "", registry, nil, "").ServeHTTP(recorder, request)
+	if recorder.Code != 200 {
+		t.Fatalf("metrics status = %d, want 200", recorder.Code)
+	}
+	body := recorder.Body.String()
+	for _, want := range []string{
+		`obsrvr_ducklake_ingest_phase_seconds_count{phase="decode"} 1`,
+		`obsrvr_ducklake_ingest_phase_seconds_count{phase="total"} 1`,
+		`obsrvr_ducklake_ingest_batches_total{replayed="false",result="success"} 1`,
+		`obsrvr_ducklake_ingest_over_budget_total 1`,
+		`obsrvr_ducklake_ingest_last_ledger 123`,
+		`obsrvr_ducklake_checkpoint_duration_seconds_count{result="success",trigger="idle"} 0`,
+		`obsrvr_ducklake_checkpoint_total{result="error",trigger="manual"} 0`,
+		`obsrvr_ducklake_checkpoint_deferred_total{reason="ingest_active"} 0`,
+		`obsrvr_ducklake_checkpoint_last_success_timestamp_seconds 0`,
+		`obsrvr_ducklake_catalog_file_bytes 13`,
+		`obsrvr_ducklake_catalog_wal_bytes 3`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics missing %q:\n%s", want, body)
+		}
+	}
+
+	// A second complete collector set can be registered independently. Using
+	// the package-global registry would panic here and leak collectors across tests.
+	newServerMetrics(prometheus.NewRegistry(), catalogPath)
+}
+
 func validTestConfig() config {
 	return config{
-		CatalogPath:         "/tmp/catalog.ducklake",
-		DataPath:            "/tmp/data",
-		AttachName:          "stellar_lake",
-		URI:                 "quack:127.0.0.1:9494",
-		Token:               "secret",
-		HealthAddr:          ":8088",
-		AllowOtherHostname:  false,
-		DisableSSL:          false,
-		Insecure:            false,
-		EnableExternal:      false,
-		DisabledFilesystems: "LocalFileSystem",
-		LockConfiguration:   true,
-		MemoryLimit:         "4GB",
-		Threads:             4,
-		InlineRowLimit:      1024,
+		CatalogPath:          "/tmp/catalog.ducklake",
+		DataPath:             "/tmp/data",
+		AttachName:           "stellar_lake",
+		MetadataAttachName:   "__ducklake_metadata_stellar_lake",
+		URI:                  "quack:127.0.0.1:9494",
+		Token:                "secret",
+		HealthAddr:           ":8088",
+		AllowOtherHostname:   false,
+		DisableSSL:           false,
+		Insecure:             false,
+		EnableExternal:       false,
+		DisabledFilesystems:  "LocalFileSystem",
+		LockConfiguration:    true,
+		MemoryLimit:          "4GB",
+		Threads:              4,
+		CheckpointThreshold:  "",
+		CheckpointEnabled:    false,
+		CheckpointTimeout:    30 * time.Second,
+		CheckpointAdminToken: "",
+		InlineRowLimit:       1024,
 	}
 }
 

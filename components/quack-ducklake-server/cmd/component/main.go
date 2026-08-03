@@ -17,6 +17,8 @@ import (
 	"time"
 
 	_ "github.com/duckdb/duckdb-go/v2"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
@@ -27,51 +29,63 @@ func main() {
 }
 
 type config struct {
-	DBPath              string
-	CatalogPath         string
-	DataPath            string
-	AttachName          string
-	URI                 string
-	Token               string
-	HealthAddr          string
-	AllowOtherHostname  bool
-	DisableSSL          bool
-	Insecure            bool
-	EnableExternal      bool
-	DisabledFilesystems string
-	LockConfiguration   bool
-	MemoryLimit         string
-	Threads             int
-	InlineRowLimit      int
-	IngestPort          string
+	DBPath               string
+	CatalogPath          string
+	DataPath             string
+	AttachName           string
+	MetadataAttachName   string
+	URI                  string
+	Token                string
+	HealthAddr           string
+	AllowOtherHostname   bool
+	DisableSSL           bool
+	Insecure             bool
+	EnableExternal       bool
+	DisabledFilesystems  string
+	LockConfiguration    bool
+	MemoryLimit          string
+	Threads              int
+	CheckpointThreshold  string
+	CheckpointEnabled    bool
+	CheckpointTimeout    time.Duration
+	CheckpointAdminToken string
+	InlineRowLimit       int
+	IngestPort           string
 }
 
 func configFromEnv() config {
 	insecureMode := getenvBool("QUACK_INSECURE", false)
+	attachName := sanitizeIdentifier(getenv("DUCKLAKE_ATTACH_NAME", "stellar_lake"))
+	metadataAttachName := sanitizeIdentifier(getenv("DUCKLAKE_METADATA_ATTACH_NAME", "__ducklake_metadata_"+attachName))
 	return config{
-		DBPath:              getenv("QUACK_DUCKDB_PATH", ""),
-		CatalogPath:         getenv("DUCKLAKE_CATALOG_PATH", "ducklake/stellar.ducklake"),
-		DataPath:            getenv("DUCKLAKE_DATA_PATH", "ducklake/data"),
-		AttachName:          sanitizeIdentifier(getenv("DUCKLAKE_ATTACH_NAME", "stellar_lake")),
-		URI:                 getenv("QUACK_URI", "quack:127.0.0.1:9494"),
-		Token:               getenv("QUACK_TOKEN", ""),
-		HealthAddr:          getenv("QUACK_HEALTH_ADDR", ":8088"),
-		AllowOtherHostname:  getenvBool("QUACK_ALLOW_OTHER_HOSTNAME", false),
-		DisableSSL:          insecureMode || getenvBool("QUACK_DISABLE_SSL", false),
-		Insecure:            insecureMode,
-		EnableExternal:      getenvBool("QUACK_ENABLE_EXTERNAL_ACCESS", false),
-		DisabledFilesystems: getenv("QUACK_DISABLED_FILESYSTEMS", "LocalFileSystem"),
-		LockConfiguration:   getenvBool("QUACK_LOCK_CONFIGURATION", true),
-		MemoryLimit:         getenv("QUACK_MEMORY_LIMIT", "4GB"),
-		Threads:             getenvInt("QUACK_DUCKDB_THREADS", 4),
+		DBPath:               getenv("QUACK_DUCKDB_PATH", ""),
+		CatalogPath:          getenv("DUCKLAKE_CATALOG_PATH", "ducklake/stellar.ducklake"),
+		DataPath:             getenv("DUCKLAKE_DATA_PATH", "ducklake/data"),
+		AttachName:           attachName,
+		MetadataAttachName:   metadataAttachName,
+		URI:                  getenv("QUACK_URI", "quack:127.0.0.1:9494"),
+		Token:                getenv("QUACK_TOKEN", ""),
+		HealthAddr:           getenv("QUACK_HEALTH_ADDR", ":8088"),
+		AllowOtherHostname:   getenvBool("QUACK_ALLOW_OTHER_HOSTNAME", false),
+		DisableSSL:           insecureMode || getenvBool("QUACK_DISABLE_SSL", false),
+		Insecure:             insecureMode,
+		EnableExternal:       getenvBool("QUACK_ENABLE_EXTERNAL_ACCESS", false),
+		DisabledFilesystems:  getenv("QUACK_DISABLED_FILESYSTEMS", "LocalFileSystem"),
+		LockConfiguration:    getenvBool("QUACK_LOCK_CONFIGURATION", true),
+		MemoryLimit:          getenv("QUACK_MEMORY_LIMIT", "4GB"),
+		Threads:              getenvInt("QUACK_DUCKDB_THREADS", 4),
+		CheckpointThreshold:  getenv("DUCKDB_CHECKPOINT_THRESHOLD", ""),
+		CheckpointEnabled:    getenvBool("CHECKPOINT_ENABLED", false),
+		CheckpointTimeout:    getenvDuration("CHECKPOINT_TIMEOUT", 30*time.Second),
+		CheckpointAdminToken: getenv("CHECKPOINT_ADMIN_TOKEN", ""),
 		// Measured 2026-07-23: inlined commits cost ~0.18ms/row in the
 		// catalog database, so bulk inlining is slow — limit 20000 gave
 		// ~1.7s commits, 1024 ~0.55s (~1 parquet file/ledger), 256 ~85ms
 		// (~7 files/ledger, merged by ducklake-maintenance). 1024 balances
 		// commit latency against file churn; tune with the maintenance
 		// interval.
-		InlineRowLimit:      getenvInt("DUCKLAKE_INLINE_ROW_LIMIT", 1024),
-		IngestPort:          getenv("INGEST_PORT", ""),
+		InlineRowLimit: getenvInt("DUCKLAKE_INLINE_ROW_LIMIT", 1024),
+		IngestPort:     getenv("INGEST_PORT", ""),
 	}
 }
 
@@ -95,11 +109,14 @@ func run(ctx context.Context, cfg config) error {
 		return fmt.Errorf("open DuckDB: %w", err)
 	}
 	defer db.Close()
-	// The ingest service holds a dedicated second connection; everything else
-	// (init, health, quack_stop) shares the first.
+	// Ingest and explicit checkpointing each hold a dedicated connection;
+	// everything else (init, health, quack_stop) shares the base pool slot.
 	poolSize := 1
 	if cfg.IngestPort != "" {
-		poolSize = 2
+		poolSize++
+	}
+	if cfg.CheckpointEnabled {
+		poolSize++
 	}
 	db.SetMaxOpenConns(poolSize)
 	db.SetMaxIdleConns(poolSize)
@@ -113,13 +130,30 @@ func run(ctx context.Context, cfg config) error {
 		}
 	}
 
-	stopIngest, err := startIngestServer(sigCtx, db, cfg)
+	registry := prometheus.NewRegistry()
+	metrics := newServerMetrics(registry, cfg.CatalogPath)
+	coordinator := &writerCoordinator{}
+
+	var checkpoints *checkpointController
+	if cfg.CheckpointEnabled {
+		checkpoints, err = newCheckpointController(sigCtx, db, cfg.AttachName, cfg.MetadataAttachName, cfg.CheckpointTimeout, coordinator, metrics)
+		if err != nil {
+			return fmt.Errorf("start checkpoint controller: %w", err)
+		}
+		defer func() {
+			if err := checkpoints.Close(); err != nil {
+				log.Printf("checkpoint connection close failed: %v", err)
+			}
+		}()
+	}
+
+	stopIngest, err := startIngestServer(sigCtx, db, cfg, coordinator, metrics)
 	if err != nil {
 		return fmt.Errorf("start ingest server: %w", err)
 	}
 	defer stopIngest()
 
-	healthServer, err := startHealthServer(sigCtx, cfg.HealthAddr, db, cfg.AttachName, cfg.URI)
+	healthServer, err := startHealthServer(sigCtx, cfg.HealthAddr, db, cfg.AttachName, cfg.URI, registry, checkpoints, cfg.CheckpointAdminToken)
 	if err != nil {
 		return fmt.Errorf("start health server: %w", err)
 	}
@@ -182,6 +216,12 @@ func validateConfig(cfg config) error {
 	if cfg.Threads <= 0 {
 		return fmt.Errorf("QUACK_DUCKDB_THREADS must be positive")
 	}
+	if cfg.CheckpointTimeout <= 0 {
+		return fmt.Errorf("CHECKPOINT_TIMEOUT must be positive")
+	}
+	if cfg.CheckpointEnabled && cfg.CheckpointAdminToken == "" {
+		return fmt.Errorf("CHECKPOINT_ADMIN_TOKEN is required when CHECKPOINT_ENABLED=true")
+	}
 	return nil
 }
 
@@ -208,6 +248,12 @@ func initStatements(cfg config, duckDBHome string) []string {
 			"CALL %s.set_option('data_inlining_row_limit', '%d')",
 			cfg.AttachName,
 			cfg.InlineRowLimit,
+		))
+	}
+	if cfg.CheckpointThreshold != "" {
+		stmts = append(stmts, fmt.Sprintf(
+			"SET checkpoint_threshold='%s'",
+			escapeSQLString(cfg.CheckpointThreshold),
 		))
 	}
 	return append(stmts, lockdownStatements(cfg)...)
@@ -242,10 +288,33 @@ func serveSQL(cfg config) string {
 	)
 }
 
-func startHealthServer(ctx context.Context, addr string, db *sql.DB, attachName, quackURI string) (*http.Server, error) {
+func startHealthServer(ctx context.Context, addr string, db *sql.DB, attachName, quackURI string, gatherer prometheus.Gatherer, checkpoints *checkpointController, checkpointAdminToken string) (*http.Server, error) {
 	if strings.TrimSpace(addr) == "" {
 		return nil, nil
 	}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen on %s: %w", addr, err)
+	}
+	server := &http.Server{Handler: newServerHTTPHandler(db, attachName, quackURI, gatherer, checkpoints, checkpointAdminToken)}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			log.Printf("health server shutdown failed: %v", err)
+		}
+	}()
+	go func() {
+		log.Printf("health and metrics endpoint listening on %s", addr)
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("health endpoint failed: %v", err)
+		}
+	}()
+	return server, nil
+}
+
+func newServerHTTPHandler(db *sql.DB, attachName, quackURI string, gatherer prometheus.Gatherer, checkpoints *checkpointController, checkpointAdminToken string) http.Handler {
 	quackAddr := quackTCPAddress(quackURI)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -264,29 +333,20 @@ func startHealthServer(ctx context.Context, addr string, db *sql.DB, attachName,
 			}
 			_ = conn.Close()
 		}
+		if checkpoints != nil && !checkpoints.Healthy() {
+			http.Error(w, "unhealthy", http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
 	})
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, fmt.Errorf("listen on %s: %w", addr, err)
+	if gatherer != nil {
+		mux.Handle("/metrics", promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{}))
 	}
-	server := &http.Server{Handler: mux}
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			log.Printf("health server shutdown failed: %v", err)
-		}
-	}()
-	go func() {
-		log.Printf("health endpoint listening on %s", addr)
-		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("health endpoint failed: %v", err)
-		}
-	}()
-	return server, nil
+	if checkpoints != nil {
+		mux.Handle("/admin/checkpoint", checkpoints.manualHTTPHandler(checkpointAdminToken))
+	}
+	return mux
 }
 
 func healthQuery(attachName string) string {
@@ -319,6 +379,18 @@ func getenvInt(key string, fallback int) int {
 	value, err := strconv.Atoi(raw)
 	if err != nil {
 		log.Fatalf("%s must be an integer, got %q", key, raw)
+	}
+	return value
+}
+
+func getenvDuration(key string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil {
+		log.Fatalf("%s must be a duration, got %q", key, raw)
 	}
 	return value
 }
