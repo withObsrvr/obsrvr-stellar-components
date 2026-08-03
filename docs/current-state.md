@@ -104,20 +104,21 @@ The topology is not production-approved until these are complete:
    [`checkpoint-latency-production-gate-plan.md`](checkpoint-latency-production-gate-plan.md):
    replace the interim `DUCKDB_CHECKPOINT_THRESHOLD=1GB` mitigation with an
    explicit, operationally bounded checkpoint policy before claiming a hard
-   ingest-latency SLO. Workstream 1 is in progress: the initial Prometheus
-   telemetry, `/metrics`, Nomad registration, rules, and dashboard are in the
-   working tree. A 30-real-ledger local reconciliation gate accounts for every
+   ingest-latency SLO. The telemetry/manual-checkpoint slice merged as
+   `63e9944`; immutable server/sink/maintenance images are published and the
+   registry-pulled server passes health, metrics, authentication, and checkpoint
+   smoke. A 30-real-ledger local reconciliation gate accounts for every
    acknowledgement and matches catalog/WAL gauges to disk. The shared writer
    coordinator and authenticated manual checkpoint primitive also pass a real
    30-ledger gate: a 54.984ms checkpoint reduced the 10.6MB metadata WAL to
-   zero without racing ingest. CGO-compatible distroless packaging and the
-   Nomad non-localhost bind setting are corrected, and a local server container
-   smoke passes health, metrics, and checkpointing. No immutable image has been
-   pushed. The complete 64/128/256/512MiB explicit-checkpoint sweep passed;
-   observed checkpoint duration scaled from 172ms at 67MB WAL to 1.369s at
+   zero without racing ingest. The complete 64/128/256/512MiB explicit sweep
+   passed; checkpoint duration scaled from 172ms at 67MB WAL to 1.369s at
    620MB, with every WAL reduced to zero and no watermark gaps or retries.
-   Logical parity/resume, crash recovery, and target Nomad/monitoring acceptance
-   remain open.
+   Latitude testnet now runs a healthy checkpoint-disabled digest-pinned
+   canary: its dedicated metrics target is `UP`, protocol targets are dropped,
+   279 DuckLake series are queryable, and all eight service-scoped rules are
+   healthy with zero firing. Grafana visual acceptance, logical parity/resume,
+   crash recovery, and any mainnet promotion remain open.
 5. Upgrade from `flowctl-sdk v0.1.2` after the planned runtime delivery,
    backpressure, registration, and health fixes are released.
 

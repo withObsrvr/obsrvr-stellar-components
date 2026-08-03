@@ -1,7 +1,7 @@
 # Production Gate Evidence — 2026-08-03
 
 This record preserves the results of telemetry reconciliation, coordinated
-manual and 64MiB checkpoint gates, the 1,000-ledger ingest-RPC gate, and the
+manual and WAL-candidate checkpoint gates, Latitude testnet monitoring acceptance, the 1,000-ledger ingest-RPC gate, and the
 live local two-Quack replica gate. Raw logs remain in the listed `/tmp`
 directories on the machine that ran the gates.
 
@@ -34,10 +34,34 @@ WAL gauge / stat:                10,621,253 / 10,621,253 bytes
 
 The local gate proves one observation per successful acknowledgement, close
 phase/total reconciliation, and exact scrape-time file gauges. It does not
-claim target Nomad/Prometheus/Grafana acceptance or a hard 400ms maximum from a
-30-ledger sample.
+claim a hard 400ms maximum from a 30-ledger sample.
 
 Raw evidence: `/tmp/obsrvr-ducklake-telemetry-gate-20260803`.
+
+## Latitude testnet monitoring acceptance
+
+The immutable server image from merge `63e9944` was pulled by digest and staged
+as a checkpoint-disabled Nomad canary. The accepted Prometheus discovery maps
+the retained Nomad service to `nomad_service`, drops the Quack and ingest
+protocol services, and loads the eight service-scoped rules.
+
+```text
+quack-ducklake-metrics:       UP
+DuckLake metric series:       279
+catalog file gauge:           12,288 bytes
+active protocol targets:      0
+healthy service-scoped rules: 8
+firing DuckLake alerts:       0
+```
+
+The final canary uses fixed container ports plus a task-level
+`address_mode="driver"` metrics registration because Latitude testnet lacks the
+CNI bridge plugin and Docker-bridged Prometheus cannot hairpin through the
+node's public dynamic port. The target stack has no Grafana deployment, so
+visual dashboard acceptance remains open. No mainnet deployment was made.
+
+Raw evidence:
+`/tmp/obsrvr-ducklake-testnet-telemetry-acceptance-20260803`.
 
 ## Coordinated manual checkpoint gate
 
