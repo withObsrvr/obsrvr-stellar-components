@@ -257,7 +257,7 @@ Initial alerts:
 
 ### Implementation checkpoint — 2026-08-03
 
-The first telemetry slice is implemented in the working tree:
+The telemetry/manual-checkpoint slice merged through PR #7 as `63e9944`:
 
 - Prometheus is a direct dependency and both the server and sink use isolated
   registries.
@@ -275,7 +275,7 @@ The first telemetry slice is implemented in the working tree:
 - Unit tests scrape isolated registries and verify live catalog/WAL file gauges.
 - `go test ./...`, `go vet ./...`, dashboard JSON validation, Nomad formatting,
   offline job validation, and Prometheus 3.13.1 `promtool check rules` pass.
-  Target-stack loading and evaluation still require deployment acceptance.
+  Latitude testnet target/rule acceptance is recorded below.
 
 The local reconciliation gate now passes for 30 real mainnet ledgers
 `62080000`–`62080029`: every server phase and total histogram, server success
@@ -298,9 +298,19 @@ corrected to a
 5-second timeout, and both complete Prometheus configs now pass Prometheus
 3.13.1 validation.
 
-Still open in Workstream 1: deploy and validate the Nomad scrape, import the
-dashboard/rules, and add live-only target labels; then adjust WAL alert
-thresholds after the maximum-WAL gate selects final limits.
+Latitude testnet acceptance passed on 2026-08-03. The checkpoint-disabled,
+digest-pinned Quack canary is healthy; `quack-ducklake-metrics` is `UP`; 279
+`obsrvr_ducklake_*` series are queryable; the catalog gauge reports 12,288
+bytes; protocol services have zero active scrape targets; all eight
+`nomad_service="quack-ducklake-metrics"` rules are healthy; and no DuckLake
+alerts fire. Source alert-scoping PR #8 and infra PR #2/#3–#7 are merged. Raw
+evidence is retained at
+`/tmp/obsrvr-ducklake-testnet-telemetry-acceptance-20260803`.
+
+Still open in Workstream 1: the target testnet stack has no Grafana deployment,
+so visual dashboard import/acceptance needs a target or explicit deferral.
+Mainnet deployment remains separate. Final WAL alert thresholds remain gated on
+parity/recovery testing and selected limits.
 
 ## Workstream 2 — Writer coordination and explicit checkpointing
 
