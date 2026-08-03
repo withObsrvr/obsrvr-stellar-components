@@ -278,6 +278,52 @@ func TestManualCheckpointHTTPRequiresAuthAndReportsErrors(t *testing.T) {
 	}
 }
 
+func TestCheckpointSchedulerSelectsSoftIdleAndHardTriggers(t *testing.T) {
+	now := time.Unix(1000, 0)
+	tests := []struct {
+		name            string
+		walBytes        int64
+		lastIngestDone  time.Time
+		wantTrigger     string
+		wantCheckpoints int
+	}{
+		{name: "below soft", walBytes: 63, lastIngestDone: now.Add(-time.Hour)},
+		{name: "soft but active", walBytes: 64, lastIngestDone: now, wantTrigger: ""},
+		{name: "soft and idle", walBytes: 64, lastIngestDone: now.Add(-3 * time.Second), wantTrigger: "idle", wantCheckpoints: 1},
+		{name: "hard regardless of idle", walBytes: 512, lastIngestDone: now, wantTrigger: "hard_limit", wantCheckpoints: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			checkpoints := 0
+			coordinator := &writerCoordinator{lastIngestDone: tt.lastIngestDone}
+			controller := &checkpointController{
+				executor: checkpointExecFunc(func(context.Context, string, ...any) (sql.Result, error) {
+					checkpoints++
+					return nil, nil
+				}),
+				coordinator:        coordinator,
+				metadataAttachName: "__ducklake_metadata_stellar_lake",
+			}
+			scheduler := checkpointScheduler{
+				controller:   controller,
+				coordinator:  coordinator,
+				softWALBytes: 64,
+				hardWALBytes: 512,
+				idleDuration: 2 * time.Second,
+				walBytes:     func() int64 { return tt.walBytes },
+				now:          func() time.Time { return now },
+			}
+			trigger, err := scheduler.runOnce(context.Background())
+			if err != nil {
+				t.Fatalf("runOnce: %v", err)
+			}
+			if trigger != tt.wantTrigger || checkpoints != tt.wantCheckpoints {
+				t.Fatalf("trigger=%q checkpoints=%d, want %q/%d", trigger, checkpoints, tt.wantTrigger, tt.wantCheckpoints)
+			}
+		})
+	}
+}
+
 func TestValidateConfigRequiresManualCheckpointToken(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.CheckpointEnabled = true
@@ -287,6 +333,21 @@ func TestValidateConfigRequiresManualCheckpointToken(t *testing.T) {
 	cfg.CheckpointAdminToken = "admin-secret"
 	if err := validateConfig(cfg); err != nil {
 		t.Fatalf("validateConfig with checkpoint token: %v", err)
+	}
+}
+
+func TestValidateConfigRejectsUnsafeCheckpointControllerSettings(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.CheckpointControllerEnabled = true
+	if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "CHECKPOINT_ENABLED") {
+		t.Fatalf("controller without checkpoint support error = %v", err)
+	}
+
+	cfg.CheckpointEnabled = true
+	cfg.CheckpointAdminToken = "admin-secret"
+	cfg.CheckpointHardWALBytes = cfg.CheckpointSoftWALBytes - 1
+	if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "CHECKPOINT_HARD_WAL_BYTES") {
+		t.Fatalf("hard limit below soft error = %v", err)
 	}
 }
 

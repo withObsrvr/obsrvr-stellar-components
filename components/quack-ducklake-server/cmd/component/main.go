@@ -29,28 +29,33 @@ func main() {
 }
 
 type config struct {
-	DBPath               string
-	CatalogPath          string
-	DataPath             string
-	AttachName           string
-	MetadataAttachName   string
-	URI                  string
-	Token                string
-	HealthAddr           string
-	AllowOtherHostname   bool
-	DisableSSL           bool
-	Insecure             bool
-	EnableExternal       bool
-	DisabledFilesystems  string
-	LockConfiguration    bool
-	MemoryLimit          string
-	Threads              int
-	CheckpointThreshold  string
-	CheckpointEnabled    bool
-	CheckpointTimeout    time.Duration
-	CheckpointAdminToken string
-	InlineRowLimit       int
-	IngestPort           string
+	DBPath                      string
+	CatalogPath                 string
+	DataPath                    string
+	AttachName                  string
+	MetadataAttachName          string
+	URI                         string
+	Token                       string
+	HealthAddr                  string
+	AllowOtherHostname          bool
+	DisableSSL                  bool
+	Insecure                    bool
+	EnableExternal              bool
+	DisabledFilesystems         string
+	LockConfiguration           bool
+	MemoryLimit                 string
+	Threads                     int
+	CheckpointThreshold         string
+	CheckpointEnabled           bool
+	CheckpointTimeout           time.Duration
+	CheckpointAdminToken        string
+	CheckpointControllerEnabled bool
+	CheckpointSoftWALBytes      int64
+	CheckpointHardWALBytes      int64
+	CheckpointPollInterval      time.Duration
+	CheckpointIdleDuration      time.Duration
+	InlineRowLimit              int
+	IngestPort                  string
 }
 
 func configFromEnv() config {
@@ -58,26 +63,31 @@ func configFromEnv() config {
 	attachName := sanitizeIdentifier(getenv("DUCKLAKE_ATTACH_NAME", "stellar_lake"))
 	metadataAttachName := sanitizeIdentifier(getenv("DUCKLAKE_METADATA_ATTACH_NAME", "__ducklake_metadata_"+attachName))
 	return config{
-		DBPath:               getenv("QUACK_DUCKDB_PATH", ""),
-		CatalogPath:          getenv("DUCKLAKE_CATALOG_PATH", "ducklake/stellar.ducklake"),
-		DataPath:             getenv("DUCKLAKE_DATA_PATH", "ducklake/data"),
-		AttachName:           attachName,
-		MetadataAttachName:   metadataAttachName,
-		URI:                  getenv("QUACK_URI", "quack:127.0.0.1:9494"),
-		Token:                getenv("QUACK_TOKEN", ""),
-		HealthAddr:           getenv("QUACK_HEALTH_ADDR", ":8088"),
-		AllowOtherHostname:   getenvBool("QUACK_ALLOW_OTHER_HOSTNAME", false),
-		DisableSSL:           insecureMode || getenvBool("QUACK_DISABLE_SSL", false),
-		Insecure:             insecureMode,
-		EnableExternal:       getenvBool("QUACK_ENABLE_EXTERNAL_ACCESS", false),
-		DisabledFilesystems:  getenv("QUACK_DISABLED_FILESYSTEMS", "LocalFileSystem"),
-		LockConfiguration:    getenvBool("QUACK_LOCK_CONFIGURATION", true),
-		MemoryLimit:          getenv("QUACK_MEMORY_LIMIT", "4GB"),
-		Threads:              getenvInt("QUACK_DUCKDB_THREADS", 4),
-		CheckpointThreshold:  getenv("DUCKDB_CHECKPOINT_THRESHOLD", ""),
-		CheckpointEnabled:    getenvBool("CHECKPOINT_ENABLED", false),
-		CheckpointTimeout:    getenvDuration("CHECKPOINT_TIMEOUT", 30*time.Second),
-		CheckpointAdminToken: getenv("CHECKPOINT_ADMIN_TOKEN", ""),
+		DBPath:                      getenv("QUACK_DUCKDB_PATH", ""),
+		CatalogPath:                 getenv("DUCKLAKE_CATALOG_PATH", "ducklake/stellar.ducklake"),
+		DataPath:                    getenv("DUCKLAKE_DATA_PATH", "ducklake/data"),
+		AttachName:                  attachName,
+		MetadataAttachName:          metadataAttachName,
+		URI:                         getenv("QUACK_URI", "quack:127.0.0.1:9494"),
+		Token:                       getenv("QUACK_TOKEN", ""),
+		HealthAddr:                  getenv("QUACK_HEALTH_ADDR", ":8088"),
+		AllowOtherHostname:          getenvBool("QUACK_ALLOW_OTHER_HOSTNAME", false),
+		DisableSSL:                  insecureMode || getenvBool("QUACK_DISABLE_SSL", false),
+		Insecure:                    insecureMode,
+		EnableExternal:              getenvBool("QUACK_ENABLE_EXTERNAL_ACCESS", false),
+		DisabledFilesystems:         getenv("QUACK_DISABLED_FILESYSTEMS", "LocalFileSystem"),
+		LockConfiguration:           getenvBool("QUACK_LOCK_CONFIGURATION", true),
+		MemoryLimit:                 getenv("QUACK_MEMORY_LIMIT", "4GB"),
+		Threads:                     getenvInt("QUACK_DUCKDB_THREADS", 4),
+		CheckpointThreshold:         getenv("DUCKDB_CHECKPOINT_THRESHOLD", ""),
+		CheckpointEnabled:           getenvBool("CHECKPOINT_ENABLED", false),
+		CheckpointTimeout:           getenvDuration("CHECKPOINT_TIMEOUT", 30*time.Second),
+		CheckpointAdminToken:        getenv("CHECKPOINT_ADMIN_TOKEN", ""),
+		CheckpointControllerEnabled: getenvBool("CHECKPOINT_CONTROLLER_ENABLED", false),
+		CheckpointSoftWALBytes:      getenvInt64("CHECKPOINT_SOFT_WAL_BYTES", 64*1024*1024),
+		CheckpointHardWALBytes:      getenvInt64("CHECKPOINT_HARD_WAL_BYTES", 512*1024*1024),
+		CheckpointPollInterval:      getenvDuration("CHECKPOINT_POLL_INTERVAL", time.Second),
+		CheckpointIdleDuration:      getenvDuration("CHECKPOINT_IDLE_DURATION", 2*time.Second),
 		// Measured 2026-07-23: inlined commits cost ~0.18ms/row in the
 		// catalog database, so bulk inlining is slow — limit 20000 gave
 		// ~1.7s commits, 1024 ~0.55s (~1 parquet file/ledger), 256 ~85ms
@@ -132,7 +142,7 @@ func run(ctx context.Context, cfg config) error {
 
 	registry := prometheus.NewRegistry()
 	metrics := newServerMetrics(registry, cfg.CatalogPath)
-	coordinator := &writerCoordinator{}
+	coordinator := newWriterCoordinator()
 
 	var checkpoints *checkpointController
 	if cfg.CheckpointEnabled {
@@ -145,6 +155,20 @@ func run(ctx context.Context, cfg config) error {
 				log.Printf("checkpoint connection close failed: %v", err)
 			}
 		}()
+	}
+	if cfg.CheckpointControllerEnabled {
+		startCheckpointScheduler(sigCtx, checkpointScheduler{
+			controller:   checkpoints,
+			coordinator:  coordinator,
+			softWALBytes: cfg.CheckpointSoftWALBytes,
+			hardWALBytes: cfg.CheckpointHardWALBytes,
+			idleDuration: cfg.CheckpointIdleDuration,
+			pollInterval: cfg.CheckpointPollInterval,
+			walBytes: func() int64 {
+				return int64(fileSizeBytes(cfg.CatalogPath + ".wal"))
+			},
+			now: time.Now,
+		})
 	}
 
 	stopIngest, err := startIngestServer(sigCtx, db, cfg, coordinator, metrics)
@@ -221,6 +245,21 @@ func validateConfig(cfg config) error {
 	}
 	if cfg.CheckpointEnabled && cfg.CheckpointAdminToken == "" {
 		return fmt.Errorf("CHECKPOINT_ADMIN_TOKEN is required when CHECKPOINT_ENABLED=true")
+	}
+	if cfg.CheckpointControllerEnabled && !cfg.CheckpointEnabled {
+		return fmt.Errorf("CHECKPOINT_ENABLED must be true when CHECKPOINT_CONTROLLER_ENABLED=true")
+	}
+	if cfg.CheckpointSoftWALBytes <= 0 {
+		return fmt.Errorf("CHECKPOINT_SOFT_WAL_BYTES must be positive")
+	}
+	if cfg.CheckpointHardWALBytes < cfg.CheckpointSoftWALBytes {
+		return fmt.Errorf("CHECKPOINT_HARD_WAL_BYTES must be >= CHECKPOINT_SOFT_WAL_BYTES")
+	}
+	if cfg.CheckpointPollInterval <= 0 {
+		return fmt.Errorf("CHECKPOINT_POLL_INTERVAL must be positive")
+	}
+	if cfg.CheckpointIdleDuration < 0 {
+		return fmt.Errorf("CHECKPOINT_IDLE_DURATION must be non-negative")
 	}
 	return nil
 }
@@ -377,6 +416,18 @@ func getenvInt(key string, fallback int) int {
 		return fallback
 	}
 	value, err := strconv.Atoi(raw)
+	if err != nil {
+		log.Fatalf("%s must be an integer, got %q", key, raw)
+	}
+	return value
+}
+
+func getenvInt64(key string, fallback int64) int64 {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil {
 		log.Fatalf("%s must be an integer, got %q", key, raw)
 	}

@@ -98,14 +98,19 @@ job "obsrvr-stellar-ducklake-primary" {
         # Coordinated manual checkpoints are disabled for the telemetry-only
         # rollout. Enabling requires CHECKPOINT_ADMIN_TOKEN from a Nomad
         # template; never place that token directly in this jobspec.
-        CHECKPOINT_ENABLED           = "false"
-        CHECKPOINT_TIMEOUT           = "30s"
-        QUACK_LOCK_CONFIGURATION     = "true"
-        QUACK_INSECURE               = "true"
-        QUACK_DISABLE_SSL            = "true"
-        QUACK_ALLOW_OTHER_HOSTNAME   = "true"
-        QUACK_ENABLE_EXTERNAL_ACCESS = "true"
-        QUACK_DISABLED_FILESYSTEMS   = "none"
+        CHECKPOINT_ENABLED            = "false"
+        CHECKPOINT_CONTROLLER_ENABLED = "false"
+        CHECKPOINT_TIMEOUT            = "30s"
+        CHECKPOINT_SOFT_WAL_BYTES     = "67108864"
+        CHECKPOINT_HARD_WAL_BYTES     = "536870912"
+        CHECKPOINT_POLL_INTERVAL      = "1s"
+        CHECKPOINT_IDLE_DURATION      = "2s"
+        QUACK_LOCK_CONFIGURATION      = "true"
+        QUACK_INSECURE                = "true"
+        QUACK_DISABLE_SSL             = "true"
+        QUACK_ALLOW_OTHER_HOSTNAME    = "true"
+        QUACK_ENABLE_EXTERNAL_ACCESS  = "true"
+        QUACK_DISABLED_FILESYSTEMS    = "none"
 
         # BronzeIngestService: sub-400ms commits need the 256 inline limit,
         # which produces ~7 small parquet files per ledger — the

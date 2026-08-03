@@ -14,6 +14,12 @@ end_ledger="${TELEMETRY_GATE_END_LEDGER:-62080029}"
 timeout_seconds="${TELEMETRY_GATE_TIMEOUT:-180}"
 manual_checkpoint="${TELEMETRY_GATE_MANUAL_CHECKPOINT:-false}"
 checkpoint_enabled="${TELEMETRY_GATE_CHECKPOINT_ENABLED:-$manual_checkpoint}"
+checkpoint_controller_enabled="${TELEMETRY_GATE_CHECKPOINT_CONTROLLER_ENABLED:-false}"
+checkpoint_soft_wal_bytes="${TELEMETRY_GATE_CHECKPOINT_SOFT_WAL_BYTES:-67108864}"
+checkpoint_hard_wal_bytes="${TELEMETRY_GATE_CHECKPOINT_HARD_WAL_BYTES:-536870912}"
+checkpoint_poll_interval="${TELEMETRY_GATE_CHECKPOINT_POLL_INTERVAL:-1s}"
+checkpoint_idle_duration="${TELEMETRY_GATE_CHECKPOINT_IDLE_DURATION:-2s}"
+wait_controller_checkpoints="${TELEMETRY_GATE_WAIT_CONTROLLER_CHECKPOINTS:-0}"
 minimum_wal_bytes="${TELEMETRY_GATE_MIN_WAL_BYTES:-0}"
 reset_runtime="${TELEMETRY_GATE_RESET_RUNTIME:-true}"
 server_shutdown="${TELEMETRY_GATE_SERVER_SHUTDOWN:-graceful}"
@@ -87,6 +93,17 @@ if [[ "$checkpoint_enabled" != "true" && "$checkpoint_enabled" != "false" ]]; th
   echo "TELEMETRY_GATE_CHECKPOINT_ENABLED must be true or false" >&2
   exit 2
 fi
+if [[ "$checkpoint_controller_enabled" != "true" && "$checkpoint_controller_enabled" != "false" ]]; then
+  echo "TELEMETRY_GATE_CHECKPOINT_CONTROLLER_ENABLED must be true or false" >&2
+  exit 2
+fi
+if [[ "$checkpoint_controller_enabled" == true && "$checkpoint_enabled" != true ]]; then
+  echo "TELEMETRY_GATE_CHECKPOINT_ENABLED must be true when the controller is enabled" >&2
+  exit 2
+fi
+for value in "$checkpoint_soft_wal_bytes" "$checkpoint_hard_wal_bytes" "$wait_controller_checkpoints"; do
+  [[ "$value" =~ ^[0-9]+$ ]] || { echo "controller byte/count settings must be non-negative integers" >&2; exit 2; }
+done
 if [[ "$reset_runtime" != "true" && "$reset_runtime" != "false" ]]; then
   echo "TELEMETRY_GATE_RESET_RUNTIME must be true or false" >&2
   exit 2
@@ -247,7 +264,12 @@ QUACK_DISABLED_FILESYSTEMS=none \
 DUCKDB_CHECKPOINT_THRESHOLD=1GB \
 DUCKLAKE_INLINE_ROW_LIMIT=256 \
 CHECKPOINT_ENABLED="$checkpoint_enabled" \
+CHECKPOINT_CONTROLLER_ENABLED="$checkpoint_controller_enabled" \
 CHECKPOINT_TIMEOUT=30s \
+CHECKPOINT_SOFT_WAL_BYTES="$checkpoint_soft_wal_bytes" \
+CHECKPOINT_HARD_WAL_BYTES="$checkpoint_hard_wal_bytes" \
+CHECKPOINT_POLL_INTERVAL="$checkpoint_poll_interval" \
+CHECKPOINT_IDLE_DURATION="$checkpoint_idle_duration" \
 CHECKPOINT_ADMIN_TOKEN="$token" \
 INGEST_PORT="$ingest_port" \
 DUCKLAKE_CATALOG_PATH="$catalog_path" \
@@ -302,6 +324,22 @@ if [[ "$completed" != true ]]; then
   tail -n 160 "$pipeline_log" >&2 || true
   tail -n 160 "$server_log" >&2 || true
   exit 1
+fi
+
+controller_checkpoint_successes=0
+if (( wait_controller_checkpoints > 0 )); then
+  for _ in $(seq 1 "$timeout_seconds"); do
+    curl -fsS "http://127.0.0.1:$server_health_port/metrics" >"$server_metrics"
+    idle_successes="$(metric_labeled_sum "$server_metrics" obsrvr_ducklake_checkpoint_total 'result="success",trigger="idle"')"
+    hard_successes="$(metric_labeled_sum "$server_metrics" obsrvr_ducklake_checkpoint_total 'result="success",trigger="hard_limit"')"
+    controller_checkpoint_successes=$((idle_successes + hard_successes))
+    (( controller_checkpoint_successes >= wait_controller_checkpoints )) && break
+    sleep 1
+  done
+  (( controller_checkpoint_successes >= wait_controller_checkpoints )) || {
+    echo "controller completed $controller_checkpoint_successes checkpoints, want at least $wait_controller_checkpoints" >&2
+    exit 1
+  }
 fi
 
 if [[ "$hold_after_ingest" == true ]]; then
@@ -459,6 +497,7 @@ manual_checkpoint_success=$checkpoint_success
 manual_checkpoint_errors=$checkpoint_errors
 manual_checkpoint_duration_seconds=$checkpoint_duration_seconds
 manual_checkpoint_last_success_timestamp_seconds=$checkpoint_last_success
+controller_checkpoint_successes=$controller_checkpoint_successes
 EOF
 
 cat "$summary"
