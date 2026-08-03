@@ -17,6 +17,13 @@ var errCheckpointBusy = errors.New("writer coordinator is busy")
 
 type writerCoordinator struct {
 	mu sync.Mutex
+
+	activityMu     sync.RWMutex
+	lastIngestDone time.Time
+}
+
+func newWriterCoordinator() *writerCoordinator {
+	return &writerCoordinator{lastIngestDone: time.Now()}
 }
 
 func (c *writerCoordinator) Lock() {
@@ -29,6 +36,22 @@ func (c *writerCoordinator) Unlock() {
 
 func (c *writerCoordinator) TryLock() bool {
 	return c.mu.TryLock()
+}
+
+func (c *writerCoordinator) MarkIngestDone(at time.Time) {
+	c.activityMu.Lock()
+	c.lastIngestDone = at
+	c.activityMu.Unlock()
+}
+
+func (c *writerCoordinator) IngestIdleFor(now time.Time) time.Duration {
+	c.activityMu.RLock()
+	last := c.lastIngestDone
+	c.activityMu.RUnlock()
+	if last.IsZero() || now.Before(last) {
+		return 0
+	}
+	return now.Sub(last)
 }
 
 type checkpointExecutor interface {
@@ -65,6 +88,50 @@ var manualCheckpointRetryPolicy = checkpointRetryPolicy{
 	MaxAttempts:    3,
 	InitialBackoff: 100 * time.Millisecond,
 	MaxBackoff:     time.Second,
+}
+
+type checkpointScheduler struct {
+	controller   *checkpointController
+	coordinator  *writerCoordinator
+	softWALBytes int64
+	hardWALBytes int64
+	idleDuration time.Duration
+	pollInterval time.Duration
+	walBytes     func() int64
+	now          func() time.Time
+}
+
+func (s checkpointScheduler) runOnce(ctx context.Context) (string, error) {
+	walBytes := s.walBytes()
+	trigger := ""
+	switch {
+	case walBytes >= s.hardWALBytes:
+		trigger = "hard_limit"
+	case walBytes >= s.softWALBytes && s.coordinator.IngestIdleFor(s.now()) >= s.idleDuration:
+		trigger = "idle"
+	default:
+		return "", nil
+	}
+	_, err := s.controller.checkpointWithRetry(ctx, trigger, manualCheckpointRetryPolicy)
+	return trigger, err
+}
+
+func startCheckpointScheduler(ctx context.Context, scheduler checkpointScheduler) {
+	go func() {
+		ticker := time.NewTicker(scheduler.pollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				trigger, err := scheduler.runOnce(ctx)
+				if err != nil && !errors.Is(err, context.Canceled) {
+					log.Printf("checkpoint scheduler trigger=%s failed: %v", trigger, err)
+				}
+			}
+		}
+	}()
 }
 
 func newCheckpointController(ctx context.Context, db *sql.DB, attachName, metadataAttachName string, timeout time.Duration, coordinator *writerCoordinator, metrics *serverMetrics) (*checkpointController, error) {

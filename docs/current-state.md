@@ -122,8 +122,10 @@ The topology is not production-approved until these are complete:
    and successful recovery. Latitude testnet runs a healthy checkpoint-disabled
    digest-pinned canary: its metrics target is `UP`, protocol targets are
    dropped, and all eight scoped rules are healthy. The measured controller
-   candidates are 64MiB soft/512MiB hard. The controller and cadence-shaped SLO
-   gate remain disabled/open; Grafana and mainnet promotion are deferred.
+   candidates are 64MiB soft/512MiB hard. A disabled-by-default scheduler and
+   real-ledger trigger gate now pass one soft-idle and one hard-limit checkpoint
+   with no ingest errors/retries. The cadence-shaped SLO gate remains open and
+   the controller remains disabled; Grafana and mainnet promotion are deferred.
 5. Upgrade from `flowctl-sdk v0.1.2` after the planned runtime delivery,
    backpressure, registration, and health fixes are released.
 

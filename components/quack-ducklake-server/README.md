@@ -52,6 +52,14 @@ beside ingestion, index materializers, and query APIs rather than inside
 - `CHECKPOINT_ADMIN_TOKEN`, required when checkpointing is enabled. Send it as
   `Authorization: Bearer <token>`. Keep it separate from public health/metrics
   access and inject it through Nomad secrets rather than a jobspec literal.
+- `CHECKPOINT_CONTROLLER_ENABLED`, default `false`; enables the periodic
+  soft-idle/hard-limit scheduler. It requires `CHECKPOINT_ENABLED=true`.
+- `CHECKPOINT_SOFT_WAL_BYTES`, default `67108864` (64 MiB), and
+  `CHECKPOINT_HARD_WAL_BYTES`, default `536870912` (512 MiB), are the measured
+  experiment candidates, not production policy.
+- `CHECKPOINT_POLL_INTERVAL`, default `1s`, and `CHECKPOINT_IDLE_DURATION`,
+  default `2s`, control scheduler polling and the minimum post-ingest idle
+  period. The controller remains disabled until the cadence gate passes.
 - `QUACK_DUCKDB_PATH`, optional DuckDB local database path
 - `INGEST_PORT`, default empty (disabled); serves `BronzeIngestService` — a
   gRPC stream that commits ledger batches in-process, one DuckLake

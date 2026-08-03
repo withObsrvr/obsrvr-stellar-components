@@ -525,6 +525,29 @@ not prove the hard 400ms ingest SLO. Evidence is retained under
 `/tmp/obsrvr-ducklake-crash-recovery-512mib-20260803`, and
 `/tmp/obsrvr-ducklake-kill-checkpoint-512mib-20260803`.
 
+### Disabled controller implementation checkpoint
+
+The server now has a disabled-by-default scheduler behind
+`CHECKPOINT_CONTROLLER_ENABLED`. It polls the catalog WAL, triggers `idle` only
+after the configured post-ingest idle duration at/above the soft candidate, and
+triggers `hard_limit` regardless of idle state at/above the hard candidate. It
+uses the same writer coordinator, hidden metadata target, timeout, and bounded
+retry policy as manual checkpoints.
+
+`make test-checkpoint-controller-gate` passed two real-ledger profiles:
+
+```text
+soft/idle trigger successes:  1
+hard-limit trigger successes: 1
+unexpected trigger successes: 0
+ingest errors/retries:        0 / 0
+controller default enabled:   false
+```
+
+Evidence: `/tmp/obsrvr-ducklake-controller-gate-20260803-{idle,hard}`.
+This proves trigger wiring and mutual exclusion, not production cadence or the
+hard 400ms SLO. The controller must remain disabled until Workstream 4 passes.
+
 ## Workstream 4 — Cadence-shaped ingest gate
 
 ### Goal

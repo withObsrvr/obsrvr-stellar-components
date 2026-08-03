@@ -213,6 +213,23 @@ These results select 64MiB soft and 512MiB hard candidates for the idle
 controller/cadence experiment. They do not enable that controller or prove the
 hard 400ms SLO.
 
+## Disabled Checkpoint Controller Gate
+
+```bash
+make test-checkpoint-controller-gate
+```
+
+The gate runs two small real-ledger profiles. The idle profile requires one
+`trigger="idle"` checkpoint after the soft limit and idle duration. The hard
+profile uses an intentionally long idle duration and requires one
+`trigger="hard_limit"` checkpoint instead. Both require zero ingest errors and
+retries. Evidence from 2026-08-03 recorded exactly one expected trigger in each
+profile and no unexpected trigger.
+
+Keep `CHECKPOINT_CONTROLLER_ENABLED=false` in deployments until the
+cadence-shaped gate observes multiple checkpoints. The 1GB DuckDB threshold
+remains the emergency fallback.
+
 ## Historical evidence (superseded SQL-literal transport)
 
 Local evidence captured on 2026-07-02 (pre-rewrite; script sizes reflect the

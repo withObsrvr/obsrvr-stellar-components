@@ -167,6 +167,24 @@ Raw evidence: `/tmp/obsrvr-ducklake-checkpoint-failure-gate-20260803`.
 These results select 64MiB soft and 512MiB hard candidates for the disabled
 idle-controller/cadence experiment. They do not prove a hard 400ms SLO.
 
+## Disabled checkpoint-controller trigger gate
+
+The controller remains default-off. Two six-ledger real-data profiles lowered
+the thresholds only inside the harness to exercise each trigger:
+
+```text
+idle checkpoint successes:       1
+hard-limit checkpoint successes: 1
+unexpected trigger successes:    0
+ingest errors/retries:           0 / 0
+controller default enabled:      false
+```
+
+Both profiles reconciled every acknowledgement and metric. This is trigger and
+coordination evidence only; it does not replace the five-second cadence gate.
+
+Raw evidence: `/tmp/obsrvr-ducklake-controller-gate-20260803-{idle,hard}`.
+
 ## 1,000-ledger ingest-RPC chaos gate
 
 Command profile:

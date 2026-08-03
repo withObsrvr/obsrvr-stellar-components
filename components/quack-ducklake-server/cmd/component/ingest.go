@@ -241,7 +241,10 @@ func (s *ingestServer) observeAcknowledged(ledger uint32, replayed bool, phases 
 
 func (s *ingestServer) commitBatch(ctx context.Context, batch *componentsv1.LedgerBatch) (bool, ingestPhaseDurations, error) {
 	s.coordinator.Lock()
-	defer s.coordinator.Unlock()
+	defer func() {
+		s.coordinator.MarkIngestDone(time.Now())
+		s.coordinator.Unlock()
+	}()
 
 	var phases ingestPhaseDurations
 	decodeStart := time.Now()
