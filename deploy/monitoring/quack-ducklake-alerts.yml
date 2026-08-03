@@ -2,7 +2,7 @@ groups:
   - name: quack-ducklake-production-gate
     rules:
       - alert: DuckLakeIngestOverBudget
-        expr: increase(obsrvr_ducklake_ingest_over_budget_total[5m]) > 0
+        expr: increase(obsrvr_ducklake_ingest_over_budget_total{nomad_service="quack-ducklake-metrics"}[5m]) > 0
         for: 0m
         labels:
           severity: warning
@@ -10,7 +10,7 @@ groups:
           summary: DuckLake acknowledged an ingest batch above the 400ms budget
 
       - alert: DuckLakeIngestP99OverBudget
-        expr: histogram_quantile(0.99, sum by (le) (rate(obsrvr_ducklake_ingest_phase_seconds_bucket{phase="total"}[15m]))) > 0.4
+        expr: histogram_quantile(0.99, sum by (le) (rate(obsrvr_ducklake_ingest_phase_seconds_bucket{nomad_service="quack-ducklake-metrics",phase="total"}[15m]))) > 0.4
         for: 15m
         labels:
           severity: warning
@@ -20,7 +20,7 @@ groups:
       # These are the initial experimental limits from the production-gate
       # plan. Keep the rules aligned when measured soft/hard limits change.
       - alert: DuckLakeCatalogWALAboveSoftLimit
-        expr: min_over_time(obsrvr_ducklake_catalog_wal_bytes[15m]) >= 67108864
+        expr: min_over_time(obsrvr_ducklake_catalog_wal_bytes{nomad_service="quack-ducklake-metrics"}[15m]) >= 67108864
         for: 0m
         labels:
           severity: warning
@@ -28,7 +28,7 @@ groups:
           summary: DuckLake catalog WAL has remained above the 64MiB soft limit
 
       - alert: DuckLakeCatalogWALAtHardLimit
-        expr: obsrvr_ducklake_catalog_wal_bytes >= 536870912
+        expr: obsrvr_ducklake_catalog_wal_bytes{nomad_service="quack-ducklake-metrics"} >= 536870912
         for: 0m
         labels:
           severity: critical
@@ -36,7 +36,7 @@ groups:
           summary: DuckLake catalog WAL has reached the 512MiB hard limit
 
       - alert: DuckLakeCheckpointFailed
-        expr: increase(obsrvr_ducklake_checkpoint_total{result="error"}[5m]) > 0
+        expr: increase(obsrvr_ducklake_checkpoint_total{nomad_service="quack-ducklake-metrics",result="error"}[5m]) > 0
         for: 0m
         labels:
           severity: critical
@@ -44,7 +44,7 @@ groups:
           summary: A coordinated DuckLake checkpoint failed
 
       - alert: DuckLakeCheckpointExceedsIdleBudget
-        expr: histogram_quantile(0.99, sum by (le) (rate(obsrvr_ducklake_checkpoint_duration_seconds_bucket{result="success"}[15m]))) > 4
+        expr: histogram_quantile(0.99, sum by (le) (rate(obsrvr_ducklake_checkpoint_duration_seconds_bucket{nomad_service="quack-ducklake-metrics",result="success"}[15m]))) > 4
         for: 5m
         labels:
           severity: warning
@@ -52,7 +52,7 @@ groups:
           summary: DuckLake checkpoint duration no longer fits the candidate live idle budget
 
       - alert: DuckLakeCheckpointTooOld
-        expr: obsrvr_ducklake_checkpoint_last_success_timestamp_seconds > 0 and time() - obsrvr_ducklake_checkpoint_last_success_timestamp_seconds > 600
+        expr: obsrvr_ducklake_checkpoint_last_success_timestamp_seconds{nomad_service="quack-ducklake-metrics"} > 0 and time() - obsrvr_ducklake_checkpoint_last_success_timestamp_seconds{nomad_service="quack-ducklake-metrics"} > 600
         for: 5m
         labels:
           severity: warning
@@ -60,7 +60,7 @@ groups:
           summary: DuckLake has not completed an explicit checkpoint in over 10 minutes
 
       - alert: DuckLakeIngestRetryOrError
-        expr: increase(obsrvr_ducklake_ingest_retries_total[5m]) > 0 or increase(obsrvr_ducklake_ingest_batches_total{result="error"}[5m]) > 0
+        expr: increase(obsrvr_ducklake_ingest_retries_total{nomad_service="quack-ducklake-metrics"}[5m]) > 0 or increase(obsrvr_ducklake_ingest_batches_total{nomad_service="quack-ducklake-metrics",result="error"}[5m]) > 0
         for: 0m
         labels:
           severity: critical
