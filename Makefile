@@ -1,4 +1,4 @@
-.PHONY: build lint proto test test-local-pipeline test-quack-chaos test-ingest-chaos test-telemetry-gate test-manual-checkpoint-gate test-checkpoint-gate validate-pipelines validate-nomad docker-flowctl-runner tidy clean
+.PHONY: build lint proto test test-local-pipeline test-quack-chaos test-ingest-chaos test-telemetry-gate test-manual-checkpoint-gate test-checkpoint-gate test-crash-recovery-gate test-kill-checkpoint-gate test-checkpoint-failure-gate validate-pipelines validate-nomad docker-flowctl-runner tidy clean
 
 GO ?= go
 GOFMT ?= gofmt
@@ -43,6 +43,15 @@ test-manual-checkpoint-gate:
 
 test-checkpoint-gate:
 	@scripts/ducklake-checkpoint-gate.sh
+
+test-crash-recovery-gate:
+	@scripts/ducklake-crash-recovery-gate.sh
+
+test-kill-checkpoint-gate:
+	@scripts/ducklake-kill-checkpoint-gate.sh
+
+test-checkpoint-failure-gate:
+	@scripts/ducklake-checkpoint-failure-gate.sh
 
 validate-pipelines:
 	@scripts/validate-pipelines.sh

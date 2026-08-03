@@ -26,6 +26,7 @@ type serverMetrics struct {
 	checkpointDuration    *prometheus.HistogramVec
 	checkpointTotal       *prometheus.CounterVec
 	checkpointDeferred    *prometheus.CounterVec
+	checkpointInflight    prometheus.Gauge
 	checkpointLastSuccess prometheus.Gauge
 }
 
@@ -69,6 +70,10 @@ func newServerMetrics(registerer prometheus.Registerer, catalogPath string) *ser
 			Name: "obsrvr_ducklake_checkpoint_deferred_total",
 			Help: "DuckDB catalog checkpoint deferrals by bounded reason.",
 		}, []string{"reason"}),
+		checkpointInflight: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "obsrvr_ducklake_checkpoint_inflight",
+			Help: "Whether a coordinated DuckDB catalog checkpoint is currently executing.",
+		}),
 		checkpointLastSuccess: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "obsrvr_ducklake_checkpoint_last_success_timestamp_seconds",
 			Help: "Unix timestamp of the most recent successful explicit checkpoint.",
@@ -85,6 +90,7 @@ func newServerMetrics(registerer prometheus.Registerer, catalogPath string) *ser
 		m.checkpointDuration,
 		m.checkpointTotal,
 		m.checkpointDeferred,
+		m.checkpointInflight,
 		m.checkpointLastSuccess,
 		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 			Name: "obsrvr_ducklake_catalog_wal_bytes",

@@ -232,6 +232,7 @@ func TestMetricsUseIsolatedRegistryAndExposeFileGauges(t *testing.T) {
 		`obsrvr_ducklake_checkpoint_duration_seconds_count{result="success",trigger="idle"} 0`,
 		`obsrvr_ducklake_checkpoint_total{result="error",trigger="manual"} 0`,
 		`obsrvr_ducklake_checkpoint_deferred_total{reason="ingest_active"} 0`,
+		`obsrvr_ducklake_checkpoint_inflight 0`,
 		`obsrvr_ducklake_checkpoint_last_success_timestamp_seconds 0`,
 		`obsrvr_ducklake_catalog_file_bytes 13`,
 		`obsrvr_ducklake_catalog_wal_bytes 3`,

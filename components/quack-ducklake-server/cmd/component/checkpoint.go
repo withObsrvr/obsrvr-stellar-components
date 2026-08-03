@@ -55,6 +55,18 @@ type checkpointState struct {
 	ConsecutiveFailures int
 }
 
+type checkpointRetryPolicy struct {
+	MaxAttempts    int
+	InitialBackoff time.Duration
+	MaxBackoff     time.Duration
+}
+
+var manualCheckpointRetryPolicy = checkpointRetryPolicy{
+	MaxAttempts:    3,
+	InitialBackoff: 100 * time.Millisecond,
+	MaxBackoff:     time.Second,
+}
+
 func newCheckpointController(ctx context.Context, db *sql.DB, attachName, metadataAttachName string, timeout time.Duration, coordinator *writerCoordinator, metrics *serverMetrics) (*checkpointController, error) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
@@ -104,6 +116,10 @@ func (c *checkpointController) checkpoint(ctx context.Context, trigger string) (
 		return 0, errCheckpointBusy
 	}
 	defer c.coordinator.Unlock()
+	if c.metrics != nil {
+		c.metrics.checkpointInflight.Inc()
+		defer c.metrics.checkpointInflight.Dec()
+	}
 
 	start := time.Now()
 	c.stateMu.Lock()
@@ -146,6 +162,57 @@ func (c *checkpointController) checkpoint(ctx context.Context, trigger string) (
 	return duration, nil
 }
 
+func (c *checkpointController) checkpointWithRetry(ctx context.Context, trigger string, policy checkpointRetryPolicy) (time.Duration, error) {
+	if policy.MaxAttempts < 1 {
+		policy.MaxAttempts = 1
+	}
+	if policy.InitialBackoff < 0 {
+		policy.InitialBackoff = 0
+	}
+	if policy.MaxBackoff < policy.InitialBackoff {
+		policy.MaxBackoff = policy.InitialBackoff
+	}
+
+	var totalDuration time.Duration
+	var lastErr error
+	backoff := policy.InitialBackoff
+	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
+		duration, err := c.checkpoint(ctx, trigger)
+		totalDuration += duration
+		if err == nil {
+			return totalDuration, nil
+		}
+		lastErr = err
+		if attempt == policy.MaxAttempts {
+			break
+		}
+		if c.metrics != nil {
+			c.metrics.checkpointDeferred.WithLabelValues("retry_backoff").Inc()
+		}
+		if backoff > 0 {
+			timer := time.NewTimer(backoff)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return totalDuration, fmt.Errorf("checkpoint retry canceled: %w", ctx.Err())
+			case <-timer.C:
+			}
+		}
+		if backoff < policy.MaxBackoff {
+			backoff *= 2
+			if backoff > policy.MaxBackoff {
+				backoff = policy.MaxBackoff
+			}
+		}
+	}
+	return totalDuration, lastErr
+}
+
 func (c *checkpointController) manualHTTPHandler(adminToken string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -161,7 +228,7 @@ func (c *checkpointController) manualHTTPHandler(adminToken string) http.Handler
 
 		checkpointCtx, cancel := context.WithTimeout(r.Context(), c.timeout)
 		defer cancel()
-		duration, err := c.checkpoint(checkpointCtx, "manual")
+		duration, err := c.checkpointWithRetry(checkpointCtx, "manual", manualCheckpointRetryPolicy)
 		if errors.Is(err, errCheckpointBusy) {
 			http.Error(w, "checkpoint deferred: ingest active", http.StatusConflict)
 			return

@@ -398,18 +398,17 @@ no errors, and preserved all ingest telemetry counts. Evidence:
 Local packaging also exposed and fixed two deployment blockers: DuckDB CGO
 binaries require `distroless/cc-debian12` rather than `base-debian12`, and the
 Nomad `0.0.0.0` Quack bind requires the already security-gated
-`QUACK_ALLOW_OTHER_HOSTNAME=true`. Server, maintenance, and sink images now
-build locally; the server container smoke passes `/healthz`, `/metrics`, and an
-authenticated metadata checkpoint. The local server image is
-`withobsrvr/quack-ducklake-server:checkpoint-ws2-20260803` (image ID prefix
-`sha256:362ac7cadd7`), but it was built from an uncommitted working tree and
-must not be treated as a deployable immutable artifact.
+`QUACK_ALLOW_OTHER_HOSTNAME=true`. PR #7 merged as `63e9944`; immutable server,
+maintenance, and sink images are published. The digest-pulled server passes
+`/healthz`, `/metrics`, authentication rejection, and an authenticated metadata
+checkpoint, and the checkpoint-disabled Latitude testnet canary is healthy.
 
-Still open in Workstream 2: create and push an immutable image from committed
-source, inject a real engine-level checkpoint failure and add bounded automatic
-retry/backoff, add the maximum-WAL crash/recovery scenarios, and validate the
-manual primitive in a packaged non-production Nomad allocation. Generic remote
-Quack writes remain outside this coordinator as documented.
+Manual requests now make at most three attempts with bounded exponential
+backoff. A real engine error from an absent metadata database produced exactly
+three errors/two backoffs, persistent health 503, and cleared inflight state;
+a subsequent process with the correct target checkpointed successfully,
+restored health 200, and reduced WAL. Generic remote Quack writes remain outside
+this coordinator as documented.
 
 ## Workstream 3 — Maximum-WAL checkpoint and recovery gate
 
@@ -427,9 +426,13 @@ scripts/ducklake-checkpoint-gate.sh
 ```
 
 It wraps the real-ledger telemetry/manual-checkpoint gate, requires the WAL to
-reach the requested minimum, verifies reduction, and checks watermark
-count/min/max/gaps after shutdown. Logical baseline parity, next-ledger resume,
-and crash scenarios still need to be added.
+reach the requested minimum, verifies reduction, compares sorted deterministic
+logical-row fingerprints against a no-checkpoint baseline, resumes with the
+next ledger, and checks watermark count/min/max/gaps. Separate crash and
+checkpoint-interruption harnesses are implemented at
+`scripts/ducklake-crash-recovery-gate.sh` and
+`scripts/ducklake-kill-checkpoint-gate.sh`; real failure/backoff is covered by
+`scripts/ducklake-checkpoint-failure-gate.sh`.
 
 The harness ingests realistic batches while monitoring `<catalog>.wal`. It runs
 at candidate WAL sizes:
@@ -505,11 +508,22 @@ retries. All candidates pass the proposed `<3s` explicit-checkpoint target,
 and even the largest observed WAL fits inside the current five-second ledger
 interval on this hardware.
 
-This saturated-ingest sweep does not prove the hard 400ms ingest SLO—the
-independent over-budget counts increase on longer runs—and it does not yet
-satisfy Scenario A's full logical parity/resume checks or Scenarios B/C.
-Evidence is retained under
-`/tmp/obsrvr-ducklake-checkpoint-gate-{64,128,256,512}mib-20260803`.
+The strengthened 64MiB and 512MiB Scenario A runs also passed deterministic
+logical parity and next-ledger resume. At the hard candidate, `620,092,928`
+bytes checkpointed to zero in `1.266759255s`; 1,029 watermarks were contiguous.
+
+Scenarios B and C passed at the 512MiB hard candidate with observed WALs of
+`620,090,984` and `620,093,010` bytes. Recovery completed in `5.058841s` before
+checkpoint and `4.440246s` after a synchronized kill during checkpoint. Both
+had zero logical parity differences, partial commits, watermark gaps, or
+retries and resumed with ledger `62081028`.
+
+These results select 64MiB soft and 512MiB hard candidates for the disabled
+idle-controller/cadence experiment. This saturated-ingest evidence still does
+not prove the hard 400ms ingest SLO. Evidence is retained under
+`/tmp/obsrvr-ducklake-checkpoint-parity-{64,512}mib-20260803`,
+`/tmp/obsrvr-ducklake-crash-recovery-512mib-20260803`, and
+`/tmp/obsrvr-ducklake-kill-checkpoint-512mib-20260803`.
 
 ## Workstream 4 — Cadence-shaped ingest gate
 
