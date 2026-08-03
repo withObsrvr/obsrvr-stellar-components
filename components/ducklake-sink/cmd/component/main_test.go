@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	flowctlv1 "github.com/withObsrvr/flow-proto/go/gen/flowctl/v1"
 	componentsv1 "github.com/withObsrvr/obsrvr-stellar-components/gen/go/stellar/components/v1"
 	"github.com/withObsrvr/obsrvr-stellar-components/pkg/contracts"
@@ -700,13 +702,38 @@ func TestStartSinkHealthServerReturnsBindError(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = listener.Close() })
 
-	err = startSinkHealthServer(listener.Addr().String(), &DuckLakeSink{})
+	err = startSinkHealthServer(listener.Addr().String(), &DuckLakeSink{}, nil)
 	if err == nil {
 		t.Fatalf("startSinkHealthServer succeeded on an occupied address")
 	}
 	if !strings.Contains(err.Error(), "listen") {
 		t.Fatalf("startSinkHealthServer error = %q, want bind/listen failure", err)
 	}
+}
+
+func TestSinkMetricsUseIsolatedRegistry(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	metrics := newSinkMetrics(registry)
+	metrics.ingestRPCRoundTrip.Observe((250 * time.Millisecond).Seconds())
+	metrics.ingestRetries.Inc()
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest("GET", "/metrics", nil)
+	newSinkHTTPHandler(&DuckLakeSink{}, registry).ServeHTTP(recorder, request)
+	if recorder.Code != 200 {
+		t.Fatalf("metrics status = %d, want 200", recorder.Code)
+	}
+	body := recorder.Body.String()
+	for _, want := range []string{
+		"obsrvr_ducklake_ingest_rpc_round_trip_seconds_count 1",
+		"obsrvr_ducklake_ingest_retries_total 1",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics missing %q:\n%s", want, body)
+		}
+	}
+
+	newSinkMetrics(prometheus.NewRegistry())
 }
 
 func TestSinkHealthSnapshotReportsLastWrite(t *testing.T) {

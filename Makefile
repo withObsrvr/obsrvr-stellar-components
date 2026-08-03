@@ -1,4 +1,4 @@
-.PHONY: build lint proto test test-local-pipeline test-quack-chaos test-ingest-chaos validate-pipelines validate-nomad docker-flowctl-runner tidy clean
+.PHONY: build lint proto test test-local-pipeline test-quack-chaos test-ingest-chaos test-telemetry-gate test-manual-checkpoint-gate test-checkpoint-gate validate-pipelines validate-nomad docker-flowctl-runner tidy clean
 
 GO ?= go
 GOFMT ?= gofmt
@@ -32,6 +32,17 @@ test-quack-chaos:
 
 test-ingest-chaos:
 	@QUACK_CHAOS_SINK_MODE=ingest-rpc scripts/quack-chaos-harness.sh
+
+test-telemetry-gate:
+	@scripts/ducklake-telemetry-gate.sh
+
+test-manual-checkpoint-gate:
+	@TELEMETRY_GATE_MANUAL_CHECKPOINT=true \
+		TELEMETRY_GATE_RUNTIME_DIR=/tmp/obsrvr-ducklake-manual-checkpoint-gate \
+		scripts/ducklake-telemetry-gate.sh
+
+test-checkpoint-gate:
+	@scripts/ducklake-checkpoint-gate.sh
 
 validate-pipelines:
 	@scripts/validate-pipelines.sh

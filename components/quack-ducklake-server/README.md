@@ -12,6 +12,10 @@ beside ingestion, index materializers, and query APIs rather than inside
 - `DUCKLAKE_CATALOG_PATH`, default `ducklake/stellar.ducklake`
 - `DUCKLAKE_DATA_PATH`, default `ducklake/data`
 - `DUCKLAKE_ATTACH_NAME`, default `stellar_lake`
+- `DUCKLAKE_METADATA_ATTACH_NAME`, default
+  `__ducklake_metadata_<DUCKLAKE_ATTACH_NAME>`; the hidden DuckDB metadata
+  database that owns the file-backed catalog WAL. Explicit checkpoints target
+  this database, not the DuckLake attachment's maintenance checkpoint.
 - `DUCKLAKE_INLINE_ROW_LIMIT`, default `1024`; applied idempotently at
   startup via `set_option('data_inlining_row_limit', …)`. Inserts below this
   row count are inlined into the catalog instead of writing Parquet.
@@ -23,7 +27,7 @@ beside ingestion, index materializers, and query APIs rather than inside
   a negative value leaves the catalog's persisted setting untouched.
 - `QUACK_URI`, default `quack:127.0.0.1:9494`
 - `QUACK_TOKEN`, required
-- `QUACK_HEALTH_ADDR`, default `:8088`; serves `/healthz`
+- `QUACK_HEALTH_ADDR`, default `:8088`; serves `/healthz` and `/metrics`
 - `QUACK_ALLOW_OTHER_HOSTNAME`, default `false`
 - `QUACK_DISABLE_SSL`, default `false`
 - `QUACK_INSECURE`, default `false`; required before plaintext,
@@ -35,6 +39,19 @@ beside ingestion, index materializers, and query APIs rather than inside
 - `QUACK_LOCK_CONFIGURATION`, default `true`
 - `QUACK_MEMORY_LIMIT`, default `4GB`
 - `QUACK_DUCKDB_THREADS`, default `4`
+- `DUCKDB_CHECKPOINT_THRESHOLD`, optional DuckDB WAL auto-checkpoint threshold;
+  unset uses DuckDB's `16 MiB` default. The default puts catalog checkpoints on
+  ingest commits and causes multi-second tail spikes during sustained backfill.
+  A measured `1GB` profile reduced 650-ledger sink latency from p95 `400ms`,
+  p99 `592ms`, max `2.504s` to p95 `369ms`, p99 `418ms`, max `918ms`.
+  Increasing it defers rather than eliminates checkpoint work and permits a
+  larger WAL, so it is an interim latency control rather than a hard-SLO proof.
+- `CHECKPOINT_ENABLED`, default `false`; enables the coordinated manual
+  checkpoint primitive and authenticated `POST /admin/checkpoint` endpoint.
+- `CHECKPOINT_TIMEOUT`, default `30s`; bounds manual checkpoint execution.
+- `CHECKPOINT_ADMIN_TOKEN`, required when checkpointing is enabled. Send it as
+  `Authorization: Bearer <token>`. Keep it separate from public health/metrics
+  access and inject it through Nomad secrets rather than a jobspec literal.
 - `QUACK_DUCKDB_PATH`, optional DuckDB local database path
 - `INGEST_PORT`, default empty (disabled); serves `BronzeIngestService` — a
   gRPC stream that commits ledger batches in-process, one DuckLake
@@ -45,6 +62,24 @@ beside ingestion, index materializers, and query APIs rather than inside
   `QUACK_TOKEN` via `x-ingest-token` metadata. For sub-400ms commits pair
   with `DUCKLAKE_INLINE_ROW_LIMIT=256` and a 1–5 minute
   `ducklake-maintenance` interval.
+
+## Telemetry
+
+`/metrics` uses a process-local Prometheus registry. It exposes bounded-label
+histograms for `decode`, `staging`, `preface`, `transfer`, `commit`, `cleanup`,
+and total server receive-to-ack latency, plus batch/retry/budget/in-flight
+metrics. Catalog and `<catalog>.wal` byte gauges read file size at scrape time.
+Manual checkpoints use a dedicated DuckDB connection and the same writer
+coordinator as ingest. If ingest owns the coordinator, the endpoint returns
+HTTP 409 and records an `ingest_active` deferral rather than racing the ledger
+transaction. Successful and failed executions update checkpoint duration,
+result, and last-success metrics. A failed execution persists checkpoint error
+state and makes `/healthz` return 503 until a later successful checkpoint clears
+the failure.
+
+The initial rules and Grafana dashboard live under `deploy/monitoring/`. The
+Nomad server template registers `quack-ducklake-metrics` on the health port so
+Prometheus does not try to scrape the Quack protocol port.
 
 ## Local Example
 

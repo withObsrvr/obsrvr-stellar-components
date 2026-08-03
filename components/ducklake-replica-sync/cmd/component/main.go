@@ -1081,7 +1081,7 @@ func isMissingSnapshotError(err error) bool {
 	if !strings.Contains(message, "snapshot") {
 		return false
 	}
-	for _, marker := range []string{"missing", "not found", "expired", "expire", "no files", "does not exist"} {
+	for _, marker := range []string{"missing", "not found", "no snapshot found", "expired", "expire", "no files", "does not exist"} {
 		if strings.Contains(message, marker) {
 			return true
 		}

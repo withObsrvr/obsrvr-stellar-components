@@ -51,6 +51,23 @@ job "obsrvr-stellar-ducklake-primary" {
       port     = "ingest"
     }
 
+    service {
+      name     = "quack-ducklake-metrics"
+      provider = "nomad"
+      port     = "health"
+
+      tags = ["prometheus"]
+
+      check {
+        name     = "quack-ducklake-metrics"
+        type     = "http"
+        port     = "health"
+        path     = "/metrics"
+        interval = "30s"
+        timeout  = "5s"
+      }
+    }
+
     task "server" {
       driver = "docker"
 
@@ -66,16 +83,27 @@ job "obsrvr-stellar-ducklake-primary" {
       }
 
       env {
-        DUCKLAKE_ATTACH_NAME         = "stellar_lake"
-        DUCKLAKE_CATALOG_PATH        = "/var/lib/obsrvr/ducklake/stellar.ducklake"
-        DUCKLAKE_DATA_PATH           = "/var/lib/obsrvr/ducklake/data"
-        QUACK_URI                    = "quack:0.0.0.0:${NOMAD_PORT_quack}"
-        QUACK_HEALTH_ADDR            = "0.0.0.0:${NOMAD_PORT_health}"
-        QUACK_MEMORY_LIMIT           = "8GB"
-        QUACK_DUCKDB_THREADS         = "4"
+        DUCKLAKE_ATTACH_NAME  = "stellar_lake"
+        DUCKLAKE_CATALOG_PATH = "/var/lib/obsrvr/ducklake/stellar.ducklake"
+        DUCKLAKE_DATA_PATH    = "/var/lib/obsrvr/ducklake/data"
+        QUACK_URI             = "quack:0.0.0.0:${NOMAD_PORT_quack}"
+        QUACK_HEALTH_ADDR     = "0.0.0.0:${NOMAD_PORT_health}"
+        QUACK_MEMORY_LIMIT    = "8GB"
+        QUACK_DUCKDB_THREADS  = "4"
+        # DuckDB's 16 MiB default auto-checkpoints the catalog on ingest
+        # commits, creating multi-second tail spikes under sustained load.
+        # This defers, but does not eliminate, checkpoint work; replace with an
+        # explicit off-hot-path checkpoint policy before claiming a hard SLO.
+        DUCKDB_CHECKPOINT_THRESHOLD = "1GB"
+        # Coordinated manual checkpoints are disabled for the telemetry-only
+        # rollout. Enabling requires CHECKPOINT_ADMIN_TOKEN from a Nomad
+        # template; never place that token directly in this jobspec.
+        CHECKPOINT_ENABLED           = "false"
+        CHECKPOINT_TIMEOUT           = "30s"
         QUACK_LOCK_CONFIGURATION     = "true"
         QUACK_INSECURE               = "true"
         QUACK_DISABLE_SSL            = "true"
+        QUACK_ALLOW_OTHER_HOSTNAME   = "true"
         QUACK_ENABLE_EXTERNAL_ACCESS = "true"
         QUACK_DISABLED_FILESYSTEMS   = "none"
 

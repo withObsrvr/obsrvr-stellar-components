@@ -86,8 +86,12 @@ func (s *DuckLakeSink) writeBatchIngest(batch *componentsv1.LedgerBatch) error {
 		s.resetIngestStream()
 		return fmt.Errorf("ingest ack mismatch: sent %d, acked %d", batch.LedgerSequence, ack.LedgerSequence)
 	}
+	roundTrip := time.Since(start)
+	if s.metrics != nil {
+		s.metrics.ingestRPCRoundTrip.Observe(roundTrip.Seconds())
+	}
 	log.Printf("ingest-rpc committed ledger %d in %s (replayed=%t)",
-		batch.LedgerSequence, time.Since(start).Round(time.Millisecond), ack.Replayed)
+		batch.LedgerSequence, roundTrip.Round(time.Millisecond), ack.Replayed)
 	return nil
 }
 

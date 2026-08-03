@@ -16,6 +16,8 @@ import (
 	"time"
 
 	_ "github.com/duckdb/duckdb-go/v2"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
 
 	flowctlv1 "github.com/withObsrvr/flow-proto/go/gen/flowctl/v1"
@@ -64,14 +66,15 @@ const (
 
 var writeRetryBackoff = 500 * time.Millisecond
 
-
 func main() {
+	registry := prometheus.NewRegistry()
 	sink, err := NewDuckLakeSink(DuckLakeConfigFromEnv())
 	if err != nil {
 		panic(err)
 	}
 	defer sink.Close()
-	if err := startSinkHealthServer(getenv("HEALTH_PORT", "8089"), sink); err != nil {
+	sink.metrics = newSinkMetrics(registry)
+	if err := startSinkHealthServer(getenv("HEALTH_PORT", "8089"), sink, registry); err != nil {
 		log.Fatalf("start sink health endpoint: %v", err)
 	}
 
@@ -97,6 +100,10 @@ type ledgerBatchWriter interface {
 	WriteBatch(*componentsv1.LedgerBatch) error
 }
 
+type ingestRetryObserver interface {
+	recordIngestRetry()
+}
+
 func handleLedgerBatchEvent(ctx context.Context, event *flowctlv1.Event, sink ledgerBatchWriter) error {
 	if event.Type != contracts.LedgerBatchEventType {
 		return nil
@@ -113,6 +120,9 @@ func handleLedgerBatchEvent(ctx context.Context, event *flowctlv1.Event, sink le
 			log.Printf("write ledger batch %d failed on attempt %d/3: %v", batch.LedgerSequence, attempt, err)
 			if attempt == 3 {
 				break
+			}
+			if observer, ok := sink.(ingestRetryObserver); ok {
+				observer.recordIngestRetry()
 			}
 			select {
 			case <-ctx.Done():
@@ -179,11 +189,12 @@ type DuckLakeSink struct {
 	ingestToken       string
 	ingestConn        *grpc.ClientConn
 	ingestStream      componentsv1.BronzeIngestService_IngestLedgerBatchesClient
-	mu            sync.Mutex
-	healthMu      sync.RWMutex
-	lastWriteAt   time.Time
-	lastWriteErr  string
-	lastLedger    uint32
+	metrics           *sinkMetrics
+	mu                sync.Mutex
+	healthMu          sync.RWMutex
+	lastWriteAt       time.Time
+	lastWriteErr      string
+	lastLedger        uint32
 }
 
 func NewDuckLakeSink(cfg DuckLakeConfig) (*DuckLakeSink, error) {
@@ -460,7 +471,6 @@ func (s *DuckLakeSink) applyMigrations() error {
 	return nil
 }
 
-
 func (s *DuckLakeSink) migrationApplied(migration duckLakeMigration) (bool, error) {
 	var count int
 	if err := s.db.QueryRow("SELECT count(*) FROM schema_migrations WHERE version = ?", migration.Version).Scan(&count); err != nil {
@@ -565,7 +575,13 @@ type sinkHealthSnapshot struct {
 	LastError    string
 }
 
-func startSinkHealthServer(port string, sink *DuckLakeSink) error {
+func (s *DuckLakeSink) recordIngestRetry() {
+	if s.metrics != nil {
+		s.metrics.ingestRetries.Inc()
+	}
+}
+
+func startSinkHealthServer(port string, sink *DuckLakeSink, gatherer prometheus.Gatherer) error {
 	addr := strings.TrimSpace(port)
 	if addr == "" {
 		return nil
@@ -573,6 +589,22 @@ func startSinkHealthServer(port string, sink *DuckLakeSink) error {
 	if !strings.Contains(addr, ":") {
 		addr = ":" + addr
 	}
+	mux := newSinkHTTPHandler(sink, gatherer)
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", addr, err)
+	}
+	server := &http.Server{Handler: mux}
+	go func() {
+		log.Printf("sink health and metrics endpoint listening on %s", addr)
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("sink health endpoint failed: %v", err)
+		}
+	}()
+	return nil
+}
+
+func newSinkHTTPHandler(sink *DuckLakeSink, gatherer prometheus.Gatherer) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		snapshot := sink.healthSnapshot(time.Now().UTC())
@@ -596,18 +628,10 @@ func startSinkHealthServer(port string, sink *DuckLakeSink) error {
 			snapshot.LastError,
 		)
 	})
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return fmt.Errorf("listen on %s: %w", addr, err)
+	if gatherer != nil {
+		mux.Handle("/metrics", promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{}))
 	}
-	server := &http.Server{Handler: mux}
-	go func() {
-		log.Printf("sink health endpoint listening on %s", addr)
-		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("sink health endpoint failed: %v", err)
-		}
-	}()
-	return nil
+	return mux
 }
 
 // stagedTable is one typed bronze table staged as a Parquet file for a batch.
@@ -940,4 +964,3 @@ func getenvDuration(key string, fallback time.Duration) time.Duration {
 	}
 	return seconds
 }
-

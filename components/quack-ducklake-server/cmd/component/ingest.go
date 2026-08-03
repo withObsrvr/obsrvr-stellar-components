@@ -10,7 +10,6 @@ import (
 	"log"
 	"net"
 	"strings"
-	"sync"
 	"time"
 
 	duckdb "github.com/duckdb/duckdb-go/v2"
@@ -32,17 +31,18 @@ const ingestTokenMetadataKey = "x-ingest-token"
 // enforced by the per-ledger ack protocol.
 type ingestServer struct {
 	componentsv1.UnimplementedBronzeIngestServiceServer
-	conn  *sql.Conn
-	token string
+	conn        *sql.Conn
+	token       string
+	metrics     *serverMetrics
+	coordinator *writerCoordinator
 
-	mu            sync.Mutex
 	highWatermark uint32
 	// forceReplay is set after a failed or uncertain commit: rows may exist,
 	// so the next attempt must take the delete-then-insert path.
 	forceReplay bool
 }
 
-func newIngestServer(ctx context.Context, db *sql.DB, attachName, token string) (*ingestServer, error) {
+func newIngestServer(ctx context.Context, db *sql.DB, attachName, token string, coordinator *writerCoordinator, metrics *serverMetrics) (*ingestServer, error) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("open ingest connection: %w", err)
@@ -53,7 +53,7 @@ func newIngestServer(ctx context.Context, db *sql.DB, attachName, token string) 
 		conn.Close()
 		return nil, fmt.Errorf("point ingest session at %s: %w", attachName, err)
 	}
-	s := &ingestServer{conn: conn, token: token}
+	s := &ingestServer{conn: conn, token: token, metrics: metrics, coordinator: coordinator}
 	if err := s.ensureSchema(ctx); err != nil {
 		conn.Close()
 		return nil, err
@@ -65,6 +65,9 @@ func newIngestServer(ctx context.Context, db *sql.DB, attachName, token string) 
 	}
 	if wm.Valid {
 		s.highWatermark = uint32(wm.Int64)
+	}
+	if s.metrics != nil {
+		s.metrics.ingestLastLedger.Set(float64(s.highWatermark))
 	}
 	log.Printf("ingest service ready; high watermark %d", s.highWatermark)
 	return s, nil
@@ -154,31 +157,100 @@ func (s *ingestServer) IngestLedgerBatches(stream componentsv1.BronzeIngestServi
 		if req.Batch == nil {
 			return status.Error(codes.InvalidArgument, "batch is required")
 		}
-		start := time.Now()
-		replayed, err := s.commitBatch(stream.Context(), req.Batch)
-		if err != nil {
-			return status.Errorf(codes.Internal, "ingest ledger %d: %v", req.Batch.LedgerSequence, err)
-		}
-		log.Printf("ingest committed ledger %d in %s (replayed=%t)",
-			req.Batch.LedgerSequence, time.Since(start).Round(time.Millisecond), replayed)
-		if err := stream.Send(&componentsv1.IngestLedgerBatchAck{
-			LedgerSequence: req.Batch.LedgerSequence,
-			Replayed:       replayed,
-		}); err != nil {
+		if err := s.ingestOne(stream, req.Batch); err != nil {
 			return err
 		}
 	}
 }
 
-func (s *ingestServer) commitBatch(ctx context.Context, batch *componentsv1.LedgerBatch) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+type ingestPhaseDurations struct {
+	decode   time.Duration
+	staging  time.Duration
+	preface  time.Duration
+	transfer time.Duration
+	commit   time.Duration
+	cleanup  time.Duration
+}
 
+func (d *ingestPhaseDurations) add(other ingestPhaseDurations) {
+	d.decode += other.decode
+	d.staging += other.staging
+	d.preface += other.preface
+	d.transfer += other.transfer
+	d.commit += other.commit
+	d.cleanup += other.cleanup
+}
+
+func (s *ingestServer) ingestOne(stream componentsv1.BronzeIngestService_IngestLedgerBatchesServer, batch *componentsv1.LedgerBatch) error {
+	start := time.Now()
+	if s.metrics != nil {
+		s.metrics.ingestInflight.Inc()
+		defer s.metrics.ingestInflight.Dec()
+	}
+
+	replayed, phases, err := s.commitBatch(stream.Context(), batch)
+	if err != nil {
+		s.metrics.recordBatch("error", replayed)
+		return status.Errorf(codes.Internal, "ingest ledger %d: %v", batch.LedgerSequence, err)
+	}
+	if err := stream.Send(&componentsv1.IngestLedgerBatchAck{
+		LedgerSequence: batch.LedgerSequence,
+		Replayed:       replayed,
+	}); err != nil {
+		s.metrics.recordBatch("error", replayed)
+		return err
+	}
+
+	total := time.Since(start)
+	s.observeAcknowledged(batch.LedgerSequence, replayed, phases, total)
+	log.Printf("ingest committed ledger %d in %s (replayed=%t)",
+		batch.LedgerSequence, total.Round(time.Millisecond), replayed)
+	log.Printf("ingest phases ledger %d: decode %s, staging %s, preface %s, transfer %s, commit %s, cleanup %s",
+		batch.LedgerSequence,
+		phases.decode.Round(time.Millisecond),
+		phases.staging.Round(time.Millisecond),
+		phases.preface.Round(time.Millisecond),
+		phases.transfer.Round(time.Millisecond),
+		phases.commit.Round(time.Millisecond),
+		phases.cleanup.Round(time.Millisecond))
+	return nil
+}
+
+func (s *ingestServer) observeAcknowledged(ledger uint32, replayed bool, phases ingestPhaseDurations, total time.Duration) {
+	if s.metrics == nil {
+		return
+	}
+	for phase, duration := range map[string]time.Duration{
+		"decode":   phases.decode,
+		"staging":  phases.staging,
+		"preface":  phases.preface,
+		"transfer": phases.transfer,
+		"commit":   phases.commit,
+		"cleanup":  phases.cleanup,
+		"total":    total,
+	} {
+		s.metrics.ingestPhase.WithLabelValues(phase).Observe(duration.Seconds())
+	}
+	s.metrics.recordBatch("success", replayed)
+	s.metrics.ingestLastLedger.Set(float64(ledger))
+	if total > ingestLatencyBudget {
+		s.metrics.ingestOverBudget.Inc()
+		log.Printf("ingest over budget ledger %d: total=%s budget=%s", ledger, total.Round(time.Millisecond), ingestLatencyBudget)
+	}
+}
+
+func (s *ingestServer) commitBatch(ctx context.Context, batch *componentsv1.LedgerBatch) (bool, ingestPhaseDurations, error) {
+	s.coordinator.Lock()
+	defer s.coordinator.Unlock()
+
+	var phases ingestPhaseDurations
+	decodeStart := time.Now()
 	decoded := bronze.DecodeTypedRows(batch)
+	phases.decode = time.Since(decodeStart)
 	specs := map[string]bronze.TypedTableSpec{}
 	for _, dr := range decoded {
 		if dr.Err != nil {
-			return false, fmt.Errorf("decode typed rows: %w", dr.Err)
+			return false, phases, fmt.Errorf("decode typed rows: %w", dr.Err)
 		}
 		if dr.OK {
 			specs[dr.Spec.TableName] = dr.Spec
@@ -188,61 +260,75 @@ func (s *ingestServer) commitBatch(ctx context.Context, batch *componentsv1.Ledg
 	replay := s.forceReplay || batch.LedgerSequence <= s.highWatermark
 	var err error
 	for attempt := 1; attempt <= 2; attempt++ {
-		if err = s.tryCommit(ctx, batch, decoded, specs, replay); err == nil {
+		var attemptPhases ingestPhaseDurations
+		attemptPhases, err = s.tryCommit(ctx, batch, decoded, specs, replay)
+		phases.add(attemptPhases)
+		if err == nil {
 			if batch.LedgerSequence > s.highWatermark {
 				s.highWatermark = batch.LedgerSequence
 			}
 			s.forceReplay = false
-			return replay, nil
+			return replay, phases, nil
 		}
 		// A concurrent maintenance flush can abort the transaction; after any
 		// failure the commit state is uncertain, so the retry (and the next
 		// batch) must take the replay path.
 		log.Printf("ingest ledger %d attempt %d failed: %v", batch.LedgerSequence, attempt, err)
+		if attempt < 2 && s.metrics != nil {
+			s.metrics.ingestRetries.Inc()
+		}
 		replay = true
 	}
 	s.forceReplay = true
-	return replay, err
+	return replay, phases, err
 }
 
-func (s *ingestServer) tryCommit(ctx context.Context, batch *componentsv1.LedgerBatch, decoded []bronze.DecodedRow, specs map[string]bronze.TypedTableSpec, replay bool) error {
+func (s *ingestServer) tryCommit(ctx context.Context, batch *componentsv1.LedgerBatch, decoded []bronze.DecodedRow, specs map[string]bronze.TypedTableSpec, replay bool) (ingestPhaseDurations, error) {
+	var phases ingestPhaseDurations
 	// Phase 1: stage rows into native memory tables via the Appender — rows
 	// enter the engine as typed data with no SQL statement cost. A DuckDB
 	// transaction may write to only one attached database, so staging is
 	// fully materialized before the DuckLake transaction begins.
 	stagingStart := time.Now()
 	if err := s.clearStaging(ctx, specs); err != nil {
-		return err
+		phases.staging = time.Since(stagingStart)
+		return phases, err
 	}
 	if err := s.stageWithAppender(decoded); err != nil {
-		return err
+		phases.staging = time.Since(stagingStart)
+		return phases, err
 	}
-	stagingDuration := time.Since(stagingStart)
-	lakeStart := time.Now()
+	phases.staging = time.Since(stagingStart)
+	prefaceStart := time.Now()
 
 	// Phase 2: one DuckLake transaction; row data arrives via engine-native
 	// INSERT..SELECT reads from the staging tables.
 	tx, err := s.conn.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin ingest transaction: %w", err)
+		phases.preface = time.Since(prefaceStart)
+		return phases, fmt.Errorf("begin ingest transaction: %w", err)
 	}
 	defer tx.Rollback()
 
 	if err := bronze.EnsureCatalogNetworkTx(tx, batch.NetworkPassphrase); err != nil {
-		return err
+		phases.preface = time.Since(prefaceStart)
+		return phases, err
 	}
 	if replay {
 		if err := bronze.DeleteLedgerRowsTx(tx, batch.NetworkPassphrase, batch.LedgerSequence); err != nil {
-			return err
+			phases.preface = time.Since(prefaceStart)
+			return phases, err
 		}
 	}
 	if err := bronze.InsertLedgerBatchRowTx(tx, batch); err != nil {
-		return err
+		phases.preface = time.Since(prefaceStart)
+		return phases, err
 	}
 	if err := bronze.InsertWatermarkTx(tx, batch); err != nil {
-		return err
+		phases.preface = time.Since(prefaceStart)
+		return phases, err
 	}
-	prefaceDuration := time.Since(lakeStart)
+	phases.preface = time.Since(prefaceStart)
 	transferStart := time.Now()
 	for tableName, spec := range specs {
 		columns := make([]string, len(spec.Columns))
@@ -254,27 +340,26 @@ func (s *ingestServer) tryCommit(ctx context.Context, batch *componentsv1.Ledger
 			"INSERT INTO bronze.%s (%s) SELECT %s FROM memory.bronze.%s",
 			tableName, columnList, columnList, tableName,
 		)); err != nil {
-			return fmt.Errorf("transfer staged rows for %s: %w", tableName, err)
+			phases.transfer = time.Since(transferStart)
+			return phases, fmt.Errorf("transfer staged rows for %s: %w", tableName, err)
 		}
 	}
-	transferDuration := time.Since(transferStart)
+	phases.transfer = time.Since(transferStart)
 	commitStart := time.Now()
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit ingest transaction: %w", err)
+		phases.commit = time.Since(commitStart)
+		return phases, fmt.Errorf("commit ingest transaction: %w", err)
 	}
-	log.Printf("ingest phases ledger %d: staging %s, preface %s, transfer %s, commit %s",
-		batch.LedgerSequence,
-		stagingDuration.Round(time.Millisecond),
-		prefaceDuration.Round(time.Millisecond),
-		transferDuration.Round(time.Millisecond),
-		time.Since(commitStart).Round(time.Millisecond))
+	phases.commit = time.Since(commitStart)
 
 	// Phase 3: best-effort staging cleanup; the defensive clear at the start
 	// of the next batch covers failures here.
+	cleanupStart := time.Now()
 	if err := s.clearStaging(ctx, specs); err != nil {
 		log.Printf("staging cleanup after ledger %d: %v", batch.LedgerSequence, err)
 	}
-	return nil
+	phases.cleanup = time.Since(cleanupStart)
+	return phases, nil
 }
 
 // stageWithAppender writes decoded rows into the memory.bronze staging
@@ -334,11 +419,11 @@ func (s *ingestServer) clearStaging(ctx context.Context, specs map[string]bronze
 
 // startIngestServer wires the gRPC listener when INGEST_PORT is configured.
 // Returns a stop function.
-func startIngestServer(ctx context.Context, db *sql.DB, cfg config) (func(), error) {
+func startIngestServer(ctx context.Context, db *sql.DB, cfg config, coordinator *writerCoordinator, metrics *serverMetrics) (func(), error) {
 	if cfg.IngestPort == "" {
 		return func() {}, nil
 	}
-	srv, err := newIngestServer(ctx, db, cfg.AttachName, cfg.Token)
+	srv, err := newIngestServer(ctx, db, cfg.AttachName, cfg.Token, coordinator, metrics)
 	if err != nil {
 		return nil, err
 	}

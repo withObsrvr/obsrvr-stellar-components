@@ -105,6 +105,7 @@ job "obsrvr-flowctl-runner-local" {
       tags = [
         "component=ducklake-sink",
         "component_type=sink",
+        "prometheus",
       ]
 
       check {

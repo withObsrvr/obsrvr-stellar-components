@@ -296,8 +296,13 @@ WHERE replica_name = 'serving_replica'
 }
 
 func TestIsMissingSnapshotError(t *testing.T) {
-	if !isMissingSnapshotError(assertErr("ducklake snapshot 12 not found")) {
-		t.Fatalf("expected missing snapshot error to be classified")
+	for _, message := range []string{
+		"ducklake snapshot 12 not found",
+		"Invalid Input Error: No snapshot found at version 8",
+	} {
+		if !isMissingSnapshotError(assertErr(message)) {
+			t.Fatalf("expected missing snapshot error %q to be classified", message)
+		}
 	}
 	if isMissingSnapshotError(assertErr("network timeout reading table_changes")) {
 		t.Fatalf("non-snapshot error was classified as missing snapshot")

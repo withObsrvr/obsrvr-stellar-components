@@ -37,7 +37,7 @@ Environment:
 - `QUACK_DISABLE_SSL`, default `false`; set only for an explicitly insecure dev server
 - `DUCKLAKE_REMOTE_TIMEOUT`, default `30s`
 - `PORT`, default `:50052`
-- `HEALTH_PORT`, default `8089`; serves `/healthz`
+- `HEALTH_PORT`, default `8089`; serves `/healthz` and `/metrics`
 
 Typed bronze tables are materialized under the `bronze` schema using the same table names as `stellar-history-loader`, including:
 
@@ -96,4 +96,6 @@ network.
 
 The `/healthz` endpoint reports the latest write ledger, write age, and last
 write error. A failed write normally exits the process after bounded retries, so
-the endpoint is mainly for liveness and post-restart recency checks.
+the endpoint is mainly for liveness and post-restart recency checks. `/metrics`
+uses an isolated Prometheus registry and reports ingest-RPC send-to-ack latency
+and bounded write retries.
