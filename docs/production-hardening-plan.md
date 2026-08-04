@@ -162,8 +162,9 @@ events (restart, upgrade, misconfig); **minor** = quality/operability.
    is explicitly out of scope for this plan.
 3. **The SDK is ours (`withObsrvr/flowctl-sdk`), so fix root causes there —
    but land component-side guards first.** Component-side changes ship this
-   cycle without coordinating a release; SDK v0.1.3 (error propagation option,
-   bounded worker pool, honest health) follows and lets us delete the guards.
+   cycle without coordinating a release. SDK v0.1.3 was dependency-only; a
+   later runtime release must add error propagation, bounded workers, and
+   honest health before we can delete the component-side guards.
 4. **Bronze ID scheme change (NM-1) is a contract change** — it re-IDs
    existing rows. It ships together with the Postgres per-ledger
    delete-then-insert (PG-8) so both stores converge on "replace the ledger
@@ -573,7 +574,8 @@ The Quack/replica topology may ship to production when:
       two-Quack gate 2026-08-03).
 - [x] Watermark gap query returns empty after a 1k-ledger backfill (ingest-RPC
       gate rerun 2026-08-03).
-- [x] flowctl-sdk upgrade plan written (even if v0.1.3 not yet shipped).
+- [x] flowctl-sdk upgrade plan written; dependency-only v0.1.3 is consumed, but
+  the runtime delivery release remains open.
 
 Local production-gate evidence and remaining run commands are captured in
 `docs/production-gate-runbook.md`. The SDK follow-up plan is captured in

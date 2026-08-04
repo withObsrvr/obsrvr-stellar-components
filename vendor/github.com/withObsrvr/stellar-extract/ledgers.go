@@ -44,7 +44,7 @@ func ExtractLedgers(input *LedgerInput) ([]LedgerRowData, error) {
 		BaseFee:            uint32(header.Header.BaseFee),
 		BaseReserve:        uint32(header.Header.BaseReserve),
 		MaxTxSetSize:       uint32(header.Header.MaxTxSetSize),
-		IngestionTimestamp:  time.Now().UTC(),
+		IngestionTimestamp: time.Now().UTC(),
 		LedgerRange:        ledgerRange,
 		PipelineVersion:    Version,
 		EraID:              input.EraID,
@@ -121,7 +121,7 @@ func ExtractLedgers(input *LedgerInput) ([]LedgerRowData, error) {
 	}
 
 	// (b) node_id + signature: from SCP value extension
-	if lcValueSig, ok := header.Header.ScpValue.Ext.GetLcValueSignature(); ok {
+	if lcValueSig := scpValueSignature(header.Header.ScpValue); lcValueSig != nil {
 		if ed25519, ok := xdr.PublicKey(lcValueSig.NodeId).GetEd25519(); ok {
 			nodeIDStr := base64.StdEncoding.EncodeToString(ed25519[:])
 			data.NodeID = &nodeIDStr
@@ -192,6 +192,22 @@ func ExtractLedgers(input *LedgerInput) ([]LedgerRowData, error) {
 	data.ContractEventsCount = &contractEventsCount
 
 	return []LedgerRowData{data}, nil
+}
+
+// scpValueSignature returns the validator signature carried by an SCP value, or
+// nil for unsigned (basic) values. Protocol 28 added STELLAR_VALUE_EMPTY_TX_SET,
+// which nests the same LedgerCloseValueSignature inside proposedValue; reading
+// only the signed arm silently drops node_id and signature on those ledgers.
+func scpValueSignature(sv xdr.StellarValue) *xdr.LedgerCloseValueSignature {
+	switch sv.Ext.V {
+	case xdr.StellarValueTypeStellarValueSigned:
+		return sv.Ext.LcValueSignature
+	case xdr.StellarValueTypeStellarValueEmptyTxSet:
+		if pv := sv.Ext.ProposedValue; pv != nil {
+			return &pv.LcValueSignature
+		}
+	}
+	return nil
 }
 
 // countLedgerContractEvents counts contract events in a transaction meta.

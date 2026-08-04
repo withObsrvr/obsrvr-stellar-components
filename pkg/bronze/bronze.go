@@ -25,6 +25,13 @@ func escapeSQLString(value string) string {
 
 //go:embed bronze_schema.sql
 var SchemaSQL string
+
+const addContractExecutableColumnsSQL = `
+ALTER TABLE bronze.contract_creations_v1 ADD COLUMN IF NOT EXISTS executable_type TEXT;
+ALTER TABLE bronze.contract_creations_v1 ADD COLUMN IF NOT EXISTS external_ref_owner TEXT;
+ALTER TABLE bronze.contract_creations_v1 ADD COLUMN IF NOT EXISTS external_ref_tag TEXT;
+`
+
 type Migration struct {
 	Version int
 	Name    string
@@ -33,7 +40,9 @@ type Migration struct {
 
 var Migrations = []Migration{
 	{Version: 1, Name: "bronze_schema", SQL: SchemaSQL},
+	{Version: 2, Name: "contract_executable_columns", SQL: addContractExecutableColumnsSQL},
 }
+
 func RecordMigrationTx(tx *sql.Tx, migration Migration) error {
 	if _, err := tx.Exec(
 		`INSERT INTO schema_migrations (version, name, applied_at)
@@ -61,6 +70,7 @@ func EnsureMigrationRecordedTx(tx *sql.Tx, migration Migration) error {
 	}
 	return nil
 }
+
 const CreateCatalogMetadataSQL = `
 CREATE TABLE IF NOT EXISTS catalog_metadata (
 	key VARCHAR NOT NULL,
@@ -475,10 +485,16 @@ func SQLLiteral(value any) string {
 	}
 }
 
-func QualifyCreateTableSQL(sqlText, catalog, schema string) string {
+func QualifyMigrationSQL(sqlText, catalog, schema string) string {
 	sqlText = strings.TrimSpace(sqlText)
 	if schema != "" {
-		return strings.Replace(sqlText, "CREATE TABLE IF NOT EXISTS "+schema+".", "CREATE TABLE IF NOT EXISTS "+catalog+"."+schema+".", 1)
+		for _, prefix := range []string{"CREATE TABLE IF NOT EXISTS ", "ALTER TABLE "} {
+			unqualified := prefix + schema + "."
+			if strings.HasPrefix(sqlText, unqualified) {
+				return strings.Replace(sqlText, unqualified, prefix+catalog+"."+schema+".", 1)
+			}
+		}
+		return sqlText
 	}
 	return strings.Replace(sqlText, "CREATE TABLE IF NOT EXISTS ", "CREATE TABLE IF NOT EXISTS "+catalog+".", 1)
 }
@@ -674,7 +690,7 @@ var TypedTableSpecs = map[string]TypedTableSpec{
 		"key_hash", "ledger_sequence", "contract_id", "key_type", "durability", "restored_from_ledger", "closed_at", "ledger_range", "created_at", "era_id", "version_label",
 	}, nil),
 	"contract_creations_v1": tableSpec("contract_creations_v1", extract.ContractCreationData{}, "created_ledger", []string{
-		"contract_id", "creator_address", "wasm_hash", "created_ledger", "created_at", "ledger_range", "era_id", "version_label",
+		"contract_id", "creator_address", "wasm_hash", "executable_type", "external_ref_owner", "external_ref_tag", "created_ledger", "created_at", "ledger_range", "era_id", "version_label",
 	}, nil),
 	"token_transfers_stream_v1": tableSpec("token_transfers_stream_v1", extract.TokenTransferData{}, "ledger_sequence", []string{
 		"ledger_sequence", "transaction_hash", "transaction_id", "operation_id", "operation_index", "event_type", "from", "to", "asset", "asset_type", "asset_code", "asset_issuer", "amount", "amount_raw", "contract_id", "closed_at", "created_at", "ledger_range", "era_id", "version_label",

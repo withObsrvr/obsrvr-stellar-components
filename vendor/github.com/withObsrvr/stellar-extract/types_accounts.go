@@ -4,30 +4,30 @@ import "time"
 
 // AccountData represents account snapshot state (accounts_snapshot_v1)
 type AccountData struct {
-	AccountID      string
-	LedgerSequence uint32
-	ClosedAt       time.Time
-	Balance        string
-	SequenceNumber uint64
-	NumSubentries  uint32
-	NumSponsoring  uint32
-	NumSponsored   uint32
-	HomeDomain     *string
-	MasterWeight   uint32
-	LowThreshold   uint32
-	MedThreshold   uint32
-	HighThreshold  uint32
+	AccountID           string
+	LedgerSequence      uint32
+	ClosedAt            time.Time
+	Balance             string
+	SequenceNumber      uint64
+	NumSubentries       uint32
+	NumSponsoring       uint32
+	NumSponsored        uint32
+	HomeDomain          *string
+	MasterWeight        uint32
+	LowThreshold        uint32
+	MedThreshold        uint32
+	HighThreshold       uint32
 	Flags               uint32
 	AuthRequired        bool
 	AuthRevocable       bool
 	AuthImmutable       bool
 	AuthClawbackEnabled bool
-	Signers        *string
-	SponsorAccount *string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-	LedgerRange    uint32
-	EraID          *string
+	Signers             *string
+	SponsorAccount      *string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+	LedgerRange         uint32
+	EraID               *string
 }
 
 // TrustlineData represents trustline snapshot state (trustlines_snapshot_v1)

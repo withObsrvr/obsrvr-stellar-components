@@ -84,10 +84,15 @@ type ContractCreationData struct {
 	ContractID     string
 	CreatorAddress string
 	WasmHash       *string
-	CreatedLedger  uint32
-	CreatedAt      time.Time
-	LedgerRange    uint32
-	EraID          *string
+	// ExecutableType is "wasm", "stellar_asset", or (Protocol 28, CAP-0085)
+	// "external_ref". A nil WasmHash alone no longer implies a SAC deployment.
+	ExecutableType   string
+	ExternalRefOwner *string
+	ExternalRefTag   *string
+	CreatedLedger    uint32
+	CreatedAt        time.Time
+	LedgerRange      uint32
+	EraID            *string
 }
 
 // ContractCall represents a single cross-contract call in the call graph

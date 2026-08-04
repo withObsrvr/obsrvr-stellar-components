@@ -126,8 +126,10 @@ The topology is not production-approved until these are complete:
    real-ledger trigger gate now pass one soft-idle and one hard-limit checkpoint
    with no ingest errors/retries. The cadence-shaped SLO gate remains open and
    the controller remains disabled; Grafana and mainnet promotion are deferred.
-5. Upgrade from `flowctl-sdk v0.1.2` after the planned runtime delivery,
-   backpressure, registration, and health fixes are released.
+5. Dependencies now use `stellar-extract v0.1.4`, `flowctl-sdk v0.1.3`, and
+   `go-stellar-sdk v0.7.1`. The SDK release is dependency-only: its exported
+   runtime remains unchanged from `v0.1.2`, so delivery backpressure,
+   registration retry, and health fixes still require a future SDK release.
 
 ## Operational constraints and residual risks
 

@@ -5,8 +5,13 @@ Date: 2026-07-02
 Current dependency:
 
 ```text
-github.com/withObsrvr/flowctl-sdk v0.1.2
+github.com/withObsrvr/flowctl-sdk v0.1.3
 ```
+
+`v0.1.3` aligns the SDK and standalone examples with `go-stellar-sdk v0.7.1`.
+The exported `pkg/` runtime is unchanged from `v0.1.2`; this release does not
+contain the delivery, backpressure, registration, or health behavior described
+below.
 
 The production-hardening cycles added component-side guards first. The SDK
 upgrade should move root delivery/runtime behavior into `flowctl-sdk` so new
@@ -14,7 +19,7 @@ components inherit it without reimplementing the same protections.
 
 ## Target Release
 
-Target: `flowctl-sdk v0.1.3`
+Target: a future runtime release after `v0.1.3` (version not yet assigned)
 
 Required changes:
 
@@ -48,20 +53,12 @@ processors after the SDK release is tagged.
 
 ## Migration Steps
 
-1. Patch `withObsrvr/flowctl-sdk`.
+1. Patch `withObsrvr/flowctl-sdk` after the dependency-only `v0.1.3` release.
 2. Add SDK-level tests for handler error propagation, bounded concurrency,
    registration retry, health state, and bad config parsing.
-3. Tag `v0.1.3`.
-4. In this repo:
-
-   ```bash
-   go get github.com/withObsrvr/flowctl-sdk@v0.1.3
-   go mod vendor
-   go test ./...
-   make validate-pipelines
-   make build
-   ```
-
+3. Tag a new runtime release.
+4. Upgrade this repository to that release, refresh `vendor/`, and run the full
+   test, pipeline, build, and chaos gates.
 5. Opt in `ducklake-sink`, `postgres-sink`, `jsonl-sink`, and
    `stellar-ledger-processor` to the new SDK options.
 6. Keep component-side crash-on-write-failure until the SDK policy is proven in

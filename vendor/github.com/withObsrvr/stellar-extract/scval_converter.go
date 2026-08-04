@@ -239,6 +239,15 @@ func ConvertScValToJSON(val xdr.ScVal) (interface{}, error) {
 			"code":       val.Error.Code,
 		}, nil
 
+	case xdr.ScValTypeScvExecutableTag:
+		if val.ExecutableTag == nil {
+			return nil, fmt.Errorf("ScvExecutableTag has nil value")
+		}
+		return map[string]interface{}{
+			"type":  "executable_tag",
+			"value": string(*val.ExecutableTag),
+		}, nil
+
 	default:
 		return nil, fmt.Errorf("unsupported ScVal type: %s", val.Type.String())
 	}

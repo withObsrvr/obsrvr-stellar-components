@@ -6,10 +6,10 @@ require (
 	github.com/duckdb/duckdb-go/v2 v2.10504.0
 	github.com/lib/pq v1.10.9
 	github.com/prometheus/client_golang v1.17.0
-	github.com/stellar/go-stellar-sdk v0.6.0
+	github.com/stellar/go-stellar-sdk v0.7.1
 	github.com/withObsrvr/flow-proto v0.1.3
-	github.com/withObsrvr/flowctl-sdk v0.1.2
-	github.com/withObsrvr/stellar-extract v0.1.3
+	github.com/withObsrvr/flowctl-sdk v0.1.3
+	github.com/withObsrvr/stellar-extract v0.1.4
 	google.golang.org/grpc v1.79.2
 	google.golang.org/protobuf v1.36.11
 )
