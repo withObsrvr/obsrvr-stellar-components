@@ -130,12 +130,9 @@ func ExtractTransactions(input *LedgerInput) ([]TransactionData, error) {
 		}
 
 		// Extract Soroban rent fee charged (C13)
-		if tx.UnsafeMeta.V == 3 {
-			v3 := tx.UnsafeMeta.MustV3()
-			if v3.SorobanMeta != nil && v3.SorobanMeta.Ext.V == 1 && v3.SorobanMeta.Ext.V1 != nil {
-				rentFee := int64(v3.SorobanMeta.Ext.V1.RentFeeCharged)
-				txData.RentFeeCharged = &rentFee
-			}
+		if ext := sorobanMetaExt(tx.UnsafeMeta); ext != nil && ext.V == 1 && ext.V1 != nil {
+			rentFee := int64(ext.V1.RentFeeCharged)
+			txData.RentFeeCharged = &rentFee
 		}
 
 		// Extract Soroban resource fields from envelope
@@ -239,6 +236,25 @@ func setSellingAssetFields(opData *OperationData, asset xdr.Asset) {
 	if aIssuer != "" {
 		opData.SellingAssetIssuer = &aIssuer
 	}
+}
+
+// sorobanMetaExt returns the Soroban meta extension for a transaction, or nil
+// when the transaction carries no Soroban meta. Soroban meta appears in
+// TransactionMeta V3 (SorobanTransactionMeta) and, since Protocol 23, in V4
+// (SorobanTransactionMetaV2); both share SorobanTransactionMetaExt. Reading
+// only V3 leaves rent_fee_charged NULL on every current-protocol ledger.
+func sorobanMetaExt(meta xdr.TransactionMeta) *xdr.SorobanTransactionMetaExt {
+	switch meta.V {
+	case 3:
+		if v3 := meta.MustV3(); v3.SorobanMeta != nil {
+			return &v3.SorobanMeta.Ext
+		}
+	case 4:
+		if v4 := meta.MustV4(); v4.SorobanMeta != nil {
+			return &v4.SorobanMeta.Ext
+		}
+	}
+	return nil
 }
 
 // getMuxedAddress returns the muxed account string if the account is muxed, nil otherwise.

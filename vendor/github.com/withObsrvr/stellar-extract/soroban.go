@@ -471,6 +471,32 @@ func nullableString(s string) *string {
 	return &str
 }
 
+// applyExecutable records the executable a contract was created from. Protocol
+// 28 (CAP-0085) added CONTRACT_EXECUTABLE_EXTERNAL_REF alongside wasm and
+// stellar-asset, so the executable kind is recorded explicitly rather than
+// inferred from whether a WASM hash is present.
+func applyExecutable(creation *ContractCreationData, exec xdr.ContractExecutable) {
+	switch exec.Type {
+	case xdr.ContractExecutableTypeContractExecutableWasm:
+		creation.ExecutableType = "wasm"
+		if wasmHash, ok := exec.GetWasmHash(); ok {
+			creation.WasmHash = nullableString(hex.EncodeToString(wasmHash[:]))
+		}
+	case xdr.ContractExecutableTypeContractExecutableStellarAsset:
+		creation.ExecutableType = "stellar_asset"
+	case xdr.ContractExecutableTypeContractExecutableExternalRef:
+		creation.ExecutableType = "external_ref"
+		if ref, ok := exec.GetExternalRef(); ok {
+			if owner, err := ref.ExecutableOwner.String(); err == nil {
+				creation.ExternalRefOwner = &owner
+			}
+			creation.ExternalRefTag = nullableString(string(ref.Tag))
+		}
+	default:
+		creation.ExecutableType = exec.Type.String()
+	}
+}
+
 // extractTokenMetadata extracts token name, symbol, and decimals from
 // a contract instance storage entry's metadata map.
 func extractTokenMetadata(contractData xdr.ContractDataEntry) (*string, *string, *int32) {
@@ -995,20 +1021,14 @@ func ExtractContractCreations(input *LedgerInput) ([]ContractCreationData, error
 								EraID:          input.EraID,
 							}
 
-							// Try to extract WASM hash
+							// Record the executable this contract was created from
 							if fnType == xdr.HostFunctionTypeHostFunctionTypeCreateContract {
 								if args, ok := invokeHostFn.HostFunction.GetCreateContract(); ok {
-									if wasmHash, ok := args.Executable.GetWasmHash(); ok {
-										wasmHashStr := hex.EncodeToString(wasmHash[:])
-										creation.WasmHash = &wasmHashStr
-									}
+									applyExecutable(&creation, args.Executable)
 								}
 							} else if fnType == xdr.HostFunctionTypeHostFunctionTypeCreateContractV2 {
 								if args, ok := invokeHostFn.HostFunction.GetCreateContractV2(); ok {
-									if wasmHash, ok := args.Executable.GetWasmHash(); ok {
-										wasmHashStr := hex.EncodeToString(wasmHash[:])
-										creation.WasmHash = &wasmHashStr
-									}
+									applyExecutable(&creation, args.Executable)
 								}
 							}
 

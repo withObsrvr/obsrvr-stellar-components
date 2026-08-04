@@ -51,7 +51,7 @@ var (
 	sqlLiteral                = bronze.SQLLiteral
 	quoteIdentifier           = bronze.QuoteIdentifier
 	splitSQLStatements        = bronze.SplitSQLStatements
-	qualifyCreateTableSQL     = bronze.QualifyCreateTableSQL
+	qualifyMigrationSQL       = bronze.QualifyMigrationSQL
 	recordMigrationTx         = bronze.RecordMigrationTx
 	ensureMigrationRecordedTx = bronze.EnsureMigrationRecordedTx
 )
@@ -398,15 +398,15 @@ func (s *DuckLakeSink) sweepStaleStagingDirs() {
 func (s *DuckLakeSink) remoteInitSQL() string {
 	stmts := []string{
 		fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s.bronze", s.remoteCatalog),
-		qualifyCreateTableSQL(createCatalogMetadataSQL, s.remoteCatalog, ""),
-		qualifyCreateTableSQL(createIngestWatermarksSQL, s.remoteCatalog, ""),
-		qualifyCreateTableSQL(createSchemaMigrationsSQL, s.remoteCatalog, ""),
-		qualifyCreateTableSQL(createLedgerBatchesSQL, s.remoteCatalog, ""),
-		qualifyCreateTableSQL(createBronzeRowsSQL, s.remoteCatalog, ""),
+		qualifyMigrationSQL(createCatalogMetadataSQL, s.remoteCatalog, ""),
+		qualifyMigrationSQL(createIngestWatermarksSQL, s.remoteCatalog, ""),
+		qualifyMigrationSQL(createSchemaMigrationsSQL, s.remoteCatalog, ""),
+		qualifyMigrationSQL(createLedgerBatchesSQL, s.remoteCatalog, ""),
+		qualifyMigrationSQL(createBronzeRowsSQL, s.remoteCatalog, ""),
 	}
 	for _, migration := range duckLakeMigrations {
 		for _, stmt := range splitSQLStatements(migration.SQL) {
-			stmts = append(stmts, qualifyCreateTableSQL(stmt, s.remoteCatalog, "bronze"))
+			stmts = append(stmts, qualifyMigrationSQL(stmt, s.remoteCatalog, "bronze"))
 		}
 		stmts = append(stmts, fmt.Sprintf(
 			`INSERT INTO %s.schema_migrations (version, name, applied_at)

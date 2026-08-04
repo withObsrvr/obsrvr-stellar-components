@@ -29,7 +29,7 @@ type LedgerRowData struct {
 	SorobanOpCount       *int32
 	TotalFeeCharged      *int64
 	ContractEventsCount  *int32
-	IngestionTimestamp    time.Time
+	IngestionTimestamp   time.Time
 	LedgerRange          uint32
 	PipelineVersion      string
 	EraID                *string
@@ -118,7 +118,7 @@ type OperationData struct {
 	ClearFlags      *int
 	HomeDomain      *string
 	MasterWeight    *int
-	LowThreshold   *int
+	LowThreshold    *int
 	MediumThreshold *int
 	HighThreshold   *int
 	// Manage data
@@ -148,10 +148,10 @@ type OperationData struct {
 
 // EffectData represents a single effect (state changes from operations)
 type EffectData struct {
-	LedgerSequence  uint32
-	TransactionHash string
-	OperationIndex  int
-	EffectIndex     int
+	LedgerSequence   uint32
+	TransactionHash  string
+	OperationIndex   int
+	EffectIndex      int
 	EffectType       int
 	EffectTypeString string
 	AccountID        *string

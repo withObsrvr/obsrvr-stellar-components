@@ -573,6 +573,20 @@ WHERE NOT EXISTS (
   WHERE soroban_operation IS NOT NULL
     AND soroban_arguments_json IS NOT NULL
 );
+INSERT INTO gate_failures
+SELECT 'transactions_row_v2_v4_rent_fee', count(*), 'Soroban TransactionMeta V4 rows had NULL rent_fee_charged'
+FROM chaos.bronze.transactions_row_v2
+WHERE soroban_resources_instructions IS NOT NULL
+  AND rent_fee_charged IS NULL
+HAVING count(*) > 0;
+INSERT INTO gate_failures
+SELECT 'contract_creations_v1_protocol_28_columns', count(*), 'Protocol 28 executable columns are missing'
+FROM information_schema.columns
+WHERE table_catalog = 'chaos'
+  AND table_schema = 'bronze'
+  AND table_name = 'contract_creations_v1'
+  AND column_name IN ('executable_type', 'external_ref_owner', 'external_ref_tag')
+HAVING count(*) <> 3;
 .once $runtime_dir/gate-failures.csv
 SELECT * FROM gate_failures ORDER BY check_name;
 SQL

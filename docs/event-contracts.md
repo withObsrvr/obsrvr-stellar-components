@@ -34,6 +34,14 @@ Each `BronzeRow` has the destination table name and a JSON serialization of the 
 
 `ducklake-sink` materializes those rows into typed `bronze.*` tables compatible with the `stellar-history-loader` bronze schema. The envelope itself is transport-only: `ducklake-sink` does not persist `bronze_rows` or the raw batch payload (the upstream archive is the replay source).
 
+With `stellar-extract v0.1.4`, `contract_creations_v1` also materializes
+`executable_type`, `external_ref_owner`, and `external_ref_tag` so Protocol 28
+external-reference executables are not confused with Stellar Asset Contract
+instances. DuckLake migration `002_contract_executable_columns` adds these
+columns to existing catalogs. The extractor also corrects `rent_fee_charged`
+for TransactionMeta V4; historical Protocol 23-and-newer rows require a
+separate replay/backfill to acquire the corrected value.
+
 ## Idempotency
 
 Rows use deterministic IDs:

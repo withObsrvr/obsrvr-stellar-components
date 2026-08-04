@@ -603,6 +603,47 @@ func TestDuckLakeSinkRecordsBronzeSchemaMigrationOnce(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("migration records = %d, want 1", count)
 	}
+	if err := sink.db.QueryRow("SELECT count(*) FROM schema_migrations WHERE version = 2 AND name = 'contract_executable_columns'").Scan(&count); err != nil {
+		t.Fatalf("query contract executable migration: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("contract executable migration records = %d, want 1", count)
+	}
+	for _, column := range []string{"executable_type", "external_ref_owner", "external_ref_tag"} {
+		if err := sink.db.QueryRow(`SELECT count(*) FROM information_schema.columns WHERE table_schema = 'bronze' AND table_name = 'contract_creations_v1' AND column_name = ?`, column).Scan(&count); err != nil {
+			t.Fatalf("query contract creation column %s: %v", column, err)
+		}
+		if count != 1 {
+			t.Fatalf("contract creation column %s count = %d, want 1", column, count)
+		}
+	}
+}
+
+func TestContractExecutableMigrationUpgradesExistingTable(t *testing.T) {
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatalf("open duckdb: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`CREATE SCHEMA bronze; CREATE TABLE bronze.contract_creations_v1 (contract_id TEXT, wasm_hash TEXT)`); err != nil {
+		t.Fatalf("create pre-v0.1.4 contract creation table: %v", err)
+	}
+	migration := duckLakeMigrations[1]
+	for _, stmt := range splitSQLStatements(migration.SQL) {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("apply migration %03d statement %q: %v", migration.Version, stmt, err)
+		}
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("reapply idempotent migration %03d statement %q: %v", migration.Version, stmt, err)
+		}
+	}
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM information_schema.columns WHERE table_schema = 'bronze' AND table_name = 'contract_creations_v1' AND column_name IN ('executable_type', 'external_ref_owner', 'external_ref_tag')`).Scan(&count); err != nil {
+		t.Fatalf("query migrated columns: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("migrated Protocol 28 columns = %d, want 3", count)
+	}
 }
 
 func TestRecordMigrationTxIsIdempotent(t *testing.T) {
@@ -682,6 +723,9 @@ func TestRemoteInitSQLRecordsBronzeSchemaMigration(t *testing.T) {
 		"stellar_lake.schema_migrations",
 		"1, 'bronze_schema'",
 		"WHERE NOT EXISTS (SELECT 1 FROM stellar_lake.schema_migrations WHERE version = 1)",
+		"ALTER TABLE stellar_lake.bronze.contract_creations_v1 ADD COLUMN IF NOT EXISTS executable_type TEXT",
+		"2, 'contract_executable_columns'",
+		"WHERE NOT EXISTS (SELECT 1 FROM stellar_lake.schema_migrations WHERE version = 2)",
 	} {
 		if !strings.Contains(sqlText, want) {
 			t.Fatalf("remote init SQL missing %q:\n%s", want, sqlText)

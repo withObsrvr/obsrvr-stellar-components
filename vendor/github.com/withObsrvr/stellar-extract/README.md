@@ -8,7 +8,10 @@ Shared Go library for extracting typed rows from Stellar ledger data. Single sou
 go get github.com/withObsrvr/stellar-extract@latest
 ```
 
-Only dependency: `github.com/stellar/go-stellar-sdk v0.6.0`
+Only dependency: `github.com/stellar/go-stellar-sdk v0.7.1` (Protocol 28).
+
+Upgrading that pin is a protocol change, not a routine bump — see
+[docs/SDK_UPGRADES.md](docs/SDK_UPGRADES.md).
 
 ## Quick start
 
@@ -199,3 +202,4 @@ Based on comparison with [stellar-etl](https://github.com/stellar/stellar-etl) (
 - **One input type.** Every extractor takes `*LedgerInput`. Callers construct it from XDR bytes or a decoded LCM.
 - **Concurrent by default.** `ExtractAll` runs all 16 extractors in goroutines. Individual extractors are also safe to call concurrently.
 - **Single SDK pin.** All extraction logic uses one version of `go-stellar-sdk`. When the SDK is upgraded, every consumer gets the fix.
+- **Protocol changes must fail loudly.** Every extractor switches on XDR union discriminants, and Go does not warn when a protocol upgrade adds an arm an existing switch ignores — the build stays green and the columns go quietly wrong. `protocol_coverage_test.go` enumerates the discriminants the SDK declares valid and fails when one is unhandled.
