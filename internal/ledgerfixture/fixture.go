@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"path/filepath"
@@ -47,9 +48,10 @@ type ManifestFile struct {
 	LedgerEnd   uint32 `json:"ledger_end"`
 }
 
-// LoadManifest parses and validates a fixture manifest and verifies every
-// referenced file hash before any batch is sent to an ingest server.
-func LoadManifest(path string) (*Manifest, error) {
+// ReadManifest parses and validates fixture metadata without reading payload
+// files. Consume payloads with RangeReader for inline verification, or call
+// VerifyRange before using another reader.
+func ReadManifest(path string) (*Manifest, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read fixture manifest: %w", err)
@@ -66,31 +68,64 @@ func LoadManifest(path string) (*Manifest, error) {
 	if err := manifest.Validate(); err != nil {
 		return nil, err
 	}
+	return &manifest, nil
+}
+
+// LoadManifest verifies the complete corpus. Range workers should use
+// ReadManifest followed by VerifyRange to avoid hashing unrelated chunks.
+func LoadManifest(path string) (*Manifest, error) {
+	manifest, err := ReadManifest(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := VerifyRange(path, manifest, manifest.LedgerStart, manifest.LedgerEnd); err != nil {
+		return nil, err
+	}
+	return manifest, nil
+}
+
+// VerifyRange hashes only files that overlap the inclusive selected range.
+// The manifest itself still guarantees complete, ordered corpus coverage.
+func VerifyRange(path string, manifest *Manifest, start, end uint32) error {
+	if manifest == nil {
+		return fmt.Errorf("fixture manifest is nil")
+	}
+	if start < manifest.LedgerStart || end > manifest.LedgerEnd || end < start {
+		return fmt.Errorf("fixture verification range %d-%d falls outside manifest %d-%d", start, end, manifest.LedgerStart, manifest.LedgerEnd)
+	}
 	base := filepath.Dir(path)
+	verified := 0
 	for _, file := range manifest.Files {
+		if file.LedgerEnd < start || file.LedgerStart > end {
+			continue
+		}
 		fullPath, err := resolveFile(base, file.Path)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		info, err := os.Lstat(fullPath)
 		if err != nil {
-			return nil, fmt.Errorf("stat fixture file %q: %w", file.Path, err)
+			return fmt.Errorf("stat fixture file %q: %w", file.Path, err)
 		}
 		if !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("fixture file %q is not a regular file", file.Path)
+			return fmt.Errorf("fixture file %q is not a regular file", file.Path)
 		}
 		if info.Size() != file.Bytes {
-			return nil, fmt.Errorf("fixture file %q size is %d, manifest requires %d", file.Path, info.Size(), file.Bytes)
+			return fmt.Errorf("fixture file %q size is %d, manifest requires %d", file.Path, info.Size(), file.Bytes)
 		}
 		actual, err := hashFile(fullPath)
 		if err != nil {
-			return nil, fmt.Errorf("hash fixture file %q: %w", file.Path, err)
+			return fmt.Errorf("hash fixture file %q: %w", file.Path, err)
 		}
 		if !strings.EqualFold(actual, file.SHA256) {
-			return nil, fmt.Errorf("fixture file %q sha256 is %s, manifest requires %s", file.Path, actual, file.SHA256)
+			return fmt.Errorf("fixture file %q sha256 is %s, manifest requires %s", file.Path, actual, file.SHA256)
 		}
+		verified++
 	}
-	return &manifest, nil
+	if verified == 0 {
+		return fmt.Errorf("fixture range %d-%d overlaps no payload files", start, end)
+	}
+	return nil
 }
 
 func ensureJSONEOF(decoder *json.Decoder) error {
@@ -273,6 +308,173 @@ func (r *Reader) Close() error {
 	r.file = nil
 	r.buffer = nil
 	return err
+}
+
+// RangeReader opens only fixture chunks that overlap one assigned shard. It
+// may decode a bounded prefix inside the first chunk, but never scans earlier
+// chunks or reads beyond the selected end ledger.
+type RangeReader struct {
+	manifest *Manifest
+	base     string
+	start    uint32
+	end      uint32
+	file     *os.File
+	buffer   *bufio.Reader
+	hasher   hash.Hash
+	fileIdx  int
+	lastIdx  int
+	fileSeen int
+	done     bool
+}
+
+func NewRangeReader(manifestPath string, manifest *Manifest, start, end uint32) (*RangeReader, error) {
+	if manifest == nil {
+		return nil, fmt.Errorf("fixture manifest is nil")
+	}
+	if start < manifest.LedgerStart || end > manifest.LedgerEnd || end < start {
+		return nil, fmt.Errorf("fixture reader range %d-%d falls outside manifest %d-%d", start, end, manifest.LedgerStart, manifest.LedgerEnd)
+	}
+	first, last := -1, -1
+	for index, file := range manifest.Files {
+		if file.LedgerEnd < start || file.LedgerStart > end {
+			continue
+		}
+		if first == -1 {
+			first = index
+		}
+		last = index
+	}
+	if first == -1 {
+		return nil, fmt.Errorf("fixture reader range %d-%d overlaps no payload files", start, end)
+	}
+	return &RangeReader{
+		manifest: manifest,
+		base:     filepath.Dir(manifestPath),
+		start:    start,
+		end:      end,
+		fileIdx:  first,
+		lastIdx:  last,
+	}, nil
+}
+
+func (r *RangeReader) Next() (*componentsv1.LedgerBatch, error) {
+	for {
+		if r.done {
+			return nil, io.EOF
+		}
+		if r.file == nil {
+			if r.fileIdx > r.lastIdx {
+				return nil, fmt.Errorf("fixture range ended before ledger %d", r.end)
+			}
+			fileSpec := r.manifest.Files[r.fileIdx]
+			path, err := resolveFile(r.base, fileSpec.Path)
+			if err != nil {
+				return nil, err
+			}
+			info, err := os.Lstat(path)
+			if err != nil {
+				return nil, fmt.Errorf("stat fixture file %q: %w", fileSpec.Path, err)
+			}
+			if !info.Mode().IsRegular() {
+				return nil, fmt.Errorf("fixture file %q is not a regular file", fileSpec.Path)
+			}
+			if info.Size() != fileSpec.Bytes {
+				return nil, fmt.Errorf("fixture file %q size is %d, manifest requires %d", fileSpec.Path, info.Size(), fileSpec.Bytes)
+			}
+			r.file, err = os.Open(path)
+			if err != nil {
+				return nil, fmt.Errorf("open fixture file %q: %w", fileSpec.Path, err)
+			}
+			r.hasher = sha256.New()
+			r.buffer = bufio.NewReader(io.TeeReader(r.file, r.hasher))
+			r.fileSeen = 0
+		}
+
+		fileSpec := r.manifest.Files[r.fileIdx]
+		batch, err := readDelimited(r.buffer)
+		if errors.Is(err, io.EOF) {
+			if r.fileSeen != fileSpec.BatchCount {
+				return nil, fmt.Errorf("fixture file %q contains %d batches, want %d", fileSpec.Path, r.fileSeen, fileSpec.BatchCount)
+			}
+			if err := r.verifyAndCloseCurrent(false); err != nil {
+				return nil, err
+			}
+			r.fileIdx++
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read fixture file %q batch %d: %w", fileSpec.Path, r.fileSeen, err)
+		}
+		expected := fileSpec.LedgerStart + uint32(r.fileSeen)
+		if batch.LedgerSequence != expected {
+			return nil, fmt.Errorf("fixture file %q batch %d has ledger %d, want %d", fileSpec.Path, r.fileSeen, batch.LedgerSequence, expected)
+		}
+		if batch.NetworkPassphrase != r.manifest.NetworkPassphrase {
+			return nil, fmt.Errorf("fixture ledger %d network passphrase does not match manifest", batch.LedgerSequence)
+		}
+		if batch.SchemaVersion != r.manifest.SchemaVersion {
+			return nil, fmt.Errorf("fixture ledger %d schema_version is %q, want %q", batch.LedgerSequence, batch.SchemaVersion, r.manifest.SchemaVersion)
+		}
+		if batch.ExtractionVersion != r.manifest.ExtractionVersion {
+			return nil, fmt.Errorf("fixture ledger %d extraction_version is %q, want %q", batch.LedgerSequence, batch.ExtractionVersion, r.manifest.ExtractionVersion)
+		}
+		r.fileSeen++
+		if batch.LedgerSequence < r.start {
+			continue
+		}
+		if batch.LedgerSequence > r.end {
+			return nil, fmt.Errorf("fixture reader passed selected end %d at ledger %d", r.end, batch.LedgerSequence)
+		}
+		if batch.LedgerSequence == r.end {
+			if batch.LedgerSequence == fileSpec.LedgerEnd && r.fileSeen != fileSpec.BatchCount {
+				return nil, fmt.Errorf("fixture file %q contains at least %d batches, want %d", fileSpec.Path, r.fileSeen, fileSpec.BatchCount)
+			}
+			if err := r.verifyAndCloseCurrent(true); err != nil {
+				return nil, err
+			}
+			r.done = true
+		}
+		return batch, nil
+	}
+}
+
+// verifyAndCloseCurrent finishes hashing the selected chunk while it is still
+// in the filesystem cache from decoding. A partial final chunk is drained as
+// raw bytes: the manifest hash authenticates the bytes beyond the requested
+// ledger without allocating or decoding unrelated LedgerBatch messages.
+func (r *RangeReader) verifyAndCloseCurrent(drain bool) error {
+	fileSpec := r.manifest.Files[r.fileIdx]
+	if drain {
+		if _, err := io.Copy(io.Discard, r.buffer); err != nil {
+			_ = r.closeCurrent()
+			return fmt.Errorf("finish hashing fixture file %q: %w", fileSpec.Path, err)
+		}
+	}
+	actual := hex.EncodeToString(r.hasher.Sum(nil))
+	closeErr := r.closeCurrent()
+	if !strings.EqualFold(actual, fileSpec.SHA256) {
+		return fmt.Errorf("fixture file %q sha256 is %s, manifest requires %s", fileSpec.Path, actual, fileSpec.SHA256)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close fixture file %q: %w", fileSpec.Path, closeErr)
+	}
+	return nil
+}
+
+func (r *RangeReader) closeCurrent() error {
+	if r.file == nil {
+		return nil
+	}
+	err := r.file.Close()
+	r.file = nil
+	r.buffer = nil
+	r.hasher = nil
+	return err
+}
+
+func (r *RangeReader) Close() error {
+	r.done = true
+	return r.closeCurrent()
 }
 
 func readDelimited(reader *bufio.Reader) (*componentsv1.LedgerBatch, error) {

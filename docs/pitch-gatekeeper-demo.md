@@ -1,7 +1,8 @@
 # Pitch: The Gatekeeper Demo (agent as gate-checked fifth writer)
 
-**Status:** BETTED 2026-07-24 — first cycle after the mandatory cool-down
-following the 2026-07-23 write-path phases. Do not start early.
+**Status:** IMPLEMENTATION STARTED 2026-08-04 — the promotion core and first
+1,000-ledger corpus run are recorded in
+`docs/gatekeeper-demo-progress-2026-08-04.md`.
 
 ## Problem
 

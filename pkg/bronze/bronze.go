@@ -32,6 +32,18 @@ ALTER TABLE bronze.contract_creations_v1 ADD COLUMN IF NOT EXISTS external_ref_o
 ALTER TABLE bronze.contract_creations_v1 ADD COLUMN IF NOT EXISTS external_ref_tag TEXT;
 `
 
+const addIngestMicrobatchCommitsSQL = `
+CREATE TABLE IF NOT EXISTS bronze.ingest_microbatch_commits (
+	network_passphrase VARCHAR NOT NULL,
+	micro_batch_id VARCHAR NOT NULL,
+	ledger_start UBIGINT NOT NULL,
+	ledger_end UBIGINT NOT NULL,
+	ledger_count UINTEGER NOT NULL,
+	payload_sha256 VARCHAR NOT NULL,
+	committed_at TIMESTAMP NOT NULL
+);
+`
+
 type Migration struct {
 	Version int
 	Name    string
@@ -41,6 +53,7 @@ type Migration struct {
 var Migrations = []Migration{
 	{Version: 1, Name: "bronze_schema", SQL: SchemaSQL},
 	{Version: 2, Name: "contract_executable_columns", SQL: addContractExecutableColumnsSQL},
+	{Version: 3, Name: "ingest_microbatch_commits", SQL: addIngestMicrobatchCommitsSQL},
 }
 
 func RecordMigrationTx(tx *sql.Tx, migration Migration) error {

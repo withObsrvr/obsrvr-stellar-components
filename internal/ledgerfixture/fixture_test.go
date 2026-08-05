@@ -123,6 +123,92 @@ func TestLoadManifestRejectsCorruptFixture(t *testing.T) {
 	}
 }
 
+func TestRangeVerificationAndReaderSkipUnrelatedChunks(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "fixture.manifest.json")
+	if _, err := RecordJSONL(strings.NewReader(fixtureJSONL(t, 100, 101, 102, 103)), RecordOptions{
+		ManifestPath:   manifestPath,
+		BatchesPerFile: 2,
+	}); err != nil {
+		t.Fatalf("record fixture: %v", err)
+	}
+	manifest, err := ReadManifest(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest metadata: %v", err)
+	}
+	firstChunk := filepath.Join(dir, manifest.Files[0].Path)
+	file, err := os.OpenFile(firstChunk, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString("unrelated-corruption"); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := VerifyRange(manifestPath, manifest, 102, 103); err != nil {
+		t.Fatalf("verify selected range: %v", err)
+	}
+	reader, err := NewRangeReader(manifestPath, manifest, 102, 103)
+	if err != nil {
+		t.Fatalf("open range reader: %v", err)
+	}
+	defer reader.Close()
+	for ledger := uint32(102); ledger <= 103; ledger++ {
+		batch, err := reader.Next()
+		if err != nil {
+			t.Fatalf("read selected ledger %d: %v", ledger, err)
+		}
+		if batch.LedgerSequence != ledger {
+			t.Fatalf("selected ledger = %d, want %d", batch.LedgerSequence, ledger)
+		}
+	}
+	if _, err := reader.Next(); !errors.Is(err, io.EOF) {
+		t.Fatalf("selected range final error = %v, want EOF", err)
+	}
+	if _, err := LoadManifest(manifestPath); err == nil {
+		t.Fatal("full manifest verification succeeded despite unrelated corrupt chunk")
+	}
+}
+
+func TestRangeReaderVerifiesSelectedChunkInline(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "fixture.manifest.json")
+	if _, err := RecordJSONL(strings.NewReader(fixtureJSONL(t, 100, 101, 102, 103)), RecordOptions{
+		ManifestPath:   manifestPath,
+		BatchesPerFile: 4,
+	}); err != nil {
+		t.Fatalf("record fixture: %v", err)
+	}
+	manifest, err := ReadManifest(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest metadata: %v", err)
+	}
+	chunkPath := filepath.Join(dir, manifest.Files[0].Path)
+	chunk, err := os.ReadFile(chunkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk[len(chunk)-1] ^= 0xff
+	if err := os.WriteFile(chunkPath, chunk, 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	reader, err := NewRangeReader(manifestPath, manifest, 100, 101)
+	if err != nil {
+		t.Fatalf("open range reader: %v", err)
+	}
+	defer reader.Close()
+	if _, err := reader.Next(); err != nil {
+		t.Fatalf("read first selected ledger: %v", err)
+	}
+	if _, err := reader.Next(); err == nil || !strings.Contains(err.Error(), "sha256 is") {
+		t.Fatalf("read final selected ledger error = %v, want inline hash mismatch", err)
+	}
+}
+
 func TestManifestRejectsEscapingAndGappedFiles(t *testing.T) {
 	manifest := Manifest{
 		FormatVersion:     FormatVersion,

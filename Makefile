@@ -1,12 +1,12 @@
-.PHONY: build lint proto test test-local-pipeline test-quack-chaos test-ingest-chaos test-telemetry-gate test-manual-checkpoint-gate test-checkpoint-gate test-crash-recovery-gate test-kill-checkpoint-gate test-checkpoint-failure-gate test-checkpoint-controller-gate test-ingest-replay-smoke test-cadence-gate validate-pipelines validate-nomad docker-flowctl-runner tidy clean
+.PHONY: build lint proto test test-local-pipeline test-quack-chaos test-ingest-chaos test-telemetry-gate test-manual-checkpoint-gate test-checkpoint-gate test-crash-recovery-gate test-kill-checkpoint-gate test-checkpoint-failure-gate test-checkpoint-controller-gate test-ingest-replay-smoke test-cadence-gate test-file-backfill-benchmark validate-pipelines validate-nomad docker-flowctl-runner tidy clean
 
 GO ?= go
 GOFMT ?= gofmt
 PROTOC ?= protoc
 CGO_ENABLED ?= 1
 
-COMPONENTS := stellar-ledger-processor jsonl-sink postgres-sink ducklake-sink quack-ducklake-server index-materializer ducklake-replica-sync ducklake-maintenance
-TOOLS := ledger-smoke ledger-fixture-recorder ingest-replay
+COMPONENTS := stellar-ledger-processor jsonl-sink postgres-sink ducklake-sink quack-ducklake-server index-materializer ducklake-replica-sync ducklake-maintenance ducklake-gatekeeper
+TOOLS := ledger-smoke ledger-fixture-recorder ingest-replay ducklake-backfill-worker
 
 build:
 	@mkdir -p bin
@@ -66,6 +66,9 @@ test-ingest-replay-smoke:
 
 test-cadence-gate:
 	@scripts/ducklake-cadence-gate.sh
+
+test-file-backfill-benchmark:
+	@scripts/ducklake-file-backfill-benchmark.sh
 
 validate-pipelines:
 	@scripts/validate-pipelines.sh

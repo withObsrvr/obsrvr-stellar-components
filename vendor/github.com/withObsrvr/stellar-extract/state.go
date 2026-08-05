@@ -103,12 +103,63 @@ func isConfigSettingChange(change ingest.Change) bool {
 	return false
 }
 
-// parseConfigSettingFields extracts specific fields from config setting entry.
-// For MVP, we store the full XDR which provides complete fidelity.
+// parseConfigSettingFields promotes the settings that act as capacity
+// denominators into their own columns.
+//
+// ConfigSettingXDR still carries the entry in full; these are the values a
+// consumer needs to turn a usage number into a percentage, and reaching them
+// otherwise means decoding the XDR at query time. Every setting arrives as its
+// own entry, so a given call populates only the fields belonging to that one
+// and leaves the rest nil.
+//
+// Protocol 23 renamed the read-side limits to "disk read" (CAP-0062 moved
+// live state out of the disk-read budget). They keep their original column
+// names here — the meaning consumers care about, the ledger-wide ceiling on
+// entries a transaction may read, is unchanged.
 func parseConfigSettingFields(entry *xdr.ConfigSettingEntry, data *ConfigSettingData) {
-	// Full config data is available in ConfigSettingXDR field
-	// Individual fields can be parsed from XDR as needed
+	if entry == nil {
+		return
+	}
+
+	switch entry.ConfigSettingId {
+	case xdr.ConfigSettingIdConfigSettingContractMaxSizeBytes:
+		if v, ok := entry.GetContractMaxSizeBytes(); ok {
+			data.ContractMaxSizeBytes = uint32Ptr(uint32(v))
+		}
+
+	case xdr.ConfigSettingIdConfigSettingContractComputeV0:
+		if v, ok := entry.GetContractCompute(); ok {
+			data.LedgerMaxInstructions = int64Ptr(int64(v.LedgerMaxInstructions))
+			data.TxMaxInstructions = int64Ptr(int64(v.TxMaxInstructions))
+			data.FeeRatePerInstructionsIncrement = int64Ptr(int64(v.FeeRatePerInstructionsIncrement))
+			data.TxMemoryLimit = uint32Ptr(uint32(v.TxMemoryLimit))
+		}
+
+	case xdr.ConfigSettingIdConfigSettingContractLedgerCostV0:
+		if v, ok := entry.GetContractLedgerCost(); ok {
+			data.LedgerMaxReadLedgerEntries = uint32Ptr(uint32(v.LedgerMaxDiskReadEntries))
+			data.LedgerMaxReadBytes = uint32Ptr(uint32(v.LedgerMaxDiskReadBytes))
+			data.LedgerMaxWriteLedgerEntries = uint32Ptr(uint32(v.LedgerMaxWriteLedgerEntries))
+			data.LedgerMaxWriteBytes = uint32Ptr(uint32(v.LedgerMaxWriteBytes))
+			data.TxMaxReadLedgerEntries = uint32Ptr(uint32(v.TxMaxDiskReadEntries))
+			data.TxMaxReadBytes = uint32Ptr(uint32(v.TxMaxDiskReadBytes))
+			data.TxMaxWriteLedgerEntries = uint32Ptr(uint32(v.TxMaxWriteLedgerEntries))
+			data.TxMaxWriteBytes = uint32Ptr(uint32(v.TxMaxWriteBytes))
+		}
+
+	case xdr.ConfigSettingIdConfigSettingContractLedgerCostExtV0:
+		// CAP-0062 caps the total footprint entries a single transaction may
+		// declare. It is the denominator for a per-transaction footprint
+		// meter, which the ledger-wide limits above cannot express.
+		if v, ok := entry.GetContractLedgerCostExt(); ok {
+			data.TxMaxFootprintEntries = uint32Ptr(uint32(v.TxMaxFootprintEntries))
+		}
+	}
 }
+
+func uint32Ptr(v uint32) *uint32 { return &v }
+
+func int64Ptr(v int64) *int64 { return &v }
 
 // encodeConfigSettingXDR encodes config setting entry to base64 XDR.
 func encodeConfigSettingXDR(entry *xdr.ConfigSettingEntry) string {

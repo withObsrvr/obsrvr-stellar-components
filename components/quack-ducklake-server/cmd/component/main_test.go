@@ -274,6 +274,11 @@ func validTestConfig() config {
 		CheckpointPollInterval:      time.Second,
 		CheckpointIdleDuration:      2 * time.Second,
 		InlineRowLimit:              1024,
+		IngestProfile:               "live",
+		BackfillMaxLedgers:          100,
+		BackfillMaxEncodedBytes:     512 * 1024 * 1024,
+		BackfillMaxBronzeRows:       2_000_000,
+		BackfillDecodeWorkers:       8,
 	}
 }
 

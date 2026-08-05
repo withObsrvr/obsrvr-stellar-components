@@ -11,6 +11,7 @@ import (
 	"time"
 
 	componentsv1 "github.com/withObsrvr/obsrvr-stellar-components/gen/go/stellar/components/v1"
+	"github.com/withObsrvr/obsrvr-stellar-components/internal/ingestbatch"
 )
 
 type batchReader interface {
@@ -84,6 +85,29 @@ type replaySummary struct {
 	ArrivalToAck            latencySummary `json:"arrival_to_ack"`
 	RequiredIdleCheckpoints int            `json:"required_idle_checkpoints"`
 	ObservedIdleCheckpoints int            `json:"observed_idle_checkpoints"`
+	Transport               string         `json:"transport"`
+	MicrobatchTargetLedgers int            `json:"microbatch_target_ledgers,omitempty"`
+	MicrobatchMaxBytes      int64          `json:"microbatch_max_encoded_bytes,omitempty"`
+	MicrobatchMaxRows       int64          `json:"microbatch_max_bronze_rows,omitempty"`
+	MicrobatchMinLedgers    int            `json:"microbatch_min_ledgers,omitempty"`
+	MicrobatchMaxLedgers    int            `json:"microbatch_max_ledgers,omitempty"`
+	Microbatches            int            `json:"microbatches,omitempty"`
+	EncodedBytes            uint64         `json:"encoded_bytes,omitempty"`
+	BronzeRows              uint64         `json:"bronze_rows,omitempty"`
+	LedgersPerSecond        float64        `json:"ledgers_per_second,omitempty"`
+	MicrobatchRPCLatency    latencySummary `json:"microbatch_rpc_latency,omitempty"`
+}
+
+type microBatchResult struct {
+	MicroBatchID string  `json:"micro_batch_id"`
+	LedgerStart  uint32  `json:"ledger_start"`
+	LedgerEnd    uint32  `json:"ledger_end"`
+	LedgerCount  uint32  `json:"ledger_count"`
+	EncodedBytes uint64  `json:"encoded_bytes"`
+	BronzeRows   uint64  `json:"bronze_rows"`
+	RPCLatencyMS float64 `json:"rpc_latency_ms"`
+	Replayed     bool    `json:"replayed"`
+	Deduplicated bool    `json:"deduplicated"`
 }
 
 func executeReplay(ctx context.Context, config replayConfig, fixtureCount int, reader batchReader, sender batchSender, results io.Writer, clock replayClock) (replaySummary, error) {
@@ -102,6 +126,7 @@ func executeReplay(ctx context.Context, config replayConfig, fixtureCount int, r
 		MaxLatency:              config.MaxLatency.String(),
 		Seed:                    config.Seed,
 		RequiredIdleCheckpoints: config.RequireCheckpoints,
+		Transport:               "per-ledger",
 	}
 	finish := func(err error) (replaySummary, error) {
 		finished := clock.Now()
@@ -207,6 +232,156 @@ func executeReplay(ctx context.Context, config replayConfig, fixtureCount int, r
 		arrivalLatencies = append(arrivalLatencies, arrivalLatency)
 		log.Printf("ingest replay acknowledged ledger %d in %s (schedule lag %s, replayed=%t)",
 			batch.LedgerSequence, rpcLatency.Round(time.Millisecond), scheduleLag.Round(time.Millisecond), ack.Replayed)
+	}
+	return finish(nil)
+}
+
+func executeMicroBatchReplay(ctx context.Context, config replayConfig, fixtureCount int, reader batchReader, sender microBatchSender, results io.Writer, clock replayClock) (replaySummary, error) {
+	started := clock.Now()
+	var latencies []time.Duration
+	summary := replaySummary{
+		Profile:                 config.Profile,
+		FixtureManifest:         config.Fixtures,
+		FixtureBatchCount:       fixtureCount,
+		FixtureOffset:           config.Offset,
+		RequestedCount:          config.Count,
+		StartedAt:               started.UTC().Format(time.RFC3339Nano),
+		Cadence:                 config.Cadence.String(),
+		Jitter:                  config.Jitter.String(),
+		ConfiguredDuration:      config.Duration.String(),
+		MaxLatency:              config.MaxLatency.String(),
+		Seed:                    config.Seed,
+		RequiredIdleCheckpoints: config.RequireCheckpoints,
+		Transport:               "microbatch",
+		MicrobatchTargetLedgers: config.MicrobatchLedgers,
+		MicrobatchMaxBytes:      config.MicrobatchMaxBytes,
+		MicrobatchMaxRows:       config.MicrobatchMaxRows,
+	}
+	finish := func(err error) (replaySummary, error) {
+		finished := clock.Now()
+		summary.MicrobatchRPCLatency = summarizeDurations(latencies)
+		summary.RPCLatency = summary.MicrobatchRPCLatency
+		summary.FinishedAt = finished.UTC().Format(time.RFC3339Nano)
+		summary.ElapsedSeconds = finished.Sub(started).Seconds()
+		if summary.ElapsedSeconds > 0 {
+			summary.LedgersPerSecond = float64(summary.Acknowledged) / summary.ElapsedSeconds
+		}
+		if err != nil {
+			summary.Failure = err.Error()
+		}
+		return summary, err
+	}
+
+	for skipped := 0; skipped < config.Offset; skipped++ {
+		if _, err := reader.Next(); errors.Is(err, io.EOF) {
+			return finish(fmt.Errorf("fixture ended after %d ledgers, cannot apply offset %d", skipped, config.Offset))
+		} else if err != nil {
+			return finish(err)
+		}
+	}
+
+	resultsEncoder := json.NewEncoder(results)
+	consumed := 0
+	fixtureEnded := false
+	var pending *componentsv1.LedgerBatch
+	for !fixtureEnded {
+		if config.Count > 0 && consumed >= config.Count {
+			break
+		}
+		batches := make([]*componentsv1.LedgerBatch, 0, config.MicrobatchLedgers)
+		var batchBytes uint64
+		var batchRows uint64
+		for len(batches) < config.MicrobatchLedgers && (config.Count == 0 || consumed+len(batches) < config.Count) {
+			batch := pending
+			pending = nil
+			if batch == nil {
+				var err error
+				batch, err = reader.Next()
+				if errors.Is(err, io.EOF) {
+					fixtureEnded = true
+					break
+				}
+				if err != nil {
+					return finish(err)
+				}
+			}
+			encodedBytes, bronzeRows, err := ingestbatch.MeasureLedger(batch)
+			if err != nil {
+				return finish(err)
+			}
+			if (config.MicrobatchMaxBytes > 0 && encodedBytes > uint64(config.MicrobatchMaxBytes)) ||
+				(config.MicrobatchMaxRows > 0 && bronzeRows > uint64(config.MicrobatchMaxRows)) {
+				return finish(fmt.Errorf("ledger %d exceeds the configured micro-batch byte or row limit", batch.LedgerSequence))
+			}
+			wouldExceedBytes := config.MicrobatchMaxBytes > 0 && batchBytes+encodedBytes > uint64(config.MicrobatchMaxBytes)
+			wouldExceedRows := config.MicrobatchMaxRows > 0 && batchRows+bronzeRows > uint64(config.MicrobatchMaxRows)
+			if len(batches) > 0 && (wouldExceedBytes || wouldExceedRows) {
+				pending = batch
+				break
+			}
+			batches = append(batches, batch)
+			batchBytes += encodedBytes
+			batchRows += bronzeRows
+		}
+		if len(batches) == 0 {
+			break
+		}
+
+		ackContext, cancel := context.WithTimeout(ctx, config.AckTimeout)
+		ack, descriptor, latency, err := sender.Send(ackContext, batches)
+		cancel()
+		summary.Sent += len(batches)
+		if err != nil {
+			return finish(err)
+		}
+		if ack.MicroBatchId != descriptor.ID || ack.LedgerStart != descriptor.LedgerStart || ack.LedgerEnd != descriptor.LedgerEnd || ack.LedgerCount != descriptor.LedgerCount {
+			return finish(fmt.Errorf("micro-batch ack mismatch for ledgers %d-%d", descriptor.LedgerStart, descriptor.LedgerEnd))
+		}
+		result := microBatchResult{
+			MicroBatchID: ack.MicroBatchId,
+			LedgerStart:  ack.LedgerStart,
+			LedgerEnd:    ack.LedgerEnd,
+			LedgerCount:  ack.LedgerCount,
+			EncodedBytes: descriptor.EncodedBytes,
+			BronzeRows:   descriptor.BronzeRows,
+			RPCLatencyMS: milliseconds(latency),
+			Replayed:     ack.Replayed,
+			Deduplicated: ack.Deduplicated,
+		}
+		if err := resultsEncoder.Encode(result); err != nil {
+			return finish(fmt.Errorf("write per-micro-batch result: %w", err))
+		}
+
+		summary.Microbatches++
+		if summary.MicrobatchMinLedgers == 0 || len(batches) < summary.MicrobatchMinLedgers {
+			summary.MicrobatchMinLedgers = len(batches)
+		}
+		if len(batches) > summary.MicrobatchMaxLedgers {
+			summary.MicrobatchMaxLedgers = len(batches)
+		}
+		summary.Acknowledged += len(batches)
+		summary.EncodedBytes += descriptor.EncodedBytes
+		summary.BronzeRows += descriptor.BronzeRows
+		if summary.Acknowledged == len(batches) {
+			summary.FirstLedger = descriptor.LedgerStart
+		}
+		summary.LastLedger = descriptor.LedgerEnd
+		if ack.Replayed || ack.Deduplicated {
+			summary.Replayed += len(batches)
+		}
+		latencies = append(latencies, latency)
+		consumed += len(batches)
+		log.Printf("ingest replay acknowledged micro-batch %d-%d count=%d in %s (replayed=%t deduplicated=%t)",
+			descriptor.LedgerStart,
+			descriptor.LedgerEnd,
+			descriptor.LedgerCount,
+			latency.Round(time.Millisecond),
+			ack.Replayed,
+			ack.Deduplicated,
+		)
+	}
+	if config.Count > 0 && consumed != config.Count {
+		return finish(fmt.Errorf("fixture ended after %d ledgers, requested %d", consumed, config.Count))
 	}
 	return finish(nil)
 }

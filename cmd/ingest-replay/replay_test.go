@@ -8,6 +8,7 @@ import (
 	"time"
 
 	componentsv1 "github.com/withObsrvr/obsrvr-stellar-components/gen/go/stellar/components/v1"
+	"github.com/withObsrvr/obsrvr-stellar-components/internal/ingestbatch"
 )
 
 func TestExecuteReplayAccountsForScheduleLagAndBurstExemption(t *testing.T) {
@@ -134,6 +135,109 @@ func TestReplaySmokeThirtyLedgers(t *testing.T) {
 	}
 }
 
+func TestExecuteMicroBatchReplayGroupsAndReportsThroughput(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(0, 0)}
+	reader := &sliceBatchReader{}
+	for ledger := uint32(100); ledger < 105; ledger++ {
+		reader.batches = append(reader.batches, &componentsv1.LedgerBatch{
+			NetworkPassphrase: "test network",
+			LedgerSequence:    ledger,
+			BronzeRows:        []*componentsv1.BronzeRow{{Id: "row"}},
+		})
+	}
+	sender := &fakeMicroBatchSender{
+		clock:     clock,
+		latencies: []time.Duration{200 * time.Millisecond, 100 * time.Millisecond},
+	}
+	config := replayConfig{
+		Fixtures:          "fixture.manifest.json",
+		Profile:           "backfill",
+		AckTimeout:        time.Second,
+		Count:             5,
+		MicrobatchLedgers: 3,
+	}
+	var results bytes.Buffer
+	summary, err := executeMicroBatchReplay(context.Background(), config, 5, reader, sender, &results, clock)
+	if err != nil {
+		t.Fatalf("execute micro-batch replay: %v", err)
+	}
+	if summary.Transport != "microbatch" || summary.Microbatches != 2 || summary.Acknowledged != 5 {
+		t.Fatalf("micro-batch summary = %+v", summary)
+	}
+	if summary.FirstLedger != 100 || summary.LastLedger != 104 || summary.BronzeRows != 5 {
+		t.Fatalf("micro-batch coverage = %+v", summary)
+	}
+	if summary.ElapsedSeconds != 0.3 || summary.LedgersPerSecond < 16.6 || summary.LedgersPerSecond > 16.7 {
+		t.Fatalf("micro-batch throughput = %f ledgers/s over %fs", summary.LedgersPerSecond, summary.ElapsedSeconds)
+	}
+	if lines := bytes.Count(results.Bytes(), []byte("\n")); lines != 2 {
+		t.Fatalf("micro-batch result lines = %d, want 2", lines)
+	}
+	if len(sender.ranges) != 2 || sender.ranges[0] != [2]uint32{100, 102} || sender.ranges[1] != [2]uint32{103, 104} {
+		t.Fatalf("micro-batch ranges = %v", sender.ranges)
+	}
+}
+
+func TestExecuteMicroBatchReplayRejectsAckMismatch(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(0, 0)}
+	reader := &sliceBatchReader{batches: []*componentsv1.LedgerBatch{{
+		NetworkPassphrase: "test network",
+		LedgerSequence:    100,
+	}}}
+	sender := &fakeMicroBatchSender{clock: clock, latencies: []time.Duration{time.Millisecond}, ackOffset: 1}
+	config := replayConfig{
+		Fixtures:          "fixture.manifest.json",
+		Profile:           "backfill",
+		AckTimeout:        time.Second,
+		Count:             1,
+		MicrobatchLedgers: 1,
+	}
+	_, err := executeMicroBatchReplay(context.Background(), config, 1, reader, sender, io.Discard, clock)
+	if err == nil || err.Error() != "micro-batch ack mismatch for ledgers 100-100" {
+		t.Fatalf("execute micro-batch replay error = %v, want ack mismatch", err)
+	}
+}
+
+func TestExecuteMicroBatchReplayFlushesAtRowLimit(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(0, 0)}
+	reader := &sliceBatchReader{}
+	for ledger := uint32(100); ledger < 105; ledger++ {
+		reader.batches = append(reader.batches, &componentsv1.LedgerBatch{
+			NetworkPassphrase: "test network",
+			LedgerSequence:    ledger,
+			BronzeRows:        []*componentsv1.BronzeRow{{Id: "row"}},
+		})
+	}
+	sender := &fakeMicroBatchSender{
+		clock:     clock,
+		latencies: []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond},
+	}
+	config := replayConfig{
+		Fixtures:          "fixture.manifest.json",
+		Profile:           "backfill",
+		AckTimeout:        time.Second,
+		Count:             5,
+		MicrobatchLedgers: 5,
+		MicrobatchMaxRows: 2,
+	}
+	summary, err := executeMicroBatchReplay(context.Background(), config, 5, reader, sender, io.Discard, clock)
+	if err != nil {
+		t.Fatalf("execute micro-batch replay: %v", err)
+	}
+	if summary.Microbatches != 3 || summary.MicrobatchMinLedgers != 1 || summary.MicrobatchMaxLedgers != 2 {
+		t.Fatalf("bounded micro-batch summary = %+v", summary)
+	}
+	want := [][2]uint32{{100, 101}, {102, 103}, {104, 104}}
+	if len(sender.ranges) != len(want) {
+		t.Fatalf("micro-batch ranges = %v, want %v", sender.ranges, want)
+	}
+	for index := range want {
+		if sender.ranges[index] != want[index] {
+			t.Fatalf("micro-batch ranges = %v, want %v", sender.ranges, want)
+		}
+	}
+}
+
 func TestProfileDefaultsAndOverrides(t *testing.T) {
 	config, err := parseConfig([]string{
 		"--fixtures=fixture.json",
@@ -156,6 +260,18 @@ func TestProfileDefaultsAndOverrides(t *testing.T) {
 		"--profile=custom",
 	}, io.Discard); err == nil {
 		t.Fatal("custom profile without cadence succeeded")
+	}
+	backfill, err := parseConfig([]string{
+		"--fixtures=fixture.json",
+		"--endpoint=127.0.0.1:9000",
+		"--token=test-token",
+		"--profile=backfill",
+	}, io.Discard)
+	if err != nil {
+		t.Fatalf("parse backfill config: %v", err)
+	}
+	if backfill.MicrobatchLedgers != 25 || backfill.MicrobatchMaxBytes != 256*1024*1024 || backfill.MicrobatchMaxRows != 500_000 || backfill.Cadence != 0 || backfill.Jitter != 0 || backfill.MaxLatency != 0 {
+		t.Fatalf("backfill profile = %+v", backfill)
 	}
 }
 
@@ -208,3 +324,30 @@ func (s *fakeBatchSender) Send(_ context.Context, batch *componentsv1.LedgerBatc
 }
 
 func (*fakeBatchSender) Close() error { return nil }
+
+type fakeMicroBatchSender struct {
+	clock     *fakeClock
+	latencies []time.Duration
+	index     int
+	ackOffset uint32
+	ranges    [][2]uint32
+}
+
+func (s *fakeMicroBatchSender) Send(_ context.Context, batches []*componentsv1.LedgerBatch) (*componentsv1.IngestMicroBatchAck, ingestbatch.Descriptor, time.Duration, error) {
+	descriptor, err := ingestbatch.Describe(batches)
+	if err != nil {
+		return nil, ingestbatch.Descriptor{}, 0, err
+	}
+	latency := s.latencies[s.index]
+	s.index++
+	s.clock.now = s.clock.now.Add(latency)
+	s.ranges = append(s.ranges, [2]uint32{descriptor.LedgerStart, descriptor.LedgerEnd})
+	return &componentsv1.IngestMicroBatchAck{
+		MicroBatchId: descriptor.ID,
+		LedgerStart:  descriptor.LedgerStart,
+		LedgerEnd:    descriptor.LedgerEnd + s.ackOffset,
+		LedgerCount:  descriptor.LedgerCount,
+	}, descriptor, latency, nil
+}
+
+func (*fakeMicroBatchSender) Close() error { return nil }
