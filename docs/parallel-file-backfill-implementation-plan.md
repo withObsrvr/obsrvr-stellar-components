@@ -1,7 +1,7 @@
 # Parallel File Backfill Implementation Plan
 
 **Date:** 2026-08-05
-**Status:** Stage 1 bounded worker and local scale harness passed; direct columnar writer and registration remain open
+**Status:** Stage 1 bounded worker and direct raw-XDR/typed-value spike passed; native Arrow/Parquet and registration remain open
 **Target stack:** DuckDB 1.5.5 with matching current DuckLake and Quack
 extensions
 
@@ -34,11 +34,19 @@ The first PR 1 slice now exists on
   divergent retry detection.
 - `internal/backfillworker` owns a disposable local DuckDB database, loads
   typed Bronze rows through table-specific Appenders, adds a staging-only
-  ordinal for stable output order, writes Zstd Parquet, fingerprints and hashes
-  each file, and publishes it without overwriting an existing artifact.
+  ordinal as a duplicate-row tie-breaker, writes canonically ordered Zstd
+  Parquet, fingerprints and hashes each file, and publishes it without
+  overwriting an existing artifact.
 - `cmd/ducklake-backfill-worker` now provides a bounded runnable entrypoint
   from a verified fixture range to job/result manifests and complete typed
   Bronze, ledger metadata, and watermark Parquet artifacts.
+- The same worker now has a `ledger-stream` input lane pinned to the source and
+  extraction PR commits. It consumes the SDK's borrowed raw XDR, performs one
+  parsed compatibility decode, projects typed extraction rows with a bounded
+  worker budget, and never creates a `LedgerBatch` protobuf or per-row JSON.
+- Fresh extraction exposed nondeterministic state-row traversal that recorded
+  fixtures had hidden. Canonical public-column ordering now makes logically
+  identical retries byte-stable without leaking staging columns.
 - Tests prove stable Parquet hashes across two independent worker runs, exact
   typed schema, no staging-column leakage, range rejection, overwrite
   rejection, cleanup of partial files, manifest coverage, and retry identity.

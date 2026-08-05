@@ -10,9 +10,11 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/stellar/go-stellar-sdk/network"
 	componentsv1 "github.com/withObsrvr/obsrvr-stellar-components/gen/go/stellar/components/v1"
 	"github.com/withObsrvr/obsrvr-stellar-components/internal/backfillmanifest"
 	"github.com/withObsrvr/obsrvr-stellar-components/internal/ledgerfixture"
+	"github.com/withObsrvr/stellar-raw-ledger-origin/source/ledgerstream"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
@@ -60,6 +62,56 @@ func TestRunEnforcesInputRowBoundBeforeWritingParquet(t *testing.T) {
 	}
 	if len(matches) != 0 {
 		t.Fatalf("Parquet files written after resource rejection: %v", matches)
+	}
+}
+
+func TestParseConfigAllowsLedgerStreamWithoutFixtures(t *testing.T) {
+	cfg, err := parseConfig([]string{
+		"--source", "ledger-stream",
+		"--output", t.TempDir(),
+		"--start-ledger", "100",
+		"--end-ledger", "101",
+	}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parse ledger-stream config: %v", err)
+	}
+	start, end, err := selectedStreamRange(cfg)
+	if err != nil {
+		t.Fatalf("select ledger-stream range: %v", err)
+	}
+	if start != 100 || end != 101 {
+		t.Fatalf("selected range = %d-%d, want 100-101", start, end)
+	}
+}
+
+func TestSelectedStreamRangeRequiresExplicitBoundedRange(t *testing.T) {
+	for _, cfg := range []config{
+		{LedgerStart: 100},
+		{LedgerEnd: 100},
+		{LedgerStart: 101, LedgerEnd: 100},
+	} {
+		if _, _, err := selectedStreamRange(cfg); err == nil {
+			t.Fatalf("selectedStreamRange(%+v) succeeded", cfg)
+		}
+	}
+}
+
+func TestLedgerStreamJobSourceRecordsArchiveIdentity(t *testing.T) {
+	source, err := ledgerStreamJobSource(ledgerstream.Config{
+		Type:               ledgerstream.TypeArchive,
+		ArchiveStorageType: "S3",
+		ArchiveBucketName:  "aws-public-blockchain",
+		ArchivePath:        "v1.1/stellar/ledgers/pubnet",
+		NetworkPassphrase:  network.PublicNetworkPassphrase,
+	})
+	if err != nil {
+		t.Fatalf("ledger stream source: %v", err)
+	}
+	if source.Kind != "history-archive" || source.URI != "s3://aws-public-blockchain/v1.1/stellar/ledgers/pubnet" {
+		t.Fatalf("source identity = %+v", source)
+	}
+	if source.ExtractorVersion == "" || source.ExtractorVersion == "unknown" {
+		t.Fatalf("extractor version = %q", source.ExtractorVersion)
 	}
 }
 

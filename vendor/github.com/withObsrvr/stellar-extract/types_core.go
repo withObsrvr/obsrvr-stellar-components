@@ -63,6 +63,16 @@ type TransactionData struct {
 	SorobanResourcesInstructions *int64
 	SorobanResourcesReadBytes    *int64
 	SorobanResourcesWriteBytes   *int64
+	// Declared footprint entry counts. The protocol charges ledger capacity
+	// against what a transaction declares, not against the changes it turns
+	// out to make, so these are the numerators for a capacity meter. Counting
+	// observed changes instead undercounts badly.
+	SorobanFootprintReadEntries  *int32
+	SorobanFootprintWriteEntries *int32
+	// Contract failure cause, set only when the transaction emitted an
+	// ScError. Successful transactions and classic failures leave it nil.
+	ContractErrorType *string
+	ContractErrorCode *int32
 	// TOID
 	TransactionID int64
 	EraID         *string

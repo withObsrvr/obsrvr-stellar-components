@@ -79,6 +79,87 @@ func ExtractContractEvents(input *LedgerInput) ([]ContractEventData, error) {
 	return events, nil
 }
 
+// ExtractContractEventsView extracts the same typed contract-event rows from
+// a borrowed LedgerCloseMeta view. The SDK pairs envelopes and transaction
+// processing in one cached walk; only the event payloads retained in output
+// rows are decoded.
+func ExtractContractEventsView(input *LedgerViewInput) ([]ContractEventData, error) {
+	transactions, err := input.transactionViews()
+	if err != nil {
+		return nil, fmt.Errorf("extract ledger transaction views: %w", err)
+	}
+	return extractContractEventsFromViews(input, transactions)
+}
+
+func extractContractEventsFromViews(input *LedgerViewInput, transactions []ingest.LedgerTransactionView) ([]ContractEventData, error) {
+	var events []ContractEventData
+	for txIndex := range transactions {
+		transaction := transactions[txIndex]
+		txHash := hex.EncodeToString(transaction.Hash[:])
+
+		for diagnosticIndex, raw := range transaction.DiagnosticEvents {
+			var diagnostic xdr.DiagnosticEvent
+			if err := diagnostic.UnmarshalBinary(raw); err != nil {
+				return nil, fmt.Errorf("transaction %s diagnostic event %d: %w", txHash, diagnosticIndex, err)
+			}
+			row := extractDiagnosticEvent(
+				diagnostic,
+				txHash,
+				input.Sequence,
+				input.ClosedAt,
+				input.LedgerRange,
+				uint32(diagnosticIndex),
+				transaction.Successful,
+			)
+			row.EraID = input.EraID
+			events = append(events, row)
+		}
+
+		for operationIndex, operationEvents := range transaction.ContractEvents {
+			for eventIndex, raw := range operationEvents {
+				var event xdr.ContractEvent
+				if err := event.UnmarshalBinary(raw); err != nil {
+					return nil, fmt.Errorf("transaction %s operation %d event %d: %w", txHash, operationIndex, eventIndex, err)
+				}
+				row := extractContractEvent(
+					event,
+					txHash,
+					input.Sequence,
+					input.ClosedAt,
+					input.LedgerRange,
+					uint32(operationIndex),
+					uint32(eventIndex),
+					false,
+					transaction.Successful,
+				)
+				row.EraID = input.EraID
+				events = append(events, row)
+			}
+		}
+
+		for eventIndex, raw := range transaction.TransactionEvents {
+			var transactionEvent xdr.TransactionEvent
+			if err := transactionEvent.UnmarshalBinary(raw); err != nil {
+				return nil, fmt.Errorf("transaction %s transaction event %d: %w", txHash, eventIndex, err)
+			}
+			row := extractContractEvent(
+				transactionEvent.Event,
+				txHash,
+				input.Sequence,
+				input.ClosedAt,
+				input.LedgerRange,
+				0,
+				uint32(eventIndex),
+				true,
+				transaction.Successful,
+			)
+			row.EraID = input.EraID
+			events = append(events, row)
+		}
+	}
+	return events, nil
+}
+
 // extractDiagnosticEvent extracts data from a diagnostic event.
 func extractDiagnosticEvent(diagEvent xdr.DiagnosticEvent, txHash string, ledgerSeq uint32, closedAt time.Time, ledgerRange uint32, diagIdx uint32, txSuccessful bool) ContractEventData {
 	eventData := extractContractEvent(
@@ -787,77 +868,65 @@ func decodeLEB128(data []byte) (int64, int) {
 // ===========================================================================
 
 // ExtractRestoredKeys extracts restored storage keys from a ledger.
+//
+// Restorations are read from the ledger change stream, never from operations.
+// Under CAP-0062 an archived entry named in a transaction's readWrite
+// footprint is restored automatically during InvokeHostFunction, with no
+// RestoreFootprint operation anywhere in the transaction. A detector that
+// scans operations returns a silent zero for every such ledger, and on
+// protocol 23+ that is nearly all of them: mainnet ledger 61,500,126 restored
+// 22 entries with no restore operation present.
+//
+// The change type must be read from the XDR rather than inferred. A restore
+// and a create both arrive with no pre-state, so they are indistinguishable by
+// any other means.
 func ExtractRestoredKeys(input *LedgerInput) ([]RestoredKeyData, error) {
 	var restoredKeysList []RestoredKeyData
 
-	reader, err := ingest.NewLedgerTransactionReaderFromLedgerCloseMeta(input.NetworkPassphrase, input.LCM)
+	changeReader, err := ingest.NewLedgerChangeReaderFromLedgerCloseMeta(input.NetworkPassphrase, input.LCM)
 	if err != nil {
-		log.Printf("Failed to create transaction reader for restored keys: %v", err)
+		log.Printf("Failed to create ledger change reader for restored keys: %v", err)
 		return restoredKeysList, nil
 	}
-	defer reader.Close()
+	defer changeReader.Close()
 
 	restoredKeysMap := make(map[string]*RestoredKeyData)
 
 	for {
-		tx, err := reader.Read()
+		change, err := changeReader.Read()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			log.Printf("Error reading transaction for restored keys: %v", err)
+			log.Printf("Error reading ledger change for restored keys: %v", err)
 			continue
 		}
 
-		if !tx.Result.Successful() {
+		if change.ChangeType != xdr.LedgerEntryChangeTypeLedgerEntryRestored {
+			continue
+		}
+		if change.Post == nil {
 			continue
 		}
 
-		envelope := tx.Envelope
-		var operations []xdr.Operation
-
-		switch envelope.Type {
-		case xdr.EnvelopeTypeEnvelopeTypeTx:
-			operations = envelope.V1.Tx.Operations
-		case xdr.EnvelopeTypeEnvelopeTypeTxV0:
-			operations = envelope.V0.Tx.Operations
-		case xdr.EnvelopeTypeEnvelopeTypeTxFeeBump:
-			innerTx := envelope.FeeBump.Tx.InnerTx
-			if innerTx.Type == xdr.EnvelopeTypeEnvelopeTypeTx {
-				operations = innerTx.V1.Tx.Operations
-			}
-		default:
+		ledgerKey, err := change.Post.LedgerKey()
+		if err != nil {
+			log.Printf("Failed to derive ledger key for restored entry: %v", err)
 			continue
 		}
 
-		for _, op := range operations {
-			if op.Body.Type != xdr.OperationTypeRestoreFootprint {
-				continue
-			}
+		// The entry itself states its durability, so this is no longer the
+		// "unknown" the footprint-based reader was forced to record.
+		durability := restoredEntryDurability(ledgerKey)
 
-			var footprint *xdr.LedgerFootprint
+		// LastModifiedLedgerSeq on the restored entry is the ledger that
+		// brought it back, which is this one.
+		restoredFromLedger := uint32(change.Post.LastModifiedLedgerSeq)
 
-			switch envelope.Type {
-			case xdr.EnvelopeTypeEnvelopeTypeTx:
-				if envelope.V1.Tx.Ext.V == 1 && envelope.V1.Tx.Ext.SorobanData != nil {
-					footprint = &envelope.V1.Tx.Ext.SorobanData.Resources.Footprint
-				}
-			}
-
-			if footprint == nil {
-				continue
-			}
-
-			restoredFromLedger := uint32(0)
-
-			for _, key := range footprint.ReadWrite {
-				durability := "unknown"
-				data := extractRestoredKeyData(key, input.Sequence, input.LedgerRange, durability, restoredFromLedger, input.ClosedAt)
-				if data != nil {
-					data.EraID = input.EraID
-					restoredKeysMap[data.KeyHash] = data
-				}
-			}
+		data := extractRestoredKeyData(ledgerKey, input.Sequence, input.LedgerRange, durability, restoredFromLedger, input.ClosedAt)
+		if data != nil {
+			data.EraID = input.EraID
+			restoredKeysMap[data.KeyHash] = data
 		}
 	}
 
@@ -866,6 +935,29 @@ func ExtractRestoredKeys(input *LedgerInput) ([]RestoredKeyData, error) {
 	}
 
 	return restoredKeysList, nil
+}
+
+// restoredEntryDurability reports the durability of a restored entry.
+// Only contract data carries a durability of its own; contract code and the
+// TTL entries that accompany a restoration are always persistent, since a
+// temporary entry is deleted on expiry rather than archived.
+func restoredEntryDurability(ledgerKey xdr.LedgerKey) string {
+	switch ledgerKey.Type {
+	case xdr.LedgerEntryTypeContractData:
+		if cd := ledgerKey.ContractData; cd != nil {
+			switch cd.Durability {
+			case xdr.ContractDataDurabilityPersistent:
+				return "persistent"
+			case xdr.ContractDataDurabilityTemporary:
+				return "temporary"
+			}
+		}
+		return "unknown"
+	case xdr.LedgerEntryTypeContractCode, xdr.LedgerEntryTypeTtl:
+		return "persistent"
+	default:
+		return "unknown"
+	}
 }
 
 // extractRestoredKeyData extracts data from a single restored ledger key.

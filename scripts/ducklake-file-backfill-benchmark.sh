@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 worker_bin="${BACKFILL_WORKER_BIN:-$repo_root/bin/ducklake-backfill-worker}"
+backfill_source="${BACKFILL_SOURCE:-fixture}"
 fixture_manifest="${BACKFILL_FIXTURE_MANIFEST:-${1:-}}"
 concurrency="${BACKFILL_CONCURRENCY:-1}"
 minimum_lps="${BACKFILL_MIN_AGGREGATE_LPS:-0}"
@@ -15,10 +16,6 @@ max_bronze_rows="${BACKFILL_MAX_BRONZE_ROWS:-2000000}"
 memory_limit="${BACKFILL_MEMORY_LIMIT:-1GB}"
 keep_outputs="${BACKFILL_KEEP_OUTPUTS:-false}"
 
-if [[ -z "$fixture_manifest" ]]; then
-  echo "set BACKFILL_FIXTURE_MANIFEST or pass a fixture manifest path" >&2
-  exit 2
-fi
 if [[ ! -x "$worker_bin" ]]; then
   echo "backfill worker is not executable: $worker_bin" >&2
   exit 2
@@ -28,8 +25,28 @@ if [[ ! "$concurrency" =~ ^[1-9][0-9]*$ ]]; then
   exit 2
 fi
 
-ledger_start="$(jq -er '.ledger_start' "$fixture_manifest")"
-ledger_end="$(jq -er '.ledger_end' "$fixture_manifest")"
+case "$backfill_source" in
+  fixture)
+    if [[ -z "$fixture_manifest" ]]; then
+      echo "set BACKFILL_FIXTURE_MANIFEST or pass a fixture manifest path" >&2
+      exit 2
+    fi
+    ledger_start="$(jq -er '.ledger_start' "$fixture_manifest")"
+    ledger_end="$(jq -er '.ledger_end' "$fixture_manifest")"
+    ;;
+  ledger-stream)
+    ledger_start="${BACKFILL_LEDGER_START:-}"
+    ledger_end="${BACKFILL_LEDGER_END:-}"
+    if [[ ! "$ledger_start" =~ ^[1-9][0-9]*$ || ! "$ledger_end" =~ ^[1-9][0-9]*$ || "$ledger_end" -lt "$ledger_start" ]]; then
+      echo "ledger-stream mode requires a valid BACKFILL_LEDGER_START/BACKFILL_LEDGER_END range" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "BACKFILL_SOURCE must be fixture or ledger-stream" >&2
+    exit 2
+    ;;
+esac
 ledger_count=$((ledger_end - ledger_start + 1))
 if (( concurrency > ledger_count )); then
   echo "concurrency $concurrency exceeds ledger count $ledger_count" >&2
@@ -80,7 +97,7 @@ for ((worker_index = 0; worker_index < concurrency; worker_index++)); do
 
   command=(
     "$worker_bin"
-    --fixtures "$fixture_manifest"
+    --source "$backfill_source"
     --output "$worker_output"
     --start-ledger "$shard_start"
     --end-ledger "$shard_end"
@@ -96,6 +113,9 @@ for ((worker_index = 0; worker_index < concurrency; worker_index++)); do
     --code-revision "$(git -C "$repo_root" rev-parse HEAD)"
     --watermark-time "2026-08-05T00:00:00Z"
   )
+  if [[ "$backfill_source" == "fixture" ]]; then
+    command+=(--fixtures "$fixture_manifest")
+  fi
   if [[ -n "$time_bin" ]]; then
     "$time_bin" -f 'max_rss_kib=%M\nuser_seconds=%U\nsystem_seconds=%S' -o "$worker_resource" "${command[@]}" >"$worker_summary" &
   else
@@ -143,10 +163,12 @@ done
 jq -s \
   --argjson workers "$concurrency" \
   --argjson wall_seconds "$wall_seconds" \
+  --arg source "$backfill_source" \
   --arg fixture_manifest "$fixture_manifest" \
   '
     {
       workers: $workers,
+      source: $source,
       fixture_manifest: $fixture_manifest,
       wall_seconds: $wall_seconds,
       ledgers: (map(.ledgers) | add),
@@ -164,6 +186,13 @@ jq -s \
       critical_worker_source_seconds: (map(.source_seconds) | max),
       critical_worker_digest_seconds: (map(.digest_seconds) | max),
       critical_worker_decode_seconds: (map(.decode_seconds) | max),
+      critical_worker_extraction_seconds: (map(.extraction_seconds) | max),
+      critical_worker_raw_view_seconds: (map(.raw_view_seconds) | max),
+      critical_worker_raw_decode_seconds: (map(.raw_decode_seconds) | max),
+      critical_worker_raw_extract_seconds: (map(.raw_extract_seconds) | max),
+      critical_worker_raw_pin_seconds: (map(.raw_pin_seconds) | max),
+      critical_worker_raw_envelope_seconds: (map(.raw_envelope_seconds) | max),
+      critical_worker_raw_project_seconds: (map(.raw_project_seconds) | max),
       critical_worker_append_seconds: (map(.append_seconds) | max),
       workers_detail: .
     }

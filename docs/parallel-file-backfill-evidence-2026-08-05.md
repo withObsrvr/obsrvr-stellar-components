@@ -1,7 +1,7 @@
 # Parallel File Backfill: First Real-Ledger Evidence
 
 **Date:** 2026-08-05
-**Status:** Bounded streaming and local scaling probes passed; 1,000 ledgers/s and catalog registration remain open
+**Status:** Bounded fixture and direct raw-XDR scaling probes passed; 1,000 ledgers/s and catalog registration remain open
 
 This report covers the first executable slice of the parallel file-oriented
 backfill. It proves the boundary from a verified real `LedgerBatch` corpus to
@@ -197,6 +197,99 @@ claim the production throughput gate:
    transactional registration into a candidate DuckLake catalog. Until that
    exists, these files are artifacts, not queryable Obsrvr Lake history.
 
-The immediate implementation priority is the direct columnar writer spike and
-attempt-scoped publication, followed by the two-shard out-of-order
-registration/restart test described in the implementation plan.
+The immediate implementation priority at that checkpoint was the direct
+writer spike and attempt-scoped publication, followed by the two-shard
+out-of-order registration/restart test described in the implementation plan.
+
+## Direct raw-XDR to typed-value spike
+
+The next slice removed the already-normalized fixture as the worker's required
+input. The worker can now consume the SDK `LedgerStream` from
+`stellar-raw-ledger-origin`, validate its borrowed raw XDR through
+`stellar-extract`, perform one full ledger decode, and project typed extraction
+rows directly to DuckDB Appender values.
+
+The lane removes this work from the backfill data plane:
+
+```text
+LedgerBatch protobuf construction
+  -> deterministic protobuf encoding and hashing
+  -> one JSON document per Bronze row
+  -> JSON unmarshal back to the same typed row
+```
+
+Fixture mode remains available as the reference and regression lane. The raw
+lane pins the source and extraction module versions in the job manifest and
+pins materialization timestamps to the job's watermark timestamp. Raw XDR is
+hashed before the borrowed buffer can be reused.
+
+Fresh archive extraction exposed an assumption hidden by recorded fixtures:
+some state extractors can return the same logical rows in a different order.
+Ordering Parquet only by a staging ordinal therefore produced different file
+hashes. Publication now orders by every public column and uses the private
+ordinal only to break ties between identical rows. Two independent 30-ledger
+archive runs matched on SHA-256, bytes, rows, and schema for all 18 files.
+Two final independent 10-ledger runs after narrowing timestamp normalization
+also matched all 18 files byte-for-byte. A Parquet query confirmed transaction
+timestamps still come from ledger close time rather than the pinned
+materialization time.
+
+### Direct 120-ledger result
+
+The direct sweep used the same mainnet range `62,080,000-62,080,119`, the
+public AWS archive in `us-east-2`, one ledger per object, 64,000 objects per
+partition, 50 archive fetch workers, and a local Ryzen 9 7940HS host. Unlike
+the fixture benchmark, these measurements include archive acquisition and
+Stellar extraction.
+
+```text
+raw XDR bytes:     210,865,168
+Bronze rows:       974,166
+total output rows: 974,406
+```
+
+| Workers | Aggregate ledgers/s | Rows/s | Raw input MB/s | Efficiency vs 1 | Peak RSS per worker |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 5.79 | 47,000 | 10.17 | 100.0% | 1,737,140 KiB |
+| 2 | 7.22 | 58,661 | 12.69 | 62.4% | 1,157,700 KiB |
+| 4 | 9.15 | 74,304 | 16.08 | 39.5% | 784,988 KiB |
+
+The one-worker critical path was:
+
+```text
+archive source waits:                      7.59s
+view validation:                           0.07s
+full LedgerCloseMeta decode:               0.82s
+stellar-extract table extraction:          2.44s
+pinned timestamp normalization:            0.005s
+transaction envelope/result/meta encoding: 0.72s
+parallel typed-value projection:           1.09s
+DuckDB Appender calls:                     3.37s
+canonical Parquet export:                  2.62s
+```
+
+Bounded parallel projection reduced that phase from 1.47 seconds to about
+0.29 seconds on the 30-ledger probe, roughly a five-fold isolated improvement.
+Appender time did not materially change; the new path still uses DuckDB as a
+worker-local columnar staging engine.
+
+### Interpretation
+
+The earlier 9.04-ledger/s one-worker fixture result started after archive
+fetch, XDR extraction, protobuf construction, and JSON encoding had already
+happened. It is a file-materialization rate, not an end-to-end backfill rate.
+The direct 5.79-ledger/s result includes those missing phases while moving only
+210.9 MB of raw XDR instead of 1.34 GB of expanded protobuf for this range.
+
+On this off-region workstation, four workers reach only 9.15 ledgers/s. A
+linear 1,000-ledger/s extrapolation would require about 110 equivalent hosts,
+and the falling local efficiency makes that a capacity bound rather than a
+deployment plan. At this recent-ledger density, the target also implies about
+1.76 GB/s of raw archive input and 8.12 million typed rows/s across the fleet.
+
+The practical next measurement is the same disjoint-shard sweep on compute in
+or near `us-east-2`, where the archive source should not consume most of the
+critical path. The next writer comparison is native Arrow/Parquet versus the
+remaining worker-local DuckDB Appender and canonical sort. Neither result
+changes the authority model: workers publish immutable files and manifests;
+only the future coordinator may register accepted files into DuckLake.

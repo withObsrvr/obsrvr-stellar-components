@@ -27,6 +27,10 @@ import (
 // the worker does not retain a batch after it has been decoded and appended.
 type LedgerBatchSource func() (*componentsv1.LedgerBatch, error)
 
+// RawLedgerSource yields borrowed canonical LedgerCloseMeta XDR. The worker
+// fully extracts and appends each result before requesting the next slice.
+type RawLedgerSource func() ([]byte, error)
+
 type StreamResult struct {
 	Files                 []backfillmanifest.File
 	Descriptor            ingestbatch.Descriptor
@@ -38,6 +42,13 @@ type StreamResult struct {
 	SourceDuration        time.Duration
 	DigestDuration        time.Duration
 	DecodeDuration        time.Duration
+	ExtractionDuration    time.Duration
+	RawViewDuration       time.Duration
+	RawDecodeDuration     time.Duration
+	RawExtractDuration    time.Duration
+	RawPinDuration        time.Duration
+	RawEnvelopeDuration   time.Duration
+	RawProjectDuration    time.Duration
 	AppendDuration        time.Duration
 }
 
@@ -53,8 +64,19 @@ var duckDBMemoryLimitPattern = regexp.MustCompile(`^[1-9][0-9]*(KB|MB|GB|TB|KiB|
 // in Go memory. Rows are appended immediately to a disposable worker-local
 // DuckDB database; only closed, verified Parquet files leave that boundary.
 func WriteLedgerBatchStream(ctx context.Context, cfg LedgerBatchConfig, next LedgerBatchSource) (result StreamResult, resultErr error) {
+	return writeLedgerStream(ctx, cfg, next, nil, RawLedgerOptions{})
+}
+
+// WriteRawLedgerStream is the full-history fast path. It keeps one borrowed
+// raw ledger and one projected typed-row set in Go memory, avoiding the
+// LedgerBatch protobuf and row-JSON bridge used by live ingest.
+func WriteRawLedgerStream(ctx context.Context, cfg LedgerBatchConfig, opts RawLedgerOptions, next RawLedgerSource) (result StreamResult, resultErr error) {
+	return writeLedgerStream(ctx, cfg, nil, next, opts)
+}
+
+func writeLedgerStream(ctx context.Context, cfg LedgerBatchConfig, nextBatch LedgerBatchSource, nextRaw RawLedgerSource, rawOpts RawLedgerOptions) (result StreamResult, resultErr error) {
 	stagingStarted := time.Now()
-	if err := validateStreamingConfig(cfg, next); err != nil {
+	if err := validateStreamingConfig(cfg, nextBatch, nextRaw, rawOpts); err != nil {
 		return StreamResult{}, err
 	}
 	if err := os.MkdirAll(cfg.Parquet.OutputDir, 0o750); err != nil {
@@ -100,7 +122,8 @@ func WriteLedgerBatchStream(ctx context.Context, cfg LedgerBatchConfig, next Led
 		"main.ingest_watermarks": 0,
 		"main.ledger_batches":    0,
 	}
-	accumulator := ingestbatch.NewAccumulator()
+	batchAccumulator := ingestbatch.NewAccumulator()
+	rawAccumulator := newRawLedgerAccumulator()
 	result.SetupDuration = time.Since(stagingStarted)
 	err = conn.Raw(func(driverConn any) error {
 		dc, ok := driverConn.(driver.Conn)
@@ -122,29 +145,71 @@ func WriteLedgerBatchStream(ctx context.Context, cfg LedgerBatchConfig, next Led
 			if err := ctx.Err(); err != nil {
 				return err
 			}
+			var (
+				batch      *componentsv1.LedgerBatch
+				rawLedger  *RawLedger
+				decoded    []bronze.DecodedRow
+				descriptor ingestbatch.Descriptor
+				sequence   uint32
+			)
 			sourceStarted := time.Now()
-			batch, err := next()
-			result.SourceDuration += time.Since(sourceStarted)
+			if nextBatch != nil {
+				batch, err = nextBatch()
+			} else {
+				var raw []byte
+				raw, err = nextRaw()
+				result.SourceDuration += time.Since(sourceStarted)
+				if err == nil {
+					extractionStarted := time.Now()
+					rawLedger, err = DecodeRawLedger(raw, rawOpts)
+					result.ExtractionDuration += time.Since(extractionStarted)
+					if err == nil {
+						result.RawViewDuration += rawLedger.ViewDuration
+						result.RawDecodeDuration += rawLedger.DecodeDuration
+						result.RawExtractDuration += rawLedger.ExtractDuration
+						result.RawPinDuration += rawLedger.PinDuration
+						result.RawEnvelopeDuration += rawLedger.EnvelopeDuration
+						result.RawProjectDuration += rawLedger.ProjectDuration
+					}
+				}
+			}
+			if nextBatch != nil {
+				result.SourceDuration += time.Since(sourceStarted)
+			}
 			if errors.Is(err, io.EOF) {
 				break
 			}
 			if err != nil {
 				return fmt.Errorf("read shard source: %w", err)
 			}
-			if err := validateNextStreamingBatch(cfg, accumulator, batch); err != nil {
-				return err
-			}
+
 			digestStarted := time.Now()
-			if err := accumulator.Add(batch); err != nil {
-				return err
+			if batch != nil {
+				if err := validateNextStreamingBatch(cfg, batchAccumulator, batch); err != nil {
+					return err
+				}
+				if err := batchAccumulator.Add(batch); err != nil {
+					return err
+				}
+				descriptor = batchAccumulator.Totals()
+				sequence = batch.LedgerSequence
+			} else {
+				if err := validateNextRawLedger(cfg, rawAccumulator, rawLedger); err != nil {
+					return err
+				}
+				if err := rawAccumulator.Add(rawLedger); err != nil {
+					return err
+				}
+				descriptor = rawAccumulator.Totals()
+				sequence = rawLedger.LedgerSequence
+				decoded = rawLedger.Rows
 			}
 			result.DigestDuration += time.Since(digestStarted)
-			descriptor := accumulator.Totals()
 			batchBytes := uint64(0)
 			if descriptor.EncodedBytes >= result.Descriptor.EncodedBytes {
 				batchBytes = descriptor.EncodedBytes - result.Descriptor.EncodedBytes
 			}
-			batchRows := uint64(len(batch.BronzeRows))
+			batchRows := descriptor.BronzeRows - result.Descriptor.BronzeRows
 			if batchBytes > result.PeakBatchEncodedBytes {
 				result.PeakBatchEncodedBytes = batchBytes
 			}
@@ -159,24 +224,25 @@ func WriteLedgerBatchStream(ctx context.Context, cfg LedgerBatchConfig, next Led
 				return fmt.Errorf("selected range exceeds Bronze row bound: %d > %d", descriptor.BronzeRows, cfg.MaxBronzeRows)
 			}
 
-			decodeStarted := time.Now()
-			decoded := bronze.DecodeTypedRowsBatches([]*componentsv1.LedgerBatch{batch}, cfg.DecodeWorkers)
-			result.DecodeDuration += time.Since(decodeStarted)
-			if len(decoded) != len(batch.BronzeRows) {
-				return fmt.Errorf("ledger %d decoded %d Bronze rows, want %d", batch.LedgerSequence, len(decoded), len(batch.BronzeRows))
+			if batch != nil {
+				decodeStarted := time.Now()
+				decoded = bronze.DecodeTypedRowsBatches([]*componentsv1.LedgerBatch{batch}, cfg.DecodeWorkers)
+				result.DecodeDuration += time.Since(decodeStarted)
+				if len(decoded) != len(batch.BronzeRows) {
+					return fmt.Errorf("ledger %d decoded %d Bronze rows, want %d", batch.LedgerSequence, len(decoded), len(batch.BronzeRows))
+				}
 			}
 			appendStarted := time.Now()
 			for index, decodedRow := range decoded {
-				sourceRow := batch.BronzeRows[index]
 				if decodedRow.Err != nil {
-					return fmt.Errorf("ledger %d Bronze row %d (%s): %w", batch.LedgerSequence, index, sourceRow.TableName, decodedRow.Err)
+					return fmt.Errorf("ledger %d Bronze row %d (%s): %w", sequence, index, decodedRow.Spec.TableName, decodedRow.Err)
 				}
 				if !decodedRow.OK {
-					return fmt.Errorf("ledger %d Bronze row %d targets unsupported table %q", batch.LedgerSequence, index, sourceRow.TableName)
+					return fmt.Errorf("ledger %d Bronze row %d targets unsupported table %q", sequence, index, decodedRow.Spec.TableName)
 				}
 				known, ok := bronze.TypedTableSpecs[decodedRow.Spec.TableName]
 				if !ok || !slices.Equal(known.Columns, decodedRow.Spec.Columns) || known.LedgerColumn != decodedRow.Spec.LedgerColumn {
-					return fmt.Errorf("ledger %d Bronze row %d has divergent table spec %q", batch.LedgerSequence, index, decodedRow.Spec.TableName)
+					return fmt.Errorf("ledger %d Bronze row %d has divergent table spec %q", sequence, index, decodedRow.Spec.TableName)
 				}
 				target := appenders["bronze."+known.TableName]
 				values := make([]driver.Value, len(decodedRow.Values)+1)
@@ -185,14 +251,18 @@ func WriteLedgerBatchStream(ctx context.Context, cfg LedgerBatchConfig, next Led
 				}
 				values[len(values)-1] = target.ordinal
 				if err := target.appender.AppendRow(values...); err != nil {
-					return fmt.Errorf("append ledger %d Bronze row %d to %s: %w", batch.LedgerSequence, index, known.TableName, err)
+					return fmt.Errorf("append ledger %d Bronze row %d to %s: %w", sequence, index, known.TableName, err)
 				}
 				target.ordinal++
 				tableCounts["bronze."+known.TableName]++
 			}
 
 			batchOrdinal := uint64(descriptor.LedgerCount - 1)
-			if err := appendLedgerEnvelope(appenders, cfg, batch, batchOrdinal); err != nil {
+			if batch != nil {
+				if err := appendLedgerEnvelope(appenders, cfg, batch, batchOrdinal); err != nil {
+					return err
+				}
+			} else if err := appendRawLedgerEnvelope(appenders, cfg, rawLedger, batchOrdinal); err != nil {
 				return err
 			}
 			tableCounts["main.ingest_watermarks"]++
@@ -207,7 +277,12 @@ func WriteLedgerBatchStream(ctx context.Context, cfg LedgerBatchConfig, next Led
 	}
 	result.StagingDuration = time.Since(stagingStarted)
 
-	descriptor, err := accumulator.Descriptor()
+	var descriptor ingestbatch.Descriptor
+	if nextBatch != nil {
+		descriptor, err = batchAccumulator.Descriptor()
+	} else {
+		descriptor, err = rawAccumulator.Descriptor()
+	}
 	if err != nil {
 		return StreamResult{}, err
 	}
@@ -254,9 +329,9 @@ func WriteLedgerBatchStream(ctx context.Context, cfg LedgerBatchConfig, next Led
 	return result, nil
 }
 
-func validateStreamingConfig(cfg LedgerBatchConfig, next LedgerBatchSource) error {
-	if next == nil {
-		return fmt.Errorf("ledger batch source is required")
+func validateStreamingConfig(cfg LedgerBatchConfig, nextBatch LedgerBatchSource, nextRaw RawLedgerSource, rawOpts RawLedgerOptions) error {
+	if (nextBatch == nil) == (nextRaw == nil) {
+		return fmt.Errorf("exactly one ledger batch or raw ledger source is required")
 	}
 	if err := validateConfig(cfg.Parquet); err != nil {
 		return err
@@ -267,8 +342,34 @@ func validateStreamingConfig(cfg LedgerBatchConfig, next LedgerBatchSource) erro
 	if cfg.WatermarkWrittenAt.IsZero() {
 		return fmt.Errorf("pinned watermark timestamp is required")
 	}
+	if nextRaw != nil {
+		if rawOpts.NetworkPassphrase == "" {
+			return fmt.Errorf("raw ledger network passphrase is required")
+		}
+		if rawOpts.MaterializedAt.IsZero() {
+			return fmt.Errorf("raw ledger materialization timestamp is required")
+		}
+	}
 	if cfg.MemoryLimit != "" && !duckDBMemoryLimitPattern.MatchString(cfg.MemoryLimit) {
 		return fmt.Errorf("invalid DuckDB memory limit %q", cfg.MemoryLimit)
+	}
+	return nil
+}
+
+func validateNextRawLedger(cfg LedgerBatchConfig, accumulator *rawLedgerAccumulator, ledger *RawLedger) error {
+	if ledger == nil {
+		return fmt.Errorf("stream returned a nil raw ledger")
+	}
+	descriptor := accumulator.Totals()
+	want := cfg.Parquet.LedgerStart
+	if descriptor.LedgerCount > 0 {
+		want = descriptor.LedgerEnd + 1
+	}
+	if ledger.LedgerSequence != want {
+		return fmt.Errorf("raw stream ledger %d is out of order, want %d", ledger.LedgerSequence, want)
+	}
+	if ledger.LedgerSequence > cfg.Parquet.LedgerEnd {
+		return fmt.Errorf("raw stream ledger %d exceeds shard end %d", ledger.LedgerSequence, cfg.Parquet.LedgerEnd)
 	}
 	return nil
 }
@@ -387,6 +488,34 @@ func appendLedgerEnvelope(appenders map[string]*streamingAppender, cfg LedgerBat
 	}
 	if err := appenders["main.ingest_watermarks"].appender.AppendRow(watermark...); err != nil {
 		return fmt.Errorf("append ledger %d watermark: %w", batch.LedgerSequence, err)
+	}
+	return nil
+}
+
+func appendRawLedgerEnvelope(appenders map[string]*streamingAppender, cfg LedgerBatchConfig, ledger *RawLedger, ordinal uint64) error {
+	metadata := []driver.Value{
+		ledger.NetworkPassphrase,
+		ledger.LedgerSequence,
+		ledger.ClosedAtUnix,
+		ledger.SchemaVersion,
+		ledger.ExtractionVersion,
+		ledger.TransactionCount,
+		ledger.OperationCount,
+		len(ledger.Rows),
+		nil,
+		ordinal,
+	}
+	if err := appenders["main.ledger_batches"].appender.AppendRow(metadata...); err != nil {
+		return fmt.Errorf("append raw ledger %d metadata: %w", ledger.LedgerSequence, err)
+	}
+	watermark := []driver.Value{
+		ledger.NetworkPassphrase,
+		ledger.LedgerSequence,
+		cfg.WatermarkWrittenAt.UTC(),
+		ordinal,
+	}
+	if err := appenders["main.ingest_watermarks"].appender.AppendRow(watermark...); err != nil {
+		return fmt.Errorf("append raw ledger %d watermark: %w", ledger.LedgerSequence, err)
 	}
 	return nil
 }

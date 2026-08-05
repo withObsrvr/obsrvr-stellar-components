@@ -21,7 +21,11 @@ func TestRollingParquetProducesDeterministicBoundedParts(t *testing.T) {
 	}
 	decoded := decodeLedgerRows(sequences...)
 	first := writeRollingTestTable(t, t.TempDir(), decoded)
-	second := writeRollingTestTable(t, t.TempDir(), decoded)
+	reversed := append([]bronze.DecodedRow(nil), decoded...)
+	for left, right := 0, len(reversed)-1; left < right; left, right = left+1, right-1 {
+		reversed[left], reversed[right] = reversed[right], reversed[left]
+	}
+	second := writeRollingTestTable(t, t.TempDir(), reversed)
 	if len(first) < 2 {
 		t.Fatalf("rolling output files = %d, want multiple parts", len(first))
 	}

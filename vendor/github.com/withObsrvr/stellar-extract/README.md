@@ -27,17 +27,12 @@ import (
 )
 
 func main() {
-    // From raw XDR bytes (streaming ingester, gRPC, protobuf)
-    input, err := extract.NewLedgerInputFromXDR(xdrBytes, "Test SDF Network ; September 2015")
-    if err != nil {
-        log.Fatal(err)
-    }
+    // Direct raw XDR to the complete typed surface.
+    data, errs := extract.ExtractAllFromXDR(xdrBytes, "Test SDF Network ; September 2015")
 
     // Or from an already-decoded LedgerCloseMeta (history loader, nebu)
     // input := extract.NewLedgerInput(lcm, "Test SDF Network ; September 2015")
-
-    // Extract everything at once (runs all 16 extractors concurrently)
-    data, errs := extract.ExtractAll(input)
+    // data, errs := extract.ExtractAll(input)
     for _, e := range errs {
         log.Printf("warning: %v", e)
     }
@@ -65,7 +60,16 @@ extract.NewLedgerInput(lcm xdr.LedgerCloseMeta, networkPassphrase string) *Ledge
 // Create input from raw XDR bytes
 extract.NewLedgerInputFromXDR(xdrBytes []byte, networkPassphrase string) (*LedgerInput, error)
 
-// Run all 16 extractors concurrently
+// Direct raw XDR to the complete typed LedgerData surface
+extract.ExtractAllFromXDR(xdrBytes []byte, networkPassphrase string) (*LedgerData, []error)
+
+// Create an explicit borrowed view input
+extract.NewLedgerViewInput(xdrBytes []byte, networkPassphrase string) (*LedgerViewInput, error)
+
+// View-backed contract events without a full ledger decode
+extract.ExtractContractEventsView(input *LedgerViewInput) ([]ContractEventData, error)
+
+// Run all extractors concurrently
 extract.ExtractAll(input *LedgerInput) (*LedgerData, []error)
 ```
 
@@ -106,6 +110,14 @@ type LedgerInput struct {
 ```
 
 `Sequence`, `ClosedAt`, and `LedgerRange` are populated automatically by `NewLedgerInput` / `NewLedgerInputFromXDR`. Override `LedgerRange` or set `EraID` after creation if needed.
+
+### LedgerViewInput
+
+`LedgerViewInput` is the explicit borrowed-XDR boundary for full-history work.
+Finish extraction before the upstream `LedgerStream` advances or reuses its
+buffer. View-backed typed rows do not retain the borrowed bytes. The full
+contract, differential gate, benchmarks, and migration status are documented
+in [docs/VIEW_EXTRACTION.md](docs/VIEW_EXTRACTION.md).
 
 ## Usage patterns
 
@@ -176,6 +188,7 @@ types_state.go       ClaimableBalanceData, LiquidityPoolData, ConfigSettingData,
 types_tokens.go      TokenTransferData
 
 extract.go           LedgerInput, LedgerData, NewLedgerInput, NewLedgerInputFromXDR, ExtractAll
+view_input.go        borrowed LedgerViewInput, ExtractAllFromXDR, ExtractAllView
 ledgers.go           ExtractLedgers
 transactions.go      ExtractTransactions + helpers
 operations.go        ExtractOperations
@@ -199,7 +212,7 @@ Based on comparison with [stellar-etl](https://github.com/stellar/stellar-etl) (
 ## Design principles
 
 - **Extraction only.** The library converts `xdr.LedgerCloseMeta` into typed Go structs. It doesn't know about Parquet, PostgreSQL, gRPC, protobuf, or any output format. Callers own serialization.
-- **One input type.** Every extractor takes `*LedgerInput`. Callers construct it from XDR bytes or a decoded LCM.
-- **Concurrent by default.** `ExtractAll` runs all 16 extractors in goroutines. Individual extractors are also safe to call concurrently.
+- **Explicit input representations.** Stable parsed extractors take `*LedgerInput`; migrated zero-copy extractors take borrowed `*LedgerViewInput`. The boundary prevents accidental mixed lifetimes.
+- **Concurrent by default.** `ExtractAll` runs every table extractor in goroutines. Individual extractors are also safe to call concurrently.
 - **Single SDK pin.** All extraction logic uses one version of `go-stellar-sdk`. When the SDK is upgraded, every consumer gets the fix.
 - **Protocol changes must fail loudly.** Every extractor switches on XDR union discriminants, and Go does not warn when a protocol upgrade adds an arm an existing switch ignores — the build stays green and the columns go quietly wrong. `protocol_coverage_test.go` enumerates the discriminants the SDK declares valid and fails when one is unhandled.

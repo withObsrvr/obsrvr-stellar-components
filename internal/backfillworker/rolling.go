@@ -64,7 +64,9 @@ func writeEnvelopeParquetFiles(ctx context.Context, conn *sql.Conn, outputDir st
 
 // writeRollingParquetFiles uses DuckDB's FILE_SIZE_BYTES target. DuckDB rolls
 // only at a row-group boundary, so FileMaxBytes remains the fail-closed bound.
-// A single COPY thread keeps part boundaries and hashes deterministic.
+// A single COPY thread and canonical public-column ordering keep part
+// boundaries and hashes independent of nondeterministic extractor map walks.
+// The private ordinal only breaks ties between identical public rows.
 func writeRollingParquetFiles(ctx context.Context, conn *sql.Conn, outputDir string, cfg ParquetConfig, table rollingTable) (files []backfillmanifest.File, resultErr error) {
 	if cfg.RowGroupRows > 0 && cfg.RowGroupRows < 2048 {
 		return nil, fmt.Errorf("Parquet row group rows %d is below DuckDB's minimum 2048", cfg.RowGroupRows)
@@ -82,6 +84,9 @@ func writeRollingParquetFiles(ctx context.Context, conn *sql.Conn, outputDir str
 	for index, column := range table.Columns {
 		quotedColumns[index] = bronze.QuoteIdentifier(column)
 	}
+	orderColumns := make([]string, 0, len(quotedColumns)+1)
+	orderColumns = append(orderColumns, quotedColumns...)
+	orderColumns = append(orderColumns, bronze.QuoteIdentifier(ordinalColumn))
 	compression := strings.ToUpper(cfg.Compression)
 	if compression == "" {
 		compression = "ZSTD"
@@ -103,7 +108,7 @@ func writeRollingParquetFiles(ctx context.Context, conn *sql.Conn, outputDir str
 		strings.Join(quotedColumns, ", "),
 		bronze.QuoteIdentifier(table.Schema),
 		bronze.QuoteIdentifier(table.Name),
-		bronze.QuoteIdentifier(ordinalColumn),
+		strings.Join(orderColumns, ", "),
 		bronze.SQLLiteral(temporaryDir),
 		strings.Join(options, ", "),
 	)

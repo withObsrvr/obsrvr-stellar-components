@@ -27,12 +27,35 @@ make build
   micro-batch backfill.
 - `ducklake-backfill-worker`: streams one verified historical range through a
   memory-limited local DuckDB into rolled, immutable, hashed Parquet parts
-  without attaching to the shared catalog. Use
-  `make test-file-backfill-benchmark` with `BACKFILL_FIXTURE_MANIFEST` and
-  `BACKFILL_CONCURRENCY` to record aggregate throughput and phase evidence.
+  without attaching to the shared catalog. Fixture mode is the reference
+  parity lane. `--source=ledger-stream` reads raw XDR directly from the
+  configured SDK stream, performs one extraction decode, and bypasses the
+  `LedgerBatch` protobuf and row-JSON bridge. Use
+  `make test-file-backfill-benchmark` with `BACKFILL_SOURCE`, an exact range,
+  and `BACKFILL_CONCURRENCY` to record aggregate throughput and phase evidence.
 - `postgres-sink`: idempotently writes ledgers, transactions, and operations to Postgres.
 - `ducklake-sink`: writes normalized ledger batches into a DuckLake catalog with history-loader-compatible typed bronze tables.
 - `ducklake-gatekeeper`: verifies snapshot-pinned transformation proposals and atomically promotes accepted Silver output with provenance.
+
+The direct archive benchmark keeps the source layout explicit:
+
+```bash
+BACKFILL_SOURCE=ledger-stream \
+BACKFILL_LEDGER_START=62080000 \
+BACKFILL_LEDGER_END=62080119 \
+BACKFILL_CONCURRENCY=4 \
+BACKEND_TYPE=ARCHIVE \
+ARCHIVE_STORAGE_TYPE=S3 \
+ARCHIVE_BUCKET_NAME=aws-public-blockchain \
+ARCHIVE_PATH=v1.1/stellar/ledgers/pubnet \
+AWS_REGION=us-east-2 \
+LEDGERS_PER_FILE=1 \
+FILES_PER_PARTITION=64000 \
+BUFFER_SIZE=1000 \
+NUM_WORKERS=50 \
+NETWORK_PASSPHRASE='Public Global Stellar Network ; September 2015' \
+make test-file-backfill-benchmark
+```
 
 ## Contracts
 

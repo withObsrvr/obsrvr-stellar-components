@@ -60,11 +60,15 @@ type ConfigSettingData struct {
 	TxMaxReadBytes                  *uint32
 	TxMaxWriteLedgerEntries         *uint32
 	TxMaxWriteBytes                 *uint32
-	ContractMaxSizeBytes            *uint32
-	ConfigSettingXDR                string
-	CreatedAt                       time.Time
-	LedgerRange                     uint32
-	EraID                           *string
+	// TxMaxFootprintEntries is CAP-0062's per-transaction cap on declared
+	// footprint entries. It lives in a separate config setting entry
+	// (ContractLedgerCostExtV0) from the ledger-wide limits above.
+	TxMaxFootprintEntries *uint32
+	ContractMaxSizeBytes  *uint32
+	ConfigSettingXDR      string
+	CreatedAt             time.Time
+	LedgerRange           uint32
+	EraID                 *string
 }
 
 // TTLData represents time-to-live entries snapshot (ttl_snapshot_v1)

@@ -11,20 +11,27 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"iter"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
+	"strings"
 	"time"
 
+	"github.com/stellar/go-stellar-sdk/ingest/ledgerbackend"
 	"github.com/withObsrvr/obsrvr-stellar-components/internal/backfillmanifest"
 	"github.com/withObsrvr/obsrvr-stellar-components/internal/backfillworker"
 	"github.com/withObsrvr/obsrvr-stellar-components/internal/ledgerfixture"
 	"github.com/withObsrvr/obsrvr-stellar-components/pkg/bronze"
+	"github.com/withObsrvr/obsrvr-stellar-components/pkg/contracts"
+	"github.com/withObsrvr/stellar-raw-ledger-origin/source/ledgerstream"
 )
 
 type config struct {
+	Source          string
 	Fixtures        string
 	OutputDir       string
 	LedgerStart     uint
@@ -46,32 +53,47 @@ type config struct {
 }
 
 type runSummary struct {
-	JobID            string  `json:"job_id"`
-	ShardID          string  `json:"shard_id"`
-	GenerationDigest string  `json:"generation_digest"`
-	LedgerStart      uint32  `json:"ledger_start"`
-	LedgerEnd        uint32  `json:"ledger_end"`
-	Ledgers          uint32  `json:"ledgers"`
-	InputBytes       uint64  `json:"input_bytes"`
-	BronzeRows       uint64  `json:"bronze_rows"`
-	ParquetFiles     int     `json:"parquet_files"`
-	ParquetBytes     uint64  `json:"parquet_bytes"`
-	OutputRows       uint64  `json:"output_rows"`
-	ElapsedSeconds   float64 `json:"elapsed_seconds"`
-	LedgersPerSecond float64 `json:"ledgers_per_second"`
-	RowsPerSecond    float64 `json:"rows_per_second"`
-	BytesPerSecond   float64 `json:"input_bytes_per_second"`
-	PeakBatchBytes   uint64  `json:"peak_batch_bytes"`
-	PeakBatchRows    uint64  `json:"peak_batch_bronze_rows"`
-	StagingSeconds   float64 `json:"staging_seconds"`
-	ExportSeconds    float64 `json:"export_seconds"`
-	SetupSeconds     float64 `json:"setup_seconds"`
-	SourceSeconds    float64 `json:"source_seconds"`
-	DigestSeconds    float64 `json:"digest_seconds"`
-	DecodeSeconds    float64 `json:"decode_seconds"`
-	AppendSeconds    float64 `json:"append_seconds"`
-	JobManifest      string  `json:"job_manifest"`
-	ResultManifest   string  `json:"result_manifest"`
+	Source             string  `json:"source"`
+	JobID              string  `json:"job_id"`
+	ShardID            string  `json:"shard_id"`
+	GenerationDigest   string  `json:"generation_digest"`
+	LedgerStart        uint32  `json:"ledger_start"`
+	LedgerEnd          uint32  `json:"ledger_end"`
+	Ledgers            uint32  `json:"ledgers"`
+	InputBytes         uint64  `json:"input_bytes"`
+	BronzeRows         uint64  `json:"bronze_rows"`
+	ParquetFiles       int     `json:"parquet_files"`
+	ParquetBytes       uint64  `json:"parquet_bytes"`
+	OutputRows         uint64  `json:"output_rows"`
+	ElapsedSeconds     float64 `json:"elapsed_seconds"`
+	LedgersPerSecond   float64 `json:"ledgers_per_second"`
+	RowsPerSecond      float64 `json:"rows_per_second"`
+	BytesPerSecond     float64 `json:"input_bytes_per_second"`
+	PeakBatchBytes     uint64  `json:"peak_batch_bytes"`
+	PeakBatchRows      uint64  `json:"peak_batch_bronze_rows"`
+	StagingSeconds     float64 `json:"staging_seconds"`
+	ExportSeconds      float64 `json:"export_seconds"`
+	SetupSeconds       float64 `json:"setup_seconds"`
+	SourceSeconds      float64 `json:"source_seconds"`
+	DigestSeconds      float64 `json:"digest_seconds"`
+	DecodeSeconds      float64 `json:"decode_seconds"`
+	ExtractionSeconds  float64 `json:"extraction_seconds"`
+	RawViewSeconds     float64 `json:"raw_view_seconds"`
+	RawDecodeSeconds   float64 `json:"raw_decode_seconds"`
+	RawExtractSeconds  float64 `json:"raw_extract_seconds"`
+	RawPinSeconds      float64 `json:"raw_pin_seconds"`
+	RawEnvelopeSeconds float64 `json:"raw_envelope_seconds"`
+	RawProjectSeconds  float64 `json:"raw_project_seconds"`
+	AppendSeconds      float64 `json:"append_seconds"`
+	JobManifest        string  `json:"job_manifest"`
+	ResultManifest     string  `json:"result_manifest"`
+}
+
+type jobSource struct {
+	NetworkPassphrase string
+	Kind              string
+	URI               string
+	ExtractorVersion  string
 }
 
 func main() {
@@ -86,14 +108,6 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	fixture, err := ledgerfixture.ReadManifest(cfg.Fixtures)
-	if err != nil {
-		return err
-	}
-	start, end, err := selectedRange(cfg, fixture)
-	if err != nil {
-		return err
-	}
 	writtenAt, err := time.Parse(time.RFC3339Nano, cfg.WatermarkTime)
 	if err != nil {
 		return fmt.Errorf("parse --watermark-time: %w", err)
@@ -105,18 +119,76 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		return fmt.Errorf("create output directory: %w", err)
 	}
 
-	job, shard, err := buildJob(cfg, fixture, start, end)
+	var (
+		start       uint32
+		end         uint32
+		source      jobSource
+		batchNext   backfillworker.LedgerBatchSource
+		rawNext     backfillworker.RawLedgerSource
+		closeSource func()
+	)
+	switch cfg.Source {
+	case "fixture":
+		fixture, err := ledgerfixture.ReadManifest(cfg.Fixtures)
+		if err != nil {
+			return err
+		}
+		start, end, err = selectedFixtureRange(cfg, fixture)
+		if err != nil {
+			return err
+		}
+		reader, err := ledgerfixture.NewRangeReader(cfg.Fixtures, fixture, start, end)
+		if err != nil {
+			return err
+		}
+		batchNext = reader.Next
+		closeSource = func() { _ = reader.Close() }
+		absFixtures, err := filepath.Abs(cfg.Fixtures)
+		if err != nil {
+			closeSource()
+			return fmt.Errorf("resolve fixture manifest: %w", err)
+		}
+		source = jobSource{
+			NetworkPassphrase: fixture.NetworkPassphrase,
+			Kind:              "fixture",
+			URI:               (&url.URL{Scheme: "file", Path: absFixtures}).String(),
+			ExtractorVersion:  fixture.ExtractionVersion,
+		}
+	case "ledger-stream":
+		start, end, err = selectedStreamRange(cfg)
+		if err != nil {
+			return err
+		}
+		streamConfig := ledgerstream.ConfigFromEnv()
+		stream, err := ledgerstream.New(streamConfig)
+		if err != nil {
+			return fmt.Errorf("create ledger stream: %w", err)
+		}
+		source, err = ledgerStreamJobSource(streamConfig)
+		if err != nil {
+			return err
+		}
+		next, stop := iter.Pull2(stream.RawLedgers(ctx, ledgerbackend.BoundedRange(start, end)))
+		closeSource = stop
+		rawNext = func() ([]byte, error) {
+			raw, streamErr, ok := next()
+			if !ok {
+				return nil, io.EOF
+			}
+			return raw, streamErr
+		}
+	default:
+		return fmt.Errorf("unsupported --source %q", cfg.Source)
+	}
+	defer closeSource()
+
+	job, shard, err := buildJob(cfg, source, start, end)
 	if err != nil {
 		return err
 	}
-	reader, err := ledgerfixture.NewRangeReader(cfg.Fixtures, fixture, start, end)
-	if err != nil {
-		return err
-	}
-	defer reader.Close()
 
 	started := time.Now().UTC()
-	stream, err := backfillworker.WriteLedgerBatchStream(ctx, backfillworker.LedgerBatchConfig{
+	workerConfig := backfillworker.LedgerBatchConfig{
 		Parquet: backfillworker.ParquetConfig{
 			OutputDir:       cfg.OutputDir,
 			LedgerStart:     start,
@@ -131,7 +203,19 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		MaxEncodedBytes:    cfg.MaxEncodedBytes,
 		MaxBronzeRows:      cfg.MaxBronzeRows,
 		MemoryLimit:        cfg.MemoryLimit,
-	}, reader.Next)
+	}
+	var stream backfillworker.StreamResult
+	if batchNext != nil {
+		stream, err = backfillworker.WriteLedgerBatchStream(ctx, workerConfig, batchNext)
+	} else {
+		stream, err = backfillworker.WriteRawLedgerStream(ctx, workerConfig, backfillworker.RawLedgerOptions{
+			NetworkPassphrase: source.NetworkPassphrase,
+			SchemaVersion:     contracts.SchemaVersion,
+			ExtractionVersion: source.ExtractorVersion,
+			MaterializedAt:    writtenAt,
+			ProjectWorkers:    cfg.DecodeWorkers,
+		}, rawNext)
+	}
 	if err != nil {
 		return err
 	}
@@ -186,29 +270,37 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	}
 	elapsed := completed.Sub(started)
 	summary := runSummary{
-		JobID:            job.JobID,
-		ShardID:          shard.ShardID,
-		GenerationDigest: result.GenerationDigest,
-		LedgerStart:      start,
-		LedgerEnd:        end,
-		Ledgers:          descriptor.LedgerCount,
-		InputBytes:       descriptor.EncodedBytes,
-		BronzeRows:       descriptor.BronzeRows,
-		ParquetFiles:     len(files),
-		ParquetBytes:     parquetBytes,
-		OutputRows:       outputRows,
-		ElapsedSeconds:   elapsed.Seconds(),
-		PeakBatchBytes:   stream.PeakBatchEncodedBytes,
-		PeakBatchRows:    stream.PeakBatchBronzeRows,
-		StagingSeconds:   stream.StagingDuration.Seconds(),
-		ExportSeconds:    stream.ExportDuration.Seconds(),
-		SetupSeconds:     stream.SetupDuration.Seconds(),
-		SourceSeconds:    stream.SourceDuration.Seconds(),
-		DigestSeconds:    stream.DigestDuration.Seconds(),
-		DecodeSeconds:    stream.DecodeDuration.Seconds(),
-		AppendSeconds:    stream.AppendDuration.Seconds(),
-		JobManifest:      jobPath,
-		ResultManifest:   resultPath,
+		Source:             cfg.Source,
+		JobID:              job.JobID,
+		ShardID:            shard.ShardID,
+		GenerationDigest:   result.GenerationDigest,
+		LedgerStart:        start,
+		LedgerEnd:          end,
+		Ledgers:            descriptor.LedgerCount,
+		InputBytes:         descriptor.EncodedBytes,
+		BronzeRows:         descriptor.BronzeRows,
+		ParquetFiles:       len(files),
+		ParquetBytes:       parquetBytes,
+		OutputRows:         outputRows,
+		ElapsedSeconds:     elapsed.Seconds(),
+		PeakBatchBytes:     stream.PeakBatchEncodedBytes,
+		PeakBatchRows:      stream.PeakBatchBronzeRows,
+		StagingSeconds:     stream.StagingDuration.Seconds(),
+		ExportSeconds:      stream.ExportDuration.Seconds(),
+		SetupSeconds:       stream.SetupDuration.Seconds(),
+		SourceSeconds:      stream.SourceDuration.Seconds(),
+		DigestSeconds:      stream.DigestDuration.Seconds(),
+		DecodeSeconds:      stream.DecodeDuration.Seconds(),
+		ExtractionSeconds:  stream.ExtractionDuration.Seconds(),
+		RawViewSeconds:     stream.RawViewDuration.Seconds(),
+		RawDecodeSeconds:   stream.RawDecodeDuration.Seconds(),
+		RawExtractSeconds:  stream.RawExtractDuration.Seconds(),
+		RawPinSeconds:      stream.RawPinDuration.Seconds(),
+		RawEnvelopeSeconds: stream.RawEnvelopeDuration.Seconds(),
+		RawProjectSeconds:  stream.RawProjectDuration.Seconds(),
+		AppendSeconds:      stream.AppendDuration.Seconds(),
+		JobManifest:        jobPath,
+		ResultManifest:     resultPath,
 	}
 	if elapsed > 0 {
 		summary.LedgersPerSecond = float64(summary.Ledgers) / elapsed.Seconds()
@@ -224,7 +316,8 @@ func parseConfig(args []string, output io.Writer) (config, error) {
 	var cfg config
 	flags := flag.NewFlagSet("ducklake-backfill-worker", flag.ContinueOnError)
 	flags.SetOutput(output)
-	flags.StringVar(&cfg.Fixtures, "fixtures", "", "LedgerBatch fixture manifest (required)")
+	flags.StringVar(&cfg.Source, "source", "fixture", "input source: fixture or ledger-stream")
+	flags.StringVar(&cfg.Fixtures, "fixtures", "", "LedgerBatch fixture manifest (required for --source=fixture)")
 	flags.StringVar(&cfg.OutputDir, "output", "", "new shard output directory (required)")
 	flags.UintVar(&cfg.LedgerStart, "start-ledger", 0, "inclusive ledger start; defaults to fixture start")
 	flags.UintVar(&cfg.LedgerEnd, "end-ledger", 0, "inclusive ledger end; defaults to fixture end")
@@ -236,7 +329,7 @@ func parseConfig(args []string, output io.Writer) (config, error) {
 	flags.Uint64Var(&cfg.FileTargetBytes, "file-target-bytes", 256<<20, "target Parquet part bytes before DuckDB rolls at a row-group boundary")
 	flags.Uint64Var(&cfg.FileMaxBytes, "file-max-bytes", 512<<20, "hard maximum bytes for any rolled Parquet part")
 	flags.Uint64Var(&cfg.RowGroupRows, "row-group-rows", 16_384, "Parquet rows per row group; minimum 2048")
-	flags.Uint64Var(&cfg.MaxEncodedBytes, "max-encoded-bytes", 512<<20, "hard selected-range protobuf byte limit")
+	flags.Uint64Var(&cfg.MaxEncodedBytes, "max-encoded-bytes", 512<<20, "hard selected-range source payload byte limit")
 	flags.Uint64Var(&cfg.MaxBronzeRows, "max-bronze-rows", 500_000, "hard selected-range Bronze row limit")
 	flags.StringVar(&cfg.MemoryLimit, "memory-limit", "1GB", "hard DuckDB buffer-manager memory limit per worker")
 	flags.StringVar(&cfg.CodeRevision, "code-revision", "local", "code revision recorded in the job manifest")
@@ -248,8 +341,15 @@ func parseConfig(args []string, output io.Writer) (config, error) {
 	if flags.NArg() != 0 {
 		return cfg, fmt.Errorf("unexpected positional arguments: %v", flags.Args())
 	}
-	if cfg.Fixtures == "" || cfg.OutputDir == "" {
-		return cfg, fmt.Errorf("--fixtures and --output are required")
+	cfg.Source = strings.ToLower(strings.TrimSpace(cfg.Source))
+	if cfg.OutputDir == "" {
+		return cfg, fmt.Errorf("--output is required")
+	}
+	if cfg.Source != "fixture" && cfg.Source != "ledger-stream" {
+		return cfg, fmt.Errorf("--source must be fixture or ledger-stream")
+	}
+	if cfg.Source == "fixture" && cfg.Fixtures == "" {
+		return cfg, fmt.Errorf("--fixtures is required for --source=fixture")
 	}
 	if cfg.Attempt == 0 || cfg.Attempt > uint(^uint32(0)) {
 		return cfg, fmt.Errorf("--attempt must fit a positive uint32")
@@ -263,7 +363,7 @@ func parseConfig(args []string, output io.Writer) (config, error) {
 	return cfg, nil
 }
 
-func selectedRange(cfg config, fixture *ledgerfixture.Manifest) (uint32, uint32, error) {
+func selectedFixtureRange(cfg config, fixture *ledgerfixture.Manifest) (uint32, uint32, error) {
 	start := uint32(cfg.LedgerStart)
 	end := uint32(cfg.LedgerEnd)
 	if cfg.LedgerStart == 0 {
@@ -281,27 +381,38 @@ func selectedRange(cfg config, fixture *ledgerfixture.Manifest) (uint32, uint32,
 	return start, end, nil
 }
 
-func buildJob(cfg config, fixture *ledgerfixture.Manifest, start, end uint32) (backfillmanifest.JobManifest, backfillmanifest.ShardSpec, error) {
+func selectedStreamRange(cfg config) (uint32, uint32, error) {
+	if cfg.LedgerStart == 0 || cfg.LedgerEnd == 0 {
+		return 0, 0, fmt.Errorf("--source=ledger-stream requires explicit --start-ledger and --end-ledger")
+	}
+	start := uint32(cfg.LedgerStart)
+	end := uint32(cfg.LedgerEnd)
+	if uint(start) != cfg.LedgerStart || uint(end) != cfg.LedgerEnd {
+		return 0, 0, fmt.Errorf("ledger range must fit uint32")
+	}
+	if end < start {
+		return 0, 0, fmt.Errorf("ledger end %d precedes start %d", end, start)
+	}
+	return start, end, nil
+}
+
+func buildJob(cfg config, source jobSource, start, end uint32) (backfillmanifest.JobManifest, backfillmanifest.ShardSpec, error) {
 	jobID := cfg.JobID
 	if jobID == "" {
 		jobID = fmt.Sprintf("local-bronze-%d-%d-schema%d", start, end, len(bronze.Migrations))
 	}
-	absFixtures, err := filepath.Abs(cfg.Fixtures)
-	if err != nil {
-		return backfillmanifest.JobManifest{}, backfillmanifest.ShardSpec{}, fmt.Errorf("resolve fixture manifest: %w", err)
-	}
 	job := backfillmanifest.JobManifest{
 		FormatVersion:     backfillmanifest.FormatVersion,
 		JobID:             jobID,
-		NetworkPassphrase: fixture.NetworkPassphrase,
+		NetworkPassphrase: source.NetworkPassphrase,
 		LedgerStart:       start,
 		LedgerEnd:         end,
 		Source: backfillmanifest.Source{
-			Kind: "fixture",
-			URI:  (&url.URL{Scheme: "file", Path: absFixtures}).String(),
+			Kind: source.Kind,
+			URI:  source.URI,
 		},
 		SchemaVersion:    uint32(len(bronze.Migrations)),
-		ExtractorVersion: fixture.ExtractionVersion,
+		ExtractorVersion: source.ExtractorVersion,
 		CodeRevision:     cfg.CodeRevision,
 		ImageDigest:      cfg.ImageDigest,
 		DuckDBVersion:    "1.5.5",
@@ -325,6 +436,60 @@ func buildJob(cfg config, fixture *ledgerfixture.Manifest, start, end uint32) (b
 		return backfillmanifest.JobManifest{}, backfillmanifest.ShardSpec{}, err
 	}
 	return job, shard, nil
+}
+
+func ledgerStreamJobSource(cfg ledgerstream.Config) (jobSource, error) {
+	source := jobSource{
+		NetworkPassphrase: cfg.NetworkPassphrase,
+		ExtractorVersion:  dependencyVersion("github.com/withObsrvr/stellar-extract"),
+	}
+	switch cfg.Type {
+	case ledgerstream.TypeArchive:
+		scheme := strings.ToLower(cfg.ArchiveStorageType)
+		if scheme == "gcs" {
+			scheme = "gs"
+		}
+		source.Kind = "history-archive"
+		source.URI = (&url.URL{
+			Scheme: scheme,
+			Host:   cfg.ArchiveBucketName,
+			Path:   "/" + strings.Trim(cfg.ArchivePath, "/"),
+		}).String()
+	case ledgerstream.TypeRPC:
+		source.Kind = "stellar-rpc"
+		source.URI = cfg.RPCServerURL
+	case ledgerstream.TypeCaptiveCore:
+		source.Kind = "captive-core"
+		if len(cfg.HistoryArchiveURLs) > 0 {
+			source.URI = cfg.HistoryArchiveURLs[0]
+		}
+	default:
+		return jobSource{}, fmt.Errorf("unsupported ledger stream type %q", cfg.Type)
+	}
+	if source.NetworkPassphrase == "" || source.URI == "" || source.ExtractorVersion == "" {
+		return jobSource{}, fmt.Errorf("ledger stream source identity is incomplete: %+v", source)
+	}
+	return source, nil
+}
+
+func dependencyVersion(modulePath string) string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	for _, dependency := range info.Deps {
+		if dependency.Path != modulePath {
+			continue
+		}
+		if dependency.Replace != nil {
+			dependency = dependency.Replace
+		}
+		if dependency.Version == "" {
+			return dependency.Path
+		}
+		return dependency.Path + "@" + dependency.Version
+	}
+	return "unknown"
 }
 
 func aggregateSchemaFingerprint(files []backfillmanifest.File) (string, error) {

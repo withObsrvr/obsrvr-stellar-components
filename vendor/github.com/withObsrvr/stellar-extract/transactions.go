@@ -149,6 +149,24 @@ func ExtractTransactions(input *LedgerInput) ([]TransactionData, error) {
 			txData.SorobanResourcesWriteBytes = &val
 		}
 
+		// Declared footprint entry counts. GetSorobanData resolves fee-bumped
+		// transactions to their inner envelope, so this covers both shapes.
+		//
+		// A Soroban transaction declaring an empty footprint records 0, not
+		// nil — "declared nothing" and "not a Soroban transaction" are
+		// different facts, and only the latter should be absent.
+		if sorobanData, ok := tx.GetSorobanData(); ok {
+			readEntries := int32(len(sorobanData.Resources.Footprint.ReadOnly))
+			writeEntries := int32(len(sorobanData.Resources.Footprint.ReadWrite))
+			txData.SorobanFootprintReadEntries = &readEntries
+			txData.SorobanFootprintWriteEntries = &writeEntries
+		}
+
+		if errorType, errorCode, ok := contractErrorFacts(tx); ok {
+			txData.ContractErrorType = &errorType
+			txData.ContractErrorCode = errorCode
+		}
+
 		// Compute TOID
 		txData.TransactionID = toid.New(int32(ledgerSeq), txIndex, 0).ToInt64()
 
