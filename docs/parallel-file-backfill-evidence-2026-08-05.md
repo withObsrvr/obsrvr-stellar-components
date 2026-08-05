@@ -1,7 +1,7 @@
 # Parallel File Backfill: First Real-Ledger Evidence
 
 **Date:** 2026-08-05
-**Status:** Bounded fixture and direct raw-XDR scaling probes passed; 1,000 ledgers/s and catalog registration remain open
+**Status:** Native Arrow handoff and direct contract-event builder passed; 1,000 ledgers/s and catalog registration remain open
 
 This report covers the first executable slice of the parallel file-oriented
 backfill. It proves the boundary from a verified real `LedgerBatch` corpus to
@@ -293,3 +293,84 @@ critical path. The next writer comparison is native Arrow/Parquet versus the
 remaining worker-local DuckDB Appender and canonical sort. Neither result
 changes the authority model: workers publish immutable files and manifests;
 only the future coordinator may register accepted files into DuckLake.
+
+## Native Arrow columnar handoff
+
+The next slice added `--writer=arrow-parquet`. It parses the authoritative
+Bronze DDL into strict Arrow schemas, maintains bounded persistent builders per
+table, and writes Parquet row groups without creating a DuckDB staging
+database. The existing `duckdb-appender` mode remains available as the oracle
+and rollback. An all-table gate checks the candidate and oracle with
+bidirectional `EXCEPT ALL`, matching schema fingerprints, ledger bounds, and
+row counts for all 21 Bronze tables plus `ledger_batches` and
+`ingest_watermarks`. Independent Arrow attempts also matched SHA-256.
+
+Contract events were the first generated extraction-to-Arrow builder because
+they account for 518,180 of the 974,166 Bronze rows in this sample. Raw mode
+leaves those rows in `stellar-extract`'s typed slice and never allocates their
+reflected `[]any` projection. The full row count still participates in source
+bounds, envelope metadata, and manifest parity.
+
+The first real retry exposed a physical-only Arrow Go nondeterminism: logical
+rows and order matched, but page encoding counts were accumulated in maps and
+serialized into a Thrift list in map iteration order. Four file hashes changed
+only in their footers. The worker now sorts each encoding-stat list, rewrites
+the same-length footer, reopens the file, and verifies footer row count and
+schema before hashing or publication. Two fresh 30-ledger GCS/Zstd attempts
+then matched all 18 artifacts on hash, bytes, rows, range, and schema. Their
+normalized file-set digest was
+`acc9969c7c02011c9d8ff75e4f462b7d1828ab2a86d5c4f26c122047b2b4402e`.
+A high-cardinality dictionary-fallback regression preserves this gate.
+
+### Source comparison
+
+Both sources used one ledger per object and 64,000 files per partition. The
+same Arrow/Zstd 120-ledger run spent 7.22 seconds waiting on the public AWS
+archive and 2.06 seconds on the Obsrvr GCS archive at
+`obsrvr-stellar-ledger-data-pubnet-data/landing/ledgers/pubnet`. GCS therefore
+made this source phase 3.5 times faster on the test host. End-to-end aggregate
+throughput rose from 6.89 to 10.28 ledgers/s.
+
+The GCS configuration boundary is:
+
+```text
+ARCHIVE_STORAGE_TYPE=GCS
+ARCHIVE_BUCKET_NAME=obsrvr-stellar-ledger-data-pubnet-data
+ARCHIVE_PATH=landing/ledgers/pubnet
+LEDGERS_PER_FILE=1
+FILES_PER_PARTITION=64000
+```
+
+The path is not part of the GCS bucket name.
+
+### Writer and codec results
+
+The Appender and Arrow Zstd runs used the same GCS range and logical output.
+Runtime source and extraction phases varied between sequential runs, so the
+end-to-end delta is reported together with phase evidence rather than treated
+as a pure microbenchmark.
+
+| Writer/codec | Aggregate ledgers/s | Rows/s | Parquet bytes | Peak RSS | Source | Projection | Append/write | Finalize/export |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| DuckDB Appender + Zstd | 8.22 | 66,761 | 62,509,327 | 1,861,644 KiB | 1.27s | 1.13s | 3.51s | 2.65s |
+| Arrow + Zstd | 10.28 | 83,459 | 63,767,602 | 1,109,868 KiB | 2.06s | 0.77s | 4.58s | 0.45s |
+| Arrow + Snappy | 12.47 | 101,254 | 132,669,766 | 815,960 KiB | 1.52s | 0.77s | 3.19s | 0.37s |
+| Arrow + uncompressed | 12.18 | 98,922 | 413,553,847 | 801,936 KiB | 1.65s | 0.77s | 3.23s | 0.38s |
+
+Arrow/Zstd improved end-to-end throughput 25% over the current Appender oracle
+and reduced peak RSS about 40%. The Arrow append phase includes row ordering,
+type conversion, row-group construction, and compression, whereas Appender
+export and part of Appender close happen outside its reported append phase.
+The complete writer-side path is therefore the meaningful comparison.
+
+Snappy was within run noise of uncompressed writer time while reducing output
+3.1 times. Zstd reduced Snappy output another 2.1 times but added roughly 1.4
+seconds per 120 recent ledgers. Zstd remains the compact default; Snappy is now
+an explicit throughput profile.
+
+This is not yet a 1,000-ledger/s result. At the best single-worker measurement,
+one worker would take about 59.2 days for 63,804,680 ledgers and an ideal linear
+projection would require about 81 such workers. The next implementation work
+is generated direct builders for the remaining high-volume tables, followed
+by a GCS-backed multi-worker scaling run. Catalog registration and fleet
+effects remain outside these measurements.

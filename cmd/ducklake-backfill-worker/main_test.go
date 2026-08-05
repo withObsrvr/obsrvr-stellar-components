@@ -84,6 +84,23 @@ func TestParseConfigAllowsLedgerStreamWithoutFixtures(t *testing.T) {
 	}
 }
 
+func TestParseConfigAcceptsArrowThroughputProfile(t *testing.T) {
+	cfg, err := parseConfig([]string{
+		"--source", "ledger-stream",
+		"--output", t.TempDir(),
+		"--start-ledger", "100",
+		"--end-ledger", "101",
+		"--writer", "ARROW-PARQUET",
+		"--compression", "SNAPPY",
+	}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parse Arrow throughput profile: %v", err)
+	}
+	if cfg.Writer != "arrow-parquet" || cfg.Compression != "snappy" {
+		t.Fatalf("profile = writer %q compression %q", cfg.Writer, cfg.Compression)
+	}
+}
+
 func TestSelectedStreamRangeRequiresExplicitBoundedRange(t *testing.T) {
 	for _, cfg := range []config{
 		{LedgerStart: 100},

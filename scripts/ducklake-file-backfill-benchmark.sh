@@ -11,6 +11,8 @@ file_target_bytes="${BACKFILL_FILE_TARGET_BYTES:-268435456}"
 file_max_bytes="${BACKFILL_FILE_MAX_BYTES:-536870912}"
 row_group_rows="${BACKFILL_ROW_GROUP_ROWS:-16384}"
 decode_workers="${BACKFILL_DECODE_WORKERS:-8}"
+writer_mode="${BACKFILL_WRITER:-duckdb-appender}"
+compression="${BACKFILL_COMPRESSION:-zstd}"
 max_encoded_bytes="${BACKFILL_MAX_ENCODED_BYTES:-4294967296}"
 max_bronze_rows="${BACKFILL_MAX_BRONZE_ROWS:-2000000}"
 memory_limit="${BACKFILL_MEMORY_LIMIT:-1GB}"
@@ -104,6 +106,8 @@ for ((worker_index = 0; worker_index < concurrency; worker_index++)); do
     --job-id "benchmark-${ledger_start}-${ledger_end}-c${concurrency}"
     --worker-id "$worker_id"
     --decode-workers "$decode_workers"
+    --writer "$writer_mode"
+    --compression "$compression"
     --max-encoded-bytes "$max_encoded_bytes"
     --max-bronze-rows "$max_bronze_rows"
     --memory-limit "$memory_limit"
@@ -164,11 +168,15 @@ jq -s \
   --argjson workers "$concurrency" \
   --argjson wall_seconds "$wall_seconds" \
   --arg source "$backfill_source" \
+  --arg writer "$writer_mode" \
+  --arg compression "$compression" \
   --arg fixture_manifest "$fixture_manifest" \
   '
     {
       workers: $workers,
       source: $source,
+      writer: $writer,
+      compression: $compression,
       fixture_manifest: $fixture_manifest,
       wall_seconds: $wall_seconds,
       ledgers: (map(.ledgers) | add),

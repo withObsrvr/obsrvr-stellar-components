@@ -25,12 +25,14 @@ make build
 - `ingest-replay`: replays fixture corpora directly to the ingest RPC with
   deterministic live/future/catch-up cadence gates or bounded saturated
   micro-batch backfill.
-- `ducklake-backfill-worker`: streams one verified historical range through a
-  memory-limited local DuckDB into rolled, immutable, hashed Parquet parts
-  without attaching to the shared catalog. Fixture mode is the reference
-  parity lane. `--source=ledger-stream` reads raw XDR directly from the
-  configured SDK stream, performs one extraction decode, and bypasses the
-  `LedgerBatch` protobuf and row-JSON bridge. Use
+- `ducklake-backfill-worker`: streams one verified historical range into
+  rolled, immutable, hashed Parquet parts without attaching to the shared
+  catalog. `--writer=arrow-parquet` uses bounded Arrow row groups with no
+  DuckDB staging database; `--writer=duckdb-appender` is the parity oracle and
+  rollback. `--source=ledger-stream` reads raw XDR directly from the configured
+  SDK stream, performs one extraction decode, and sends contract events from
+  typed extraction directly to Arrow without `LedgerBatch`, row JSON,
+  reflection, or generic SQL-value conversion. Use
   `make test-file-backfill-benchmark` with `BACKFILL_SOURCE`, an exact range,
   and `BACKFILL_CONCURRENCY` to record aggregate throughput and phase evidence.
 - `postgres-sink`: idempotently writes ledgers, transactions, and operations to Postgres.
@@ -44,6 +46,7 @@ BACKFILL_SOURCE=ledger-stream \
 BACKFILL_LEDGER_START=62080000 \
 BACKFILL_LEDGER_END=62080119 \
 BACKFILL_CONCURRENCY=4 \
+BACKFILL_WRITER=arrow-parquet \
 BACKEND_TYPE=ARCHIVE \
 ARCHIVE_STORAGE_TYPE=S3 \
 ARCHIVE_BUCKET_NAME=aws-public-blockchain \
@@ -56,6 +59,19 @@ NUM_WORKERS=50 \
 NETWORK_PASSPHRASE='Public Global Stellar Network ; September 2015' \
 make test-file-backfill-benchmark
 ```
+
+The Obsrvr GCS archive uses a separate bucket and object prefix:
+
+```bash
+ARCHIVE_STORAGE_TYPE=GCS \
+ARCHIVE_BUCKET_NAME=obsrvr-stellar-ledger-data-pubnet-data \
+ARCHIVE_PATH=landing/ledgers/pubnet \
+LEDGERS_PER_FILE=1 \
+FILES_PER_PARTITION=64000
+```
+
+Use `BACKFILL_COMPRESSION=snappy` for the measured throughput profile or keep
+the default `zstd` when minimizing persisted bytes is more important.
 
 ## Contracts
 

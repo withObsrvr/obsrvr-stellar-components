@@ -40,6 +40,7 @@ type config struct {
 	WorkerID        string
 	Attempt         uint
 	DecodeWorkers   int
+	Writer          string
 	Compression     string
 	FileTargetBytes uint64
 	FileMaxBytes    uint64
@@ -54,6 +55,7 @@ type config struct {
 
 type runSummary struct {
 	Source             string  `json:"source"`
+	Writer             string  `json:"writer"`
 	JobID              string  `json:"job_id"`
 	ShardID            string  `json:"shard_id"`
 	GenerationDigest   string  `json:"generation_digest"`
@@ -198,6 +200,7 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 			FileMaxBytes:    cfg.FileMaxBytes,
 			RowGroupRows:    cfg.RowGroupRows,
 		},
+		WriterMode:         cfg.Writer,
 		DecodeWorkers:      cfg.DecodeWorkers,
 		WatermarkWrittenAt: writtenAt,
 		MaxEncodedBytes:    cfg.MaxEncodedBytes,
@@ -271,6 +274,7 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	elapsed := completed.Sub(started)
 	summary := runSummary{
 		Source:             cfg.Source,
+		Writer:             cfg.Writer,
 		JobID:              job.JobID,
 		ShardID:            shard.ShardID,
 		GenerationDigest:   result.GenerationDigest,
@@ -325,8 +329,9 @@ func parseConfig(args []string, output io.Writer) (config, error) {
 	flags.StringVar(&cfg.WorkerID, "worker-id", "local-worker", "worker evidence ID")
 	flags.UintVar(&cfg.Attempt, "attempt", 1, "one-based worker attempt")
 	flags.IntVar(&cfg.DecodeWorkers, "decode-workers", min(runtime.NumCPU(), 8), "bounded decode worker count")
+	flags.StringVar(&cfg.Writer, "writer", backfillworker.WriterDuckDBAppender, "worker writer: duckdb-appender or arrow-parquet")
 	flags.StringVar(&cfg.Compression, "compression", "zstd", "Parquet compression: zstd, snappy, or uncompressed")
-	flags.Uint64Var(&cfg.FileTargetBytes, "file-target-bytes", 256<<20, "target Parquet part bytes before DuckDB rolls at a row-group boundary")
+	flags.Uint64Var(&cfg.FileTargetBytes, "file-target-bytes", 256<<20, "target Parquet part bytes before the selected writer rolls at a row-group boundary")
 	flags.Uint64Var(&cfg.FileMaxBytes, "file-max-bytes", 512<<20, "hard maximum bytes for any rolled Parquet part")
 	flags.Uint64Var(&cfg.RowGroupRows, "row-group-rows", 16_384, "Parquet rows per row group; minimum 2048")
 	flags.Uint64Var(&cfg.MaxEncodedBytes, "max-encoded-bytes", 512<<20, "hard selected-range source payload byte limit")
@@ -342,11 +347,16 @@ func parseConfig(args []string, output io.Writer) (config, error) {
 		return cfg, fmt.Errorf("unexpected positional arguments: %v", flags.Args())
 	}
 	cfg.Source = strings.ToLower(strings.TrimSpace(cfg.Source))
+	cfg.Writer = strings.ToLower(strings.TrimSpace(cfg.Writer))
+	cfg.Compression = strings.ToLower(strings.TrimSpace(cfg.Compression))
 	if cfg.OutputDir == "" {
 		return cfg, fmt.Errorf("--output is required")
 	}
 	if cfg.Source != "fixture" && cfg.Source != "ledger-stream" {
 		return cfg, fmt.Errorf("--source must be fixture or ledger-stream")
+	}
+	if cfg.Writer != backfillworker.WriterDuckDBAppender && cfg.Writer != backfillworker.WriterArrowParquet {
+		return cfg, fmt.Errorf("--writer must be %s or %s", backfillworker.WriterDuckDBAppender, backfillworker.WriterArrowParquet)
 	}
 	if cfg.Source == "fixture" && cfg.Fixtures == "" {
 		return cfg, fmt.Errorf("--fixtures is required for --source=fixture")
@@ -417,7 +427,11 @@ func buildJob(cfg config, source jobSource, start, end uint32) (backfillmanifest
 		ImageDigest:      cfg.ImageDigest,
 		DuckDBVersion:    "1.5.5",
 		DuckLakeVersion:  "not-loaded-by-worker",
+		Writer:           cfg.Writer,
+		Compression:      cfg.Compression,
 		FileTargetBytes:  cfg.FileTargetBytes,
+		FileMaxBytes:     cfg.FileMaxBytes,
+		RowGroupRows:     cfg.RowGroupRows,
 	}
 	shardID, err := backfillmanifest.DeriveShardID(job.JobID, job.NetworkPassphrase, job.SchemaVersion, start, end)
 	if err != nil {

@@ -12,6 +12,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 	"github.com/withObsrvr/obsrvr-stellar-components/internal/ingestbatch"
 	"github.com/withObsrvr/obsrvr-stellar-components/pkg/bronze"
+	"github.com/withObsrvr/obsrvr-stellar-components/pkg/bronze/columnar"
 	"github.com/withObsrvr/obsrvr-stellar-components/pkg/contracts"
 	extract "github.com/withObsrvr/stellar-extract"
 )
@@ -19,11 +20,12 @@ import (
 // RawLedgerOptions pins the logical schema and the otherwise nondeterministic
 // extraction timestamps for one immutable backfill job.
 type RawLedgerOptions struct {
-	NetworkPassphrase string
-	SchemaVersion     string
-	ExtractionVersion string
-	MaterializedAt    time.Time
-	ProjectWorkers    int
+	NetworkPassphrase    string
+	SchemaVersion        string
+	ExtractionVersion    string
+	MaterializedAt       time.Time
+	ProjectWorkers       int
+	DirectContractEvents bool
 }
 
 // RawLedger is one ledger after direct extraction. SourceXDR remains borrowed
@@ -38,6 +40,8 @@ type RawLedger struct {
 	TransactionCount  int
 	OperationCount    int
 	Rows              []bronze.DecodedRow
+	BronzeRowCount    int
+	ExtractedData     *extract.LedgerData
 	SourceXDR         []byte
 	ViewDuration      time.Duration
 	DecodeDuration    time.Duration
@@ -83,7 +87,11 @@ func (accumulator *rawLedgerAccumulator) Add(ledger *RawLedger) error {
 	accumulator.descriptor.LedgerEnd = ledger.LedgerSequence
 	accumulator.descriptor.LedgerCount++
 	accumulator.descriptor.EncodedBytes += uint64(len(ledger.SourceXDR))
-	accumulator.descriptor.BronzeRows += uint64(len(ledger.Rows))
+	rowCount := ledger.BronzeRowCount
+	if rowCount == 0 {
+		rowCount = len(ledger.Rows)
+	}
+	accumulator.descriptor.BronzeRows += uint64(rowCount)
 	return nil
 }
 
@@ -149,7 +157,13 @@ func DecodeRawLedger(raw []byte, opts RawLedgerOptions) (*RawLedger, error) {
 	}
 	envelopeDuration := time.Since(envelopeStarted)
 	projectStarted := time.Now()
-	rows := bronze.ProjectLedgerDataWithWorkers(data, overrides, opts.ProjectWorkers)
+	rowCount := bronze.LedgerDataRowCount(data)
+	var rows []bronze.DecodedRow
+	if opts.DirectContractEvents {
+		rows = bronze.ProjectLedgerDataExceptWithWorkers(data, overrides, opts.ProjectWorkers, columnar.ContractEventsTable)
+	} else {
+		rows = bronze.ProjectLedgerDataWithWorkers(data, overrides, opts.ProjectWorkers)
+	}
 	for index := range rows {
 		if rows[index].Err != nil || !rows[index].OK {
 			return nil, fmt.Errorf("ledger %d direct row %d (%s): %w", view.Sequence, index, rows[index].Spec.TableName, rows[index].Err)
@@ -166,6 +180,8 @@ func DecodeRawLedger(raw []byte, opts RawLedgerOptions) (*RawLedger, error) {
 		TransactionCount:  input.LCM.CountTransactions(),
 		OperationCount:    operationCount,
 		Rows:              rows,
+		BronzeRowCount:    rowCount,
+		ExtractedData:     data,
 		SourceXDR:         raw,
 		ViewDuration:      viewDuration,
 		DecodeDuration:    decodeDuration,
