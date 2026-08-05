@@ -69,6 +69,12 @@ A hard per-ledger 400ms maximum is not required during saturated backfill. A
 single catalog cannot perform checkpoint I/O off-path when there is no idle
 path.
 
+The separate bounded transaction and cutover design for full-history loading is
+specified in
+[`bounded-microbatch-backfill-plan.md`](bounded-microbatch-backfill-plan.md).
+That plan preserves this throughput-and-bounded-pause contract rather than
+applying the live per-ledger SLO to backfill.
+
 ### Hard-SLO boundary
 
 If a checkpoint exceeds the interval before the next live ledger, a single

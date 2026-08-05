@@ -1,6 +1,6 @@
 # Current State
 
-**As of:** 2026-08-03  
+**As of:** 2026-08-04
 **Status:** Local write-path and two-server replica gates passed; production deployment remains open.
 
 This is the canonical status document for the Quack/DuckLake work. Historical
@@ -133,6 +133,15 @@ The topology is not production-approved until these are complete:
    `go-stellar-sdk v0.7.1`. The SDK release is dependency-only: its exported
    runtime remains unchanged from `v0.1.2`, so delivery backpressure,
    registration retry, and health fixes still require a future SDK release.
+6. The existing one-ledger-in-flight contract remains correct for live ingest
+   but is not the full-history loading strategy. The latest 1,000-ledger direct
+   replay, measured on DuckDB 1.5.4, took `308.818s` (`3.238`
+   ledgers/second). That projects to roughly 228 days for a fixed
+   63.8-million-ledger target and would create one DuckLake snapshot per ledger
+   transaction. The proposed separate backfill mode, including its mandatory
+   bounded Flow delivery change, range transaction, checkpoint admission,
+   DuckDB 1.5.5 benchmark matrix, and cutover procedure, is specified in
+   [`bounded-microbatch-backfill-plan.md`](bounded-microbatch-backfill-plan.md).
 
 ## Operational constraints and residual risks
 
