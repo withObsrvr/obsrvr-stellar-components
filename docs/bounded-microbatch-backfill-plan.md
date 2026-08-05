@@ -1,7 +1,8 @@
 # Bounded Micro-Batch Backfill Implementation Plan
 
 **Date:** 2026-08-04
-**Status:** Proposed; implementation has not started
+**Status:** First implementation and benchmark slice complete; production
+gates remain open
 **Scope:** `BronzeIngestService`, `quack-ducklake-server`, `ducklake-sink`,
 Flow consumer delivery, checkpoint coordination, replay tooling, and backfill
 operations
@@ -612,7 +613,12 @@ writer from that boundary or replay the bounded new range into the old primary.
 
 ## Incremental delivery
 
-### PR 1 — Protocol and bounded server transaction core
+As of 2026-08-05, the previously stacked Gatekeeper, design, micro-batch, and
+parallel-file drafts are consolidated into one active draft. The sections below
+are implementation stages, not instructions to keep several dependent PRs open
+at once. Finish or merge the active stage before opening another branch.
+
+### Stage 1 — Protocol and bounded server transaction core
 
 - additive protobuf framing and range acknowledgement
 - backfill admission mode and single-session ownership
@@ -621,7 +627,7 @@ writer from that boundary or replay the bounded new range into the old primary.
 - bounded decode worker pool
 - unit tests and a disabled-by-default server path
 
-### PR 2 — Backfill client and bounded Flow delivery
+### Stage 2 — Backfill client and bounded Flow delivery
 
 - Flow SDK bounded ordered delivery and EOF drain semantics
 - SDK dependency upgrade in this repository
@@ -632,7 +638,7 @@ writer from that boundary or replay the bounded new range into the old primary.
 If the SDK release is blocked, make the specialized local consumer explicit in
 this PR and track removal; do not hide it behind the existing unbounded helper.
 
-### PR 3 — Backfill checkpoint and maintenance admission
+### Stage 3 — Backfill checkpoint and maintenance admission
 
 - hard-limit priority handoff in the writer coordinator
 - saturated-soft-limit deferral telemetry
@@ -640,7 +646,7 @@ this PR and track removal; do not hide it behind the existing unbounded helper.
 - server-owned or explicitly paused bounded maintenance
 - checkpoint and maintenance chaos regression
 
-### PR 4 — Benchmark and release gate
+### Stage 4 — Benchmark and release gate
 
 - `ingest-replay` micro-batch transport
 - retained candidate matrix and one-ledger parity baseline
@@ -649,7 +655,7 @@ this PR and track removal; do not hide it behind the existing unbounded helper.
 - multi-era fixture sampling and weighted completion forecast
 - selected production limits and Nomad configuration
 
-### PR 5 — Full-history runbook and cutover rehearsal
+### Stage 5 — Full-history runbook and cutover rehearsal
 
 - fixed-target backfill orchestration
 - durable progress reports and resume commands
@@ -659,9 +665,9 @@ this PR and track removal; do not hide it behind the existing unbounded helper.
 
 ## Dependencies and risks
 
-- Begin implementation from the DuckDB 1.5.5-compatible dependency set in PR
-  #14 or rebase after it merges. Extension binaries must come from the matching
-  DuckDB extension namespace; never compare performance across an ABI mismatch.
+- Use the consolidated DuckDB 1.5.5-compatible dependency set. Extension
+  binaries must come from the matching DuckDB extension namespace; never
+  compare performance across an ABI mismatch.
 - The Flow SDK bounded-delivery change is a production dependency, not an
   optional optimization.
 - Larger transactions reduce snapshots but increase memory, retry scope, commit

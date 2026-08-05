@@ -5,8 +5,9 @@
 
 This report records the first direct-ingest measurements for the additive
 `IngestLedgerMicroBatches` path. Archive fetch and processor CPU are excluded.
-The implementation follows the design in PR #15 and is based on the DuckDB
-1.5.5 / Gatekeeper dependency stack in PR #14.
+The implementation follows
+[`bounded-microbatch-backfill-plan.md`](bounded-microbatch-backfill-plan.md)
+and uses the consolidated DuckDB 1.5.5 / Gatekeeper dependency stack.
 
 The measurements show that this path should remain the bounded tail and
 cutover mechanism rather than the full-history data plane. The parallel

@@ -566,11 +566,12 @@ fleet-cost contract.
 
 ## Incremental delivery
 
-The current bounded micro-batch branch should land independently. It supplies
-the tail, idempotent range receipt, and cutover semantics this design reuses.
-The file-oriented lane then ships in four reviewable PRs.
+The consolidated active branch contains Gatekeeper, the bounded micro-batch
+tail/cutover mechanism, this plan, and the first file-worker proof. Keep that
+work in one active PR. The sections below are delivery stages; they are not
+instructions to create another stack of dependent draft PRs.
 
-### PR 1 — File and manifest vertical slice
+### Stage 1 — File and manifest vertical slice
 
 - add `internal/backfillmanifest` canonical types, hashing, and validation
 - add `cmd/ducklake-backfill-worker`
@@ -583,7 +584,7 @@ The file-oriented lane then ships in four reviewable PRs.
 Exit gate: one shard is byte-stable across two runs and its logical rows match
 the reference writer.
 
-### PR 2 — Validation and transactional registration
+### Stage 2 — Validation and transactional registration
 
 - add `cmd/ducklake-backfill-commit`
 - add strict footer, hash, schema, range, count, and overlap validation
@@ -596,7 +597,7 @@ the reference writer.
 Exit gate: two shards complete out of order, register atomically, converge on
 retry, and match a live-writer baseline.
 
-### PR 3 — Distributed execution and scale harness
+### Stage 3 — Distributed execution and scale harness
 
 - add deterministic planning, leases, heartbeats, attempts, and cancellation
 - package workers as digest-pinned Nomad batch jobs
@@ -608,7 +609,7 @@ retry, and match a live-writer baseline.
 Exit gate: an interrupted distributed job resumes without recomputing accepted
 work and produces a complete candidate Bronze catalog.
 
-### PR 4 — Gatekeeper Silver and production cutover gate
+### Stage 4 — Gatekeeper Silver and production cutover gate
 
 - extend Gatekeeper proposals with pinned input and candidate file manifests
 - validate candidate Silver files before promotion
