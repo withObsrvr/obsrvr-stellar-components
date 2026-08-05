@@ -49,6 +49,8 @@ raw-ledger-source@0.2.2
 See:
 
 - `docs/current-state.md` — canonical topology and production-gate status
+- `docs/parallel-file-backfill-implementation-plan.md` — proposed scalable
+  full-history Bronze/Silver backfill and cutover path
 - `docs/quickstart.md`
 - `docs/rebuild-plan.md`
 - `docs/architecture.md`

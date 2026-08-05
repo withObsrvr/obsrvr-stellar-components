@@ -8,6 +8,11 @@ This report records the first direct-ingest measurements for the additive
 The implementation follows the design in PR #15 and is based on the DuckDB
 1.5.5 / Gatekeeper dependency stack in PR #14.
 
+The measurements show that this path should remain the bounded tail and
+cutover mechanism rather than the full-history data plane. The parallel
+file-oriented successor is specified in
+[`parallel-file-backfill-implementation-plan.md`](parallel-file-backfill-implementation-plan.md).
+
 ## Implementation exercised
 
 - explicit `INGEST_PROFILE=live|backfill` admission; the two RPCs cannot write
