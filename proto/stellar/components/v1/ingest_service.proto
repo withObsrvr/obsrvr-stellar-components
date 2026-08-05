@@ -12,6 +12,10 @@ option go_package = "github.com/withObsrvr/obsrvr-stellar-components/gen/go/stel
 // time: the client must wait for the ack of ledger N before sending N+1.
 service BronzeIngestService {
   rpc IngestLedgerBatches(stream IngestLedgerBatchRequest) returns (stream IngestLedgerBatchAck);
+  // IngestLedgerMicroBatches is the saturated-backfill path. The client frames
+  // one bounded contiguous range, waits for its durable range acknowledgement,
+  // then may send the next frame. It does not change the live per-ledger RPC.
+  rpc IngestLedgerMicroBatches(stream IngestMicroBatchRequest) returns (stream IngestMicroBatchAck);
 }
 
 message IngestLedgerBatchRequest {
@@ -23,4 +27,33 @@ message IngestLedgerBatchAck {
   // True when the server took the replay path (delete-then-insert) because
   // the ledger was at or below the committed watermark.
   bool replayed = 2;
+}
+
+message IngestMicroBatchBegin {
+  string micro_batch_id = 1;
+  uint32 ledger_start = 2;
+  uint32 ledger_end = 3;
+  uint32 ledger_count = 4;
+  uint64 encoded_bytes = 5;
+  uint64 bronze_rows = 6;
+  string payload_sha256 = 7;
+}
+
+message IngestMicroBatchCommit {}
+
+message IngestMicroBatchRequest {
+  oneof payload {
+    IngestMicroBatchBegin begin = 1;
+    LedgerBatch batch = 2;
+    IngestMicroBatchCommit commit = 3;
+  }
+}
+
+message IngestMicroBatchAck {
+  string micro_batch_id = 1;
+  uint32 ledger_start = 2;
+  uint32 ledger_end = 3;
+  uint32 ledger_count = 4;
+  bool replayed = 5;
+  bool deduplicated = 6;
 }

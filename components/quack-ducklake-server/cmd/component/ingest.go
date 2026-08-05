@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	duckdb "github.com/duckdb/duckdb-go/v2"
@@ -25,16 +26,23 @@ import (
 // ingestTokenMetadataKey carries the shared token on the gRPC stream.
 const ingestTokenMetadataKey = "x-ingest-token"
 
-// ingestServer commits ledger batches into the DuckLake catalog in-process,
-// one transaction per ledger, on a dedicated connection. Exactly one batch is
-// in flight at a time (mu); ordering is the client's responsibility and is
-// enforced by the per-ledger ack protocol.
+// ingestServer commits ledger batches into the DuckLake catalog in-process on
+// a dedicated connection. Live admission uses one transaction per ledger;
+// backfill admission uses one bounded contiguous range per transaction. One
+// stream owns ingest admission so the in-memory watermark remains ordered.
 type ingestServer struct {
 	componentsv1.UnimplementedBronzeIngestServiceServer
 	conn        *sql.Conn
 	token       string
 	metrics     *serverMetrics
 	coordinator *writerCoordinator
+	profile     string
+	streamMu    sync.Mutex
+
+	backfillMaxLedgers      int
+	backfillMaxEncodedBytes uint64
+	backfillMaxBronzeRows   uint64
+	backfillDecodeWorkers   int
 
 	highWatermark uint32
 	// forceReplay is set after a failed or uncertain commit: rows may exist,
@@ -42,7 +50,7 @@ type ingestServer struct {
 	forceReplay bool
 }
 
-func newIngestServer(ctx context.Context, db *sql.DB, attachName, token string, coordinator *writerCoordinator, metrics *serverMetrics) (*ingestServer, error) {
+func newIngestServer(ctx context.Context, db *sql.DB, attachName, token string, coordinator *writerCoordinator, metrics *serverMetrics, cfg config) (*ingestServer, error) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("open ingest connection: %w", err)
@@ -53,7 +61,17 @@ func newIngestServer(ctx context.Context, db *sql.DB, attachName, token string, 
 		conn.Close()
 		return nil, fmt.Errorf("point ingest session at %s: %w", attachName, err)
 	}
-	s := &ingestServer{conn: conn, token: token, metrics: metrics, coordinator: coordinator}
+	s := &ingestServer{
+		conn:                    conn,
+		token:                   token,
+		metrics:                 metrics,
+		coordinator:             coordinator,
+		profile:                 cfg.IngestProfile,
+		backfillMaxLedgers:      cfg.BackfillMaxLedgers,
+		backfillMaxEncodedBytes: uint64(cfg.BackfillMaxEncodedBytes),
+		backfillMaxBronzeRows:   uint64(cfg.BackfillMaxBronzeRows),
+		backfillDecodeWorkers:   cfg.BackfillDecodeWorkers,
+	}
 	if err := s.ensureSchema(ctx); err != nil {
 		conn.Close()
 		return nil, err
@@ -146,6 +164,13 @@ func (s *ingestServer) IngestLedgerBatches(stream componentsv1.BronzeIngestServi
 	if err := s.authorize(stream.Context()); err != nil {
 		return err
 	}
+	if s.profile != "live" {
+		return status.Error(codes.FailedPrecondition, "live ingest is disabled while INGEST_PROFILE=backfill")
+	}
+	if !s.streamMu.TryLock() {
+		return status.Error(codes.ResourceExhausted, "another ingest stream is active")
+	}
+	defer s.streamMu.Unlock()
 	for {
 		req, err := stream.Recv()
 		if errors.Is(err, io.EOF) {
@@ -426,7 +451,7 @@ func startIngestServer(ctx context.Context, db *sql.DB, cfg config, coordinator 
 	if cfg.IngestPort == "" {
 		return func() {}, nil
 	}
-	srv, err := newIngestServer(ctx, db, cfg.AttachName, cfg.Token, coordinator, metrics)
+	srv, err := newIngestServer(ctx, db, cfg.AttachName, cfg.Token, coordinator, metrics, cfg)
 	if err != nil {
 		return nil, err
 	}

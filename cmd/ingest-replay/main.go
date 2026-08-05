@@ -52,11 +52,6 @@ func run(args []string, stdout io.Writer) error {
 		}
 	}
 
-	sender, err := newGRPCBatchSender(ctx, config.Endpoint, config.Token)
-	if err != nil {
-		return err
-	}
-	defer sender.Close()
 	reader := ledgerfixture.NewReader(config.Fixtures, manifest)
 	defer reader.Close()
 
@@ -65,7 +60,23 @@ func run(args []string, stdout io.Writer) error {
 		return fmt.Errorf("open per-ledger results: %w", err)
 	}
 
-	summary, replayErr := executeReplay(ctx, config, manifest.BatchCount, reader, sender, resultsWriter, wallClock{})
+	var summary replaySummary
+	var replayErr error
+	if config.Profile == "backfill" {
+		sender, err := newGRPCMicroBatchSender(ctx, config.Endpoint, config.Token)
+		if err != nil {
+			return err
+		}
+		defer sender.Close()
+		summary, replayErr = executeMicroBatchReplay(ctx, config, manifest.BatchCount, reader, sender, resultsWriter, wallClock{})
+	} else {
+		sender, err := newGRPCBatchSender(ctx, config.Endpoint, config.Token)
+		if err != nil {
+			return err
+		}
+		defer sender.Close()
+		summary, replayErr = executeReplay(ctx, config, manifest.BatchCount, reader, sender, resultsWriter, wallClock{})
+	}
 	if closeErr := closeResults(); closeErr != nil {
 		replayErr = errors.Join(replayErr, fmt.Errorf("close per-ledger results: %w", closeErr))
 	}

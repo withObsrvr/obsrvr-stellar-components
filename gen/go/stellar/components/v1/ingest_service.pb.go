@@ -119,6 +119,316 @@ func (x *IngestLedgerBatchAck) GetReplayed() bool {
 	return false
 }
 
+type IngestMicroBatchBegin struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	MicroBatchId  string                 `protobuf:"bytes,1,opt,name=micro_batch_id,json=microBatchId,proto3" json:"micro_batch_id,omitempty"`
+	LedgerStart   uint32                 `protobuf:"varint,2,opt,name=ledger_start,json=ledgerStart,proto3" json:"ledger_start,omitempty"`
+	LedgerEnd     uint32                 `protobuf:"varint,3,opt,name=ledger_end,json=ledgerEnd,proto3" json:"ledger_end,omitempty"`
+	LedgerCount   uint32                 `protobuf:"varint,4,opt,name=ledger_count,json=ledgerCount,proto3" json:"ledger_count,omitempty"`
+	EncodedBytes  uint64                 `protobuf:"varint,5,opt,name=encoded_bytes,json=encodedBytes,proto3" json:"encoded_bytes,omitempty"`
+	BronzeRows    uint64                 `protobuf:"varint,6,opt,name=bronze_rows,json=bronzeRows,proto3" json:"bronze_rows,omitempty"`
+	PayloadSha256 string                 `protobuf:"bytes,7,opt,name=payload_sha256,json=payloadSha256,proto3" json:"payload_sha256,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IngestMicroBatchBegin) Reset() {
+	*x = IngestMicroBatchBegin{}
+	mi := &file_stellar_components_v1_ingest_service_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IngestMicroBatchBegin) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IngestMicroBatchBegin) ProtoMessage() {}
+
+func (x *IngestMicroBatchBegin) ProtoReflect() protoreflect.Message {
+	mi := &file_stellar_components_v1_ingest_service_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IngestMicroBatchBegin.ProtoReflect.Descriptor instead.
+func (*IngestMicroBatchBegin) Descriptor() ([]byte, []int) {
+	return file_stellar_components_v1_ingest_service_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *IngestMicroBatchBegin) GetMicroBatchId() string {
+	if x != nil {
+		return x.MicroBatchId
+	}
+	return ""
+}
+
+func (x *IngestMicroBatchBegin) GetLedgerStart() uint32 {
+	if x != nil {
+		return x.LedgerStart
+	}
+	return 0
+}
+
+func (x *IngestMicroBatchBegin) GetLedgerEnd() uint32 {
+	if x != nil {
+		return x.LedgerEnd
+	}
+	return 0
+}
+
+func (x *IngestMicroBatchBegin) GetLedgerCount() uint32 {
+	if x != nil {
+		return x.LedgerCount
+	}
+	return 0
+}
+
+func (x *IngestMicroBatchBegin) GetEncodedBytes() uint64 {
+	if x != nil {
+		return x.EncodedBytes
+	}
+	return 0
+}
+
+func (x *IngestMicroBatchBegin) GetBronzeRows() uint64 {
+	if x != nil {
+		return x.BronzeRows
+	}
+	return 0
+}
+
+func (x *IngestMicroBatchBegin) GetPayloadSha256() string {
+	if x != nil {
+		return x.PayloadSha256
+	}
+	return ""
+}
+
+type IngestMicroBatchCommit struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IngestMicroBatchCommit) Reset() {
+	*x = IngestMicroBatchCommit{}
+	mi := &file_stellar_components_v1_ingest_service_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IngestMicroBatchCommit) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IngestMicroBatchCommit) ProtoMessage() {}
+
+func (x *IngestMicroBatchCommit) ProtoReflect() protoreflect.Message {
+	mi := &file_stellar_components_v1_ingest_service_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IngestMicroBatchCommit.ProtoReflect.Descriptor instead.
+func (*IngestMicroBatchCommit) Descriptor() ([]byte, []int) {
+	return file_stellar_components_v1_ingest_service_proto_rawDescGZIP(), []int{3}
+}
+
+type IngestMicroBatchRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Payload:
+	//
+	//	*IngestMicroBatchRequest_Begin
+	//	*IngestMicroBatchRequest_Batch
+	//	*IngestMicroBatchRequest_Commit
+	Payload       isIngestMicroBatchRequest_Payload `protobuf_oneof:"payload"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IngestMicroBatchRequest) Reset() {
+	*x = IngestMicroBatchRequest{}
+	mi := &file_stellar_components_v1_ingest_service_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IngestMicroBatchRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IngestMicroBatchRequest) ProtoMessage() {}
+
+func (x *IngestMicroBatchRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_stellar_components_v1_ingest_service_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IngestMicroBatchRequest.ProtoReflect.Descriptor instead.
+func (*IngestMicroBatchRequest) Descriptor() ([]byte, []int) {
+	return file_stellar_components_v1_ingest_service_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *IngestMicroBatchRequest) GetPayload() isIngestMicroBatchRequest_Payload {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+func (x *IngestMicroBatchRequest) GetBegin() *IngestMicroBatchBegin {
+	if x != nil {
+		if x, ok := x.Payload.(*IngestMicroBatchRequest_Begin); ok {
+			return x.Begin
+		}
+	}
+	return nil
+}
+
+func (x *IngestMicroBatchRequest) GetBatch() *LedgerBatch {
+	if x != nil {
+		if x, ok := x.Payload.(*IngestMicroBatchRequest_Batch); ok {
+			return x.Batch
+		}
+	}
+	return nil
+}
+
+func (x *IngestMicroBatchRequest) GetCommit() *IngestMicroBatchCommit {
+	if x != nil {
+		if x, ok := x.Payload.(*IngestMicroBatchRequest_Commit); ok {
+			return x.Commit
+		}
+	}
+	return nil
+}
+
+type isIngestMicroBatchRequest_Payload interface {
+	isIngestMicroBatchRequest_Payload()
+}
+
+type IngestMicroBatchRequest_Begin struct {
+	Begin *IngestMicroBatchBegin `protobuf:"bytes,1,opt,name=begin,proto3,oneof"`
+}
+
+type IngestMicroBatchRequest_Batch struct {
+	Batch *LedgerBatch `protobuf:"bytes,2,opt,name=batch,proto3,oneof"`
+}
+
+type IngestMicroBatchRequest_Commit struct {
+	Commit *IngestMicroBatchCommit `protobuf:"bytes,3,opt,name=commit,proto3,oneof"`
+}
+
+func (*IngestMicroBatchRequest_Begin) isIngestMicroBatchRequest_Payload() {}
+
+func (*IngestMicroBatchRequest_Batch) isIngestMicroBatchRequest_Payload() {}
+
+func (*IngestMicroBatchRequest_Commit) isIngestMicroBatchRequest_Payload() {}
+
+type IngestMicroBatchAck struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	MicroBatchId  string                 `protobuf:"bytes,1,opt,name=micro_batch_id,json=microBatchId,proto3" json:"micro_batch_id,omitempty"`
+	LedgerStart   uint32                 `protobuf:"varint,2,opt,name=ledger_start,json=ledgerStart,proto3" json:"ledger_start,omitempty"`
+	LedgerEnd     uint32                 `protobuf:"varint,3,opt,name=ledger_end,json=ledgerEnd,proto3" json:"ledger_end,omitempty"`
+	LedgerCount   uint32                 `protobuf:"varint,4,opt,name=ledger_count,json=ledgerCount,proto3" json:"ledger_count,omitempty"`
+	Replayed      bool                   `protobuf:"varint,5,opt,name=replayed,proto3" json:"replayed,omitempty"`
+	Deduplicated  bool                   `protobuf:"varint,6,opt,name=deduplicated,proto3" json:"deduplicated,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IngestMicroBatchAck) Reset() {
+	*x = IngestMicroBatchAck{}
+	mi := &file_stellar_components_v1_ingest_service_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IngestMicroBatchAck) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IngestMicroBatchAck) ProtoMessage() {}
+
+func (x *IngestMicroBatchAck) ProtoReflect() protoreflect.Message {
+	mi := &file_stellar_components_v1_ingest_service_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IngestMicroBatchAck.ProtoReflect.Descriptor instead.
+func (*IngestMicroBatchAck) Descriptor() ([]byte, []int) {
+	return file_stellar_components_v1_ingest_service_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *IngestMicroBatchAck) GetMicroBatchId() string {
+	if x != nil {
+		return x.MicroBatchId
+	}
+	return ""
+}
+
+func (x *IngestMicroBatchAck) GetLedgerStart() uint32 {
+	if x != nil {
+		return x.LedgerStart
+	}
+	return 0
+}
+
+func (x *IngestMicroBatchAck) GetLedgerEnd() uint32 {
+	if x != nil {
+		return x.LedgerEnd
+	}
+	return 0
+}
+
+func (x *IngestMicroBatchAck) GetLedgerCount() uint32 {
+	if x != nil {
+		return x.LedgerCount
+	}
+	return 0
+}
+
+func (x *IngestMicroBatchAck) GetReplayed() bool {
+	if x != nil {
+		return x.Replayed
+	}
+	return false
+}
+
+func (x *IngestMicroBatchAck) GetDeduplicated() bool {
+	if x != nil {
+		return x.Deduplicated
+	}
+	return false
+}
+
 var File_stellar_components_v1_ingest_service_proto protoreflect.FileDescriptor
 
 const file_stellar_components_v1_ingest_service_proto_rawDesc = "" +
@@ -128,9 +438,34 @@ const file_stellar_components_v1_ingest_service_proto_rawDesc = "" +
 	"\x05batch\x18\x01 \x01(\v2\".stellar.components.v1.LedgerBatchR\x05batch\"[\n" +
 	"\x14IngestLedgerBatchAck\x12'\n" +
 	"\x0fledger_sequence\x18\x01 \x01(\rR\x0eledgerSequence\x12\x1a\n" +
-	"\breplayed\x18\x02 \x01(\bR\breplayed2\x8e\x01\n" +
+	"\breplayed\x18\x02 \x01(\bR\breplayed\"\x8f\x02\n" +
+	"\x15IngestMicroBatchBegin\x12$\n" +
+	"\x0emicro_batch_id\x18\x01 \x01(\tR\fmicroBatchId\x12!\n" +
+	"\fledger_start\x18\x02 \x01(\rR\vledgerStart\x12\x1d\n" +
+	"\n" +
+	"ledger_end\x18\x03 \x01(\rR\tledgerEnd\x12!\n" +
+	"\fledger_count\x18\x04 \x01(\rR\vledgerCount\x12#\n" +
+	"\rencoded_bytes\x18\x05 \x01(\x04R\fencodedBytes\x12\x1f\n" +
+	"\vbronze_rows\x18\x06 \x01(\x04R\n" +
+	"bronzeRows\x12%\n" +
+	"\x0epayload_sha256\x18\a \x01(\tR\rpayloadSha256\"\x18\n" +
+	"\x16IngestMicroBatchCommit\"\xef\x01\n" +
+	"\x17IngestMicroBatchRequest\x12D\n" +
+	"\x05begin\x18\x01 \x01(\v2,.stellar.components.v1.IngestMicroBatchBeginH\x00R\x05begin\x12:\n" +
+	"\x05batch\x18\x02 \x01(\v2\".stellar.components.v1.LedgerBatchH\x00R\x05batch\x12G\n" +
+	"\x06commit\x18\x03 \x01(\v2-.stellar.components.v1.IngestMicroBatchCommitH\x00R\x06commitB\t\n" +
+	"\apayload\"\xe0\x01\n" +
+	"\x13IngestMicroBatchAck\x12$\n" +
+	"\x0emicro_batch_id\x18\x01 \x01(\tR\fmicroBatchId\x12!\n" +
+	"\fledger_start\x18\x02 \x01(\rR\vledgerStart\x12\x1d\n" +
+	"\n" +
+	"ledger_end\x18\x03 \x01(\rR\tledgerEnd\x12!\n" +
+	"\fledger_count\x18\x04 \x01(\rR\vledgerCount\x12\x1a\n" +
+	"\breplayed\x18\x05 \x01(\bR\breplayed\x12\"\n" +
+	"\fdeduplicated\x18\x06 \x01(\bR\fdeduplicated2\x8a\x02\n" +
 	"\x13BronzeIngestService\x12w\n" +
-	"\x13IngestLedgerBatches\x12/.stellar.components.v1.IngestLedgerBatchRequest\x1a+.stellar.components.v1.IngestLedgerBatchAck(\x010\x01B[ZYgithub.com/withObsrvr/obsrvr-stellar-components/gen/go/stellar/components/v1;componentsv1b\x06proto3"
+	"\x13IngestLedgerBatches\x12/.stellar.components.v1.IngestLedgerBatchRequest\x1a+.stellar.components.v1.IngestLedgerBatchAck(\x010\x01\x12z\n" +
+	"\x18IngestLedgerMicroBatches\x12..stellar.components.v1.IngestMicroBatchRequest\x1a*.stellar.components.v1.IngestMicroBatchAck(\x010\x01B[ZYgithub.com/withObsrvr/obsrvr-stellar-components/gen/go/stellar/components/v1;componentsv1b\x06proto3"
 
 var (
 	file_stellar_components_v1_ingest_service_proto_rawDescOnce sync.Once
@@ -144,21 +479,30 @@ func file_stellar_components_v1_ingest_service_proto_rawDescGZIP() []byte {
 	return file_stellar_components_v1_ingest_service_proto_rawDescData
 }
 
-var file_stellar_components_v1_ingest_service_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_stellar_components_v1_ingest_service_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_stellar_components_v1_ingest_service_proto_goTypes = []any{
 	(*IngestLedgerBatchRequest)(nil), // 0: stellar.components.v1.IngestLedgerBatchRequest
 	(*IngestLedgerBatchAck)(nil),     // 1: stellar.components.v1.IngestLedgerBatchAck
-	(*LedgerBatch)(nil),              // 2: stellar.components.v1.LedgerBatch
+	(*IngestMicroBatchBegin)(nil),    // 2: stellar.components.v1.IngestMicroBatchBegin
+	(*IngestMicroBatchCommit)(nil),   // 3: stellar.components.v1.IngestMicroBatchCommit
+	(*IngestMicroBatchRequest)(nil),  // 4: stellar.components.v1.IngestMicroBatchRequest
+	(*IngestMicroBatchAck)(nil),      // 5: stellar.components.v1.IngestMicroBatchAck
+	(*LedgerBatch)(nil),              // 6: stellar.components.v1.LedgerBatch
 }
 var file_stellar_components_v1_ingest_service_proto_depIdxs = []int32{
-	2, // 0: stellar.components.v1.IngestLedgerBatchRequest.batch:type_name -> stellar.components.v1.LedgerBatch
-	0, // 1: stellar.components.v1.BronzeIngestService.IngestLedgerBatches:input_type -> stellar.components.v1.IngestLedgerBatchRequest
-	1, // 2: stellar.components.v1.BronzeIngestService.IngestLedgerBatches:output_type -> stellar.components.v1.IngestLedgerBatchAck
-	2, // [2:3] is the sub-list for method output_type
-	1, // [1:2] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	6, // 0: stellar.components.v1.IngestLedgerBatchRequest.batch:type_name -> stellar.components.v1.LedgerBatch
+	2, // 1: stellar.components.v1.IngestMicroBatchRequest.begin:type_name -> stellar.components.v1.IngestMicroBatchBegin
+	6, // 2: stellar.components.v1.IngestMicroBatchRequest.batch:type_name -> stellar.components.v1.LedgerBatch
+	3, // 3: stellar.components.v1.IngestMicroBatchRequest.commit:type_name -> stellar.components.v1.IngestMicroBatchCommit
+	0, // 4: stellar.components.v1.BronzeIngestService.IngestLedgerBatches:input_type -> stellar.components.v1.IngestLedgerBatchRequest
+	4, // 5: stellar.components.v1.BronzeIngestService.IngestLedgerMicroBatches:input_type -> stellar.components.v1.IngestMicroBatchRequest
+	1, // 6: stellar.components.v1.BronzeIngestService.IngestLedgerBatches:output_type -> stellar.components.v1.IngestLedgerBatchAck
+	5, // 7: stellar.components.v1.BronzeIngestService.IngestLedgerMicroBatches:output_type -> stellar.components.v1.IngestMicroBatchAck
+	6, // [6:8] is the sub-list for method output_type
+	4, // [4:6] is the sub-list for method input_type
+	4, // [4:4] is the sub-list for extension type_name
+	4, // [4:4] is the sub-list for extension extendee
+	0, // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_stellar_components_v1_ingest_service_proto_init() }
@@ -167,13 +511,18 @@ func file_stellar_components_v1_ingest_service_proto_init() {
 		return
 	}
 	file_stellar_components_v1_ledger_batch_proto_init()
+	file_stellar_components_v1_ingest_service_proto_msgTypes[4].OneofWrappers = []any{
+		(*IngestMicroBatchRequest_Begin)(nil),
+		(*IngestMicroBatchRequest_Batch)(nil),
+		(*IngestMicroBatchRequest_Commit)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_stellar_components_v1_ingest_service_proto_rawDesc), len(file_stellar_components_v1_ingest_service_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   2,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

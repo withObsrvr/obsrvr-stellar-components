@@ -61,15 +61,30 @@ beside ingestion, index materializers, and query APIs rather than inside
   default `2s`, control scheduler polling and the minimum post-ingest idle
   period. The controller remains disabled until the cadence gate passes.
 - `QUACK_DUCKDB_PATH`, optional DuckDB local database path
-- `INGEST_PORT`, default empty (disabled); serves `BronzeIngestService` — a
-  gRPC stream that commits ledger batches in-process, one DuckLake
-  transaction per ledger with per-ledger acks, watermark-gated delete-skip
-  for fresh ledgers, and replay-on-uncertainty after failures. Rows stage
-  through native memory tables via the DuckDB Appender and land via
-  `INSERT..SELECT`, so data inlining applies. Authenticated with
-  `QUACK_TOKEN` via `x-ingest-token` metadata. For sub-400ms commits pair
-  with `DUCKLAKE_INLINE_ROW_LIMIT=256` and a 1–5 minute
-  `ducklake-maintenance` interval.
+- `INGEST_PORT`, default empty (disabled); serves `BronzeIngestService`.
+- `INGEST_PROFILE`, default `live`. `live` admits the existing one-ledger RPC;
+  `backfill` admits only the framed micro-batch RPC. A second ingest stream is
+  rejected rather than queued. The modes are deliberately mutually exclusive
+  for a catalog.
+- `BACKFILL_MAX_LEDGERS_PER_COMMIT`, default `100`;
+  `BACKFILL_MAX_ENCODED_BYTES`, default `536870912` (512 MiB); and
+  `BACKFILL_MAX_BRONZE_ROWS`, default `2000000` are server-enforced caps. The
+  server recomputes all bounds and the payload digest before staging.
+- `BACKFILL_DECODE_WORKERS`, default `8`; one shared decode budget covers the
+  entire range, avoiding nested per-ledger worker pools.
+
+Live ingest commits one DuckLake transaction per ledger with per-ledger acks,
+watermark-gated delete-skip for fresh ledgers, and replay-on-uncertainty after
+failures. For sub-400ms live commits, pair it with
+`DUCKLAKE_INLINE_ROW_LIMIT=256` and measured maintenance settings.
+
+Backfill commits one bounded contiguous range and its receipt atomically, then
+returns one durable range acknowledgement. An identical retry is acknowledged
+from the receipt without rewriting data. Initial 1,000-ledger evidence favored
+`DUCKLAKE_INLINE_ROW_LIMIT=0` for saturated loading; this remains an experiment
+setting until memory, checkpoint, maintenance, and multi-era gates pass. Both
+paths stage through native memory tables via the DuckDB Appender and transfer
+with `INSERT..SELECT`.
 
 ## Telemetry
 

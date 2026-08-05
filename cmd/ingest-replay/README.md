@@ -19,6 +19,7 @@ window.
 | `catch-up` | 5s after burst | +/-250ms | 1h | first 100 ledgers saturated and SLO-exempt |
 | `checkpoint` | 5s | +/-250ms | 1h | requires three new successful idle checkpoints |
 | `maintenance` | 5s | +/-250ms | 1h | intended to run alongside maintenance |
+| `backfill` | saturated | 0 | full requested corpus | one bounded contiguous range in flight |
 | `custom` | required | 0 | full requested corpus | all scheduling values are explicit |
 
 An explicit `--count` takes precedence over profile duration. Jitter is
@@ -47,6 +48,29 @@ The process exits nonzero for an RPC error, acknowledgement mismatch, missing
 requested fixture, configured latency breach, or insufficient idle checkpoint
 count. Its summary includes median, p95, p99, maximum, mean, and over-budget
 ledger sequences for both RPC and scheduled-arrival latency.
+
+The backfill profile uses the additive micro-batch RPC. It flushes on the first
+reached bound: `--microbatch-ledgers` (default 25),
+`--microbatch-max-encoded-bytes` (default 256 MiB), or
+`--microbatch-max-bronze-rows` (default 500,000). The JSON summary records the
+effective minimum and maximum ledgers per transaction, throughput, encoded
+bytes, Bronze rows, and range RPC latency.
+
+```bash
+QUACK_TOKEN="$QUACK_TOKEN" bin/ingest-replay \
+  --fixtures testdata/ledger-batches/pubnet-62080000-62080999.manifest.json \
+  --endpoint 127.0.0.1:9495 \
+  --profile backfill \
+  --microbatch-ledgers 25 \
+  --microbatch-max-encoded-bytes 268435456 \
+  --microbatch-max-bronze-rows 500000 \
+  --count 1000 \
+  --summary /tmp/backfill-summary.json \
+  --results /tmp/backfill-results.jsonl
+```
+
+This direct replay excludes archive fetch and extraction CPU. Treat its rate as
+a sink benchmark, not an end-to-end backfill forecast.
 
 `--offset` selects the next fixture after a controlled restart:
 

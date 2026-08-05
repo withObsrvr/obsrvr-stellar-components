@@ -56,6 +56,11 @@ type config struct {
 	CheckpointIdleDuration      time.Duration
 	InlineRowLimit              int
 	IngestPort                  string
+	IngestProfile               string
+	BackfillMaxLedgers          int
+	BackfillMaxEncodedBytes     int64
+	BackfillMaxBronzeRows       int64
+	BackfillDecodeWorkers       int
 }
 
 func configFromEnv() config {
@@ -94,8 +99,13 @@ func configFromEnv() config {
 		// (~7 files/ledger, merged by ducklake-maintenance). 1024 balances
 		// commit latency against file churn; tune with the maintenance
 		// interval.
-		InlineRowLimit: getenvInt("DUCKLAKE_INLINE_ROW_LIMIT", 1024),
-		IngestPort:     getenv("INGEST_PORT", ""),
+		InlineRowLimit:          getenvInt("DUCKLAKE_INLINE_ROW_LIMIT", 1024),
+		IngestPort:              getenv("INGEST_PORT", ""),
+		IngestProfile:           strings.ToLower(getenv("INGEST_PROFILE", "live")),
+		BackfillMaxLedgers:      getenvInt("BACKFILL_MAX_LEDGERS_PER_COMMIT", 100),
+		BackfillMaxEncodedBytes: getenvInt64("BACKFILL_MAX_ENCODED_BYTES", 512*1024*1024),
+		BackfillMaxBronzeRows:   getenvInt64("BACKFILL_MAX_BRONZE_ROWS", 2_000_000),
+		BackfillDecodeWorkers:   getenvInt("BACKFILL_DECODE_WORKERS", 8),
 	}
 }
 
@@ -260,6 +270,21 @@ func validateConfig(cfg config) error {
 	}
 	if cfg.CheckpointIdleDuration < 0 {
 		return fmt.Errorf("CHECKPOINT_IDLE_DURATION must be non-negative")
+	}
+	if cfg.IngestProfile != "live" && cfg.IngestProfile != "backfill" {
+		return fmt.Errorf("INGEST_PROFILE must be live or backfill")
+	}
+	if cfg.BackfillMaxLedgers <= 0 {
+		return fmt.Errorf("BACKFILL_MAX_LEDGERS_PER_COMMIT must be positive")
+	}
+	if cfg.BackfillMaxEncodedBytes <= 0 {
+		return fmt.Errorf("BACKFILL_MAX_ENCODED_BYTES must be positive")
+	}
+	if cfg.BackfillMaxBronzeRows <= 0 {
+		return fmt.Errorf("BACKFILL_MAX_BRONZE_ROWS must be positive")
+	}
+	if cfg.BackfillDecodeWorkers <= 0 {
+		return fmt.Errorf("BACKFILL_DECODE_WORKERS must be positive")
 	}
 	return nil
 }

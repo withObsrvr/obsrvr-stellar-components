@@ -23,7 +23,8 @@ make build
   length-delimited protobuf fixture corpora, with bounded reordering for the
   concurrent JSONL sink delivery path.
 - `ingest-replay`: replays fixture corpora directly to the ingest RPC with
-  deterministic live/future/catch-up cadence and latency gates.
+  deterministic live/future/catch-up cadence gates or bounded saturated
+  micro-batch backfill.
 - `postgres-sink`: idempotently writes ledgers, transactions, and operations to Postgres.
 - `ducklake-sink`: writes normalized ledger batches into a DuckLake catalog with history-loader-compatible typed bronze tables.
 - `ducklake-gatekeeper`: verifies snapshot-pinned transformation proposals and atomically promotes accepted Silver output with provenance.

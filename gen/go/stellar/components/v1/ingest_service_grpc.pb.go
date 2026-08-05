@@ -19,7 +19,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	BronzeIngestService_IngestLedgerBatches_FullMethodName = "/stellar.components.v1.BronzeIngestService/IngestLedgerBatches"
+	BronzeIngestService_IngestLedgerBatches_FullMethodName      = "/stellar.components.v1.BronzeIngestService/IngestLedgerBatches"
+	BronzeIngestService_IngestLedgerMicroBatches_FullMethodName = "/stellar.components.v1.BronzeIngestService/IngestLedgerMicroBatches"
 )
 
 // BronzeIngestServiceClient is the client API for BronzeIngestService service.
@@ -32,6 +33,10 @@ const (
 // time: the client must wait for the ack of ledger N before sending N+1.
 type BronzeIngestServiceClient interface {
 	IngestLedgerBatches(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[IngestLedgerBatchRequest, IngestLedgerBatchAck], error)
+	// IngestLedgerMicroBatches is the saturated-backfill path. The client frames
+	// one bounded contiguous range, waits for its durable range acknowledgement,
+	// then may send the next frame. It does not change the live per-ledger RPC.
+	IngestLedgerMicroBatches(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[IngestMicroBatchRequest, IngestMicroBatchAck], error)
 }
 
 type bronzeIngestServiceClient struct {
@@ -55,6 +60,19 @@ func (c *bronzeIngestServiceClient) IngestLedgerBatches(ctx context.Context, opt
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type BronzeIngestService_IngestLedgerBatchesClient = grpc.BidiStreamingClient[IngestLedgerBatchRequest, IngestLedgerBatchAck]
 
+func (c *bronzeIngestServiceClient) IngestLedgerMicroBatches(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[IngestMicroBatchRequest, IngestMicroBatchAck], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &BronzeIngestService_ServiceDesc.Streams[1], BronzeIngestService_IngestLedgerMicroBatches_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[IngestMicroBatchRequest, IngestMicroBatchAck]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type BronzeIngestService_IngestLedgerMicroBatchesClient = grpc.BidiStreamingClient[IngestMicroBatchRequest, IngestMicroBatchAck]
+
 // BronzeIngestServiceServer is the server API for BronzeIngestService service.
 // All implementations must embed UnimplementedBronzeIngestServiceServer
 // for forward compatibility.
@@ -65,6 +83,10 @@ type BronzeIngestService_IngestLedgerBatchesClient = grpc.BidiStreamingClient[In
 // time: the client must wait for the ack of ledger N before sending N+1.
 type BronzeIngestServiceServer interface {
 	IngestLedgerBatches(grpc.BidiStreamingServer[IngestLedgerBatchRequest, IngestLedgerBatchAck]) error
+	// IngestLedgerMicroBatches is the saturated-backfill path. The client frames
+	// one bounded contiguous range, waits for its durable range acknowledgement,
+	// then may send the next frame. It does not change the live per-ledger RPC.
+	IngestLedgerMicroBatches(grpc.BidiStreamingServer[IngestMicroBatchRequest, IngestMicroBatchAck]) error
 	mustEmbedUnimplementedBronzeIngestServiceServer()
 }
 
@@ -77,6 +99,9 @@ type UnimplementedBronzeIngestServiceServer struct{}
 
 func (UnimplementedBronzeIngestServiceServer) IngestLedgerBatches(grpc.BidiStreamingServer[IngestLedgerBatchRequest, IngestLedgerBatchAck]) error {
 	return status.Error(codes.Unimplemented, "method IngestLedgerBatches not implemented")
+}
+func (UnimplementedBronzeIngestServiceServer) IngestLedgerMicroBatches(grpc.BidiStreamingServer[IngestMicroBatchRequest, IngestMicroBatchAck]) error {
+	return status.Error(codes.Unimplemented, "method IngestLedgerMicroBatches not implemented")
 }
 func (UnimplementedBronzeIngestServiceServer) mustEmbedUnimplementedBronzeIngestServiceServer() {}
 func (UnimplementedBronzeIngestServiceServer) testEmbeddedByValue()                             {}
@@ -106,6 +131,13 @@ func _BronzeIngestService_IngestLedgerBatches_Handler(srv interface{}, stream gr
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type BronzeIngestService_IngestLedgerBatchesServer = grpc.BidiStreamingServer[IngestLedgerBatchRequest, IngestLedgerBatchAck]
 
+func _BronzeIngestService_IngestLedgerMicroBatches_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(BronzeIngestServiceServer).IngestLedgerMicroBatches(&grpc.GenericServerStream[IngestMicroBatchRequest, IngestMicroBatchAck]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type BronzeIngestService_IngestLedgerMicroBatchesServer = grpc.BidiStreamingServer[IngestMicroBatchRequest, IngestMicroBatchAck]
+
 // BronzeIngestService_ServiceDesc is the grpc.ServiceDesc for BronzeIngestService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -117,6 +149,12 @@ var BronzeIngestService_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "IngestLedgerBatches",
 			Handler:       _BronzeIngestService_IngestLedgerBatches_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+		{
+			StreamName:    "IngestLedgerMicroBatches",
+			Handler:       _BronzeIngestService_IngestLedgerMicroBatches_Handler,
 			ServerStreams: true,
 			ClientStreams: true,
 		},
