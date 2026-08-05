@@ -26,6 +26,7 @@ make build
   deterministic live/future/catch-up cadence and latency gates.
 - `postgres-sink`: idempotently writes ledgers, transactions, and operations to Postgres.
 - `ducklake-sink`: writes normalized ledger batches into a DuckLake catalog with history-loader-compatible typed bronze tables.
+- `ducklake-gatekeeper`: verifies snapshot-pinned transformation proposals and atomically promotes accepted Silver output with provenance.
 
 ## Contracts
 

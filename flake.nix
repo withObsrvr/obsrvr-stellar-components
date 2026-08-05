@@ -12,16 +12,16 @@
       devShells = forAllSystems (pkgs: {
         default =
           let
-            duckdb154 = pkgs.stdenvNoCC.mkDerivation {
+            duckdb155 = pkgs.stdenvNoCC.mkDerivation {
               pname = "duckdb";
-              version = "1.5.4";
+              version = "1.5.5";
               src =
                 if pkgs.stdenv.hostPlatform.system == "x86_64-linux"
                 then pkgs.fetchurl {
-                  url = "https://github.com/duckdb/duckdb/releases/download/v1.5.4/duckdb_cli-linux-amd64.zip";
-                  hash = "sha256-Hy+nJPsFSz2+Gpy9E95bdpl9hQ5wh+x2K6iNsE4BgM8=";
+                  url = "https://github.com/duckdb/duckdb/releases/download/v1.5.5/duckdb_cli-linux-amd64.zip";
+                  hash = "sha256-CMDKEXER/O3hQjnQCTeSNSvv3BdCGMNE0jLBMnlkPQU=";
                 }
-                else throw "duckdb 1.5.4 CLI is pinned only for x86_64-linux";
+                else throw "duckdb 1.5.5 CLI is pinned only for x86_64-linux";
               nativeBuildInputs = [ pkgs.unzip ];
               unpackPhase = "unzip $src";
               installPhase = ''
@@ -37,7 +37,7 @@
               pkgs.gnumake
               pkgs.protobuf
               pkgs.protoc-gen-go
-              duckdb154
+              duckdb155
               pkgs.git
             ];
 
@@ -68,6 +68,7 @@
           ducklake-sink = buildComponent "ducklake-sink";
           quack-ducklake-server = buildComponent "quack-ducklake-server";
           index-materializer = buildComponent "index-materializer";
+          ducklake-gatekeeper = buildComponent "ducklake-gatekeeper";
           default = stellar-ledger-processor;
         });
     };

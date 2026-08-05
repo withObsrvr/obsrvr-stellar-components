@@ -1,0 +1,64 @@
+api_version: gatekeeper.obsrvr.dev/v1alpha1
+proposal_id: prism_asset_daily_volume
+agent_id: gatekeeper_demo_agent
+source:
+  relation: stellar_lake.bronze.token_transfers_stream_v1
+  # Replace with the immutable snapshot containing the requested ledger range.
+  snapshot_id: 1
+ledger_range:
+  start_exclusive: 62079999
+  end_inclusive: 62080999
+target:
+  relation: stellar_lake.silver.asset_daily_volume
+  replace_keys:
+    - asset
+    - day
+transformation: |
+  WITH affected_days AS (
+    SELECT DISTINCT CAST(closed_at AS DATE) AS day
+    FROM {{source}}
+    WHERE ledger_sequence > {{start_ledger}}
+      AND ledger_sequence <= {{end_ledger}}
+  )
+  SELECT
+    transfers.asset,
+    CAST(transfers.closed_at AS DATE) AS day,
+    count(*)::UBIGINT AS transfer_count,
+    sum(CAST(transfers.amount AS DECIMAL(38, 18))) AS volume,
+    count(DISTINCT transfers."from")::UBIGINT AS unique_senders,
+    min(transfers.ledger_sequence) AS first_ledger,
+    max(transfers.ledger_sequence) AS last_ledger
+  FROM {{source}} AS transfers
+  JOIN affected_days
+    ON affected_days.day = CAST(transfers.closed_at AS DATE)
+  WHERE transfers.ledger_sequence > 62079999
+    AND transfers.ledger_sequence <= {{end_ledger}}
+  GROUP BY transfers.asset, CAST(transfers.closed_at AS DATE)
+invariants:
+  - name: unique_asset_day
+    sql: |
+      SELECT count(*) = 0
+      FROM (
+        SELECT asset, day, count(*) AS copies
+        FROM {{candidate}}
+        GROUP BY asset, day
+        HAVING count(*) > 1
+      ) AS duplicates
+  - name: volume_reconciles_to_bronze
+    sql: |
+      WITH affected_days AS (
+        SELECT DISTINCT CAST(closed_at AS DATE) AS day
+        FROM {{source}}
+        WHERE ledger_sequence > {{start_ledger}}
+          AND ledger_sequence <= {{end_ledger}}
+      )
+      SELECT
+        coalesce((SELECT sum(volume) FROM {{candidate}}), 0) =
+        coalesce((
+          SELECT sum(CAST(transfers.amount AS DECIMAL(38, 18)))
+          FROM {{source}} AS transfers
+          JOIN affected_days
+            ON affected_days.day = CAST(transfers.closed_at AS DATE)
+          WHERE transfers.ledger_sequence > 62079999
+            AND transfers.ledger_sequence <= {{end_ledger}}
+        ), 0)

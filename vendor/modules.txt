@@ -306,26 +306,26 @@ github.com/davecgh/go-spew/spew
 # github.com/djherbis/fscache v0.10.1
 ## explicit
 github.com/djherbis/fscache
-# github.com/duckdb/duckdb-go-bindings v0.10504.0
+# github.com/duckdb/duckdb-go-bindings v0.10505.0
 ## explicit; go 1.24
 github.com/duckdb/duckdb-go-bindings
 github.com/duckdb/duckdb-go-bindings/include
-# github.com/duckdb/duckdb-go-bindings/lib/darwin-amd64 v0.10504.0
+# github.com/duckdb/duckdb-go-bindings/lib/darwin-amd64 v0.10505.0
 ## explicit; go 1.24
 github.com/duckdb/duckdb-go-bindings/lib/darwin-amd64
-# github.com/duckdb/duckdb-go-bindings/lib/darwin-arm64 v0.10504.0
+# github.com/duckdb/duckdb-go-bindings/lib/darwin-arm64 v0.10505.0
 ## explicit; go 1.24
 github.com/duckdb/duckdb-go-bindings/lib/darwin-arm64
-# github.com/duckdb/duckdb-go-bindings/lib/linux-amd64 v0.10504.0
+# github.com/duckdb/duckdb-go-bindings/lib/linux-amd64 v0.10505.0
 ## explicit; go 1.24
 github.com/duckdb/duckdb-go-bindings/lib/linux-amd64
-# github.com/duckdb/duckdb-go-bindings/lib/linux-arm64 v0.10504.0
+# github.com/duckdb/duckdb-go-bindings/lib/linux-arm64 v0.10505.0
 ## explicit; go 1.24
 github.com/duckdb/duckdb-go-bindings/lib/linux-arm64
-# github.com/duckdb/duckdb-go-bindings/lib/windows-amd64 v0.10504.0
+# github.com/duckdb/duckdb-go-bindings/lib/windows-amd64 v0.10505.0
 ## explicit; go 1.24
 github.com/duckdb/duckdb-go-bindings/lib/windows-amd64
-# github.com/duckdb/duckdb-go/v2 v2.10504.0
+# github.com/duckdb/duckdb-go/v2 v2.10505.0
 ## explicit; go 1.24.0
 github.com/duckdb/duckdb-go/v2
 github.com/duckdb/duckdb-go/v2/arrowmapping
