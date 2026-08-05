@@ -9,8 +9,8 @@ require (
 	github.com/stellar/go-stellar-sdk v0.7.1
 	github.com/withObsrvr/flow-proto v0.1.3
 	github.com/withObsrvr/flowctl-sdk v0.1.3
-	github.com/withObsrvr/stellar-extract v0.1.6-0.20260805192335-c6108336686b
-	github.com/withObsrvr/stellar-raw-ledger-origin/source v0.0.0-20260805185849-9de9bc5f3e4c
+	github.com/withObsrvr/stellar-extract v0.1.6
+	github.com/withObsrvr/stellar-raw-ledger-origin/source v0.0.0-20260805204803-a92ba11cc452
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1

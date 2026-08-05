@@ -602,10 +602,10 @@ github.com/withObsrvr/flowctl-sdk/pkg/consumer
 github.com/withObsrvr/flowctl-sdk/pkg/flowctl
 github.com/withObsrvr/flowctl-sdk/pkg/processor
 github.com/withObsrvr/flowctl-sdk/pkg/stellar
-# github.com/withObsrvr/stellar-extract v0.1.6-0.20260805192335-c6108336686b
+# github.com/withObsrvr/stellar-extract v0.1.6
 ## explicit; go 1.25.4
 github.com/withObsrvr/stellar-extract
-# github.com/withObsrvr/stellar-raw-ledger-origin/source v0.0.0-20260805185849-9de9bc5f3e4c
+# github.com/withObsrvr/stellar-raw-ledger-origin/source v0.0.0-20260805204803-a92ba11cc452
 ## explicit; go 1.26.1
 github.com/withObsrvr/stellar-raw-ledger-origin/source/ledgerstream
 # github.com/zeebo/xxh3 v1.1.0
