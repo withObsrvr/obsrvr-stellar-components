@@ -98,7 +98,7 @@ func (s *ingestServer) ensureSchema(ctx context.Context) error {
 	}
 	for _, migration := range bronze.Migrations {
 		for _, stmt := range bronze.SplitSQLStatements(migration.SQL) {
-			qualified := bronze.QualifyCreateTableSQL(stmt, "memory", "bronze")
+			qualified := bronze.QualifyMigrationSQL(stmt, "memory", "bronze")
 			if _, err := s.conn.ExecContext(ctx, qualified); err != nil {
 				return fmt.Errorf("ingest staging table %q: %w", qualified, err)
 			}

@@ -19,6 +19,11 @@ make build
 
 - `stellar-ledger-processor`: consumes `stellar.ledger.v1`, emits `stellar.ledger.batch.v1`.
 - `jsonl-sink`: writes normalized ledger batches as protobuf JSONL fixtures.
+- `ledger-fixture-recorder`: converts JSONL batches into hashed,
+  length-delimited protobuf fixture corpora, with bounded reordering for the
+  concurrent JSONL sink delivery path.
+- `ingest-replay`: replays fixture corpora directly to the ingest RPC with
+  deterministic live/future/catch-up cadence and latency gates.
 - `postgres-sink`: idempotently writes ledgers, transactions, and operations to Postgres.
 - `ducklake-sink`: writes normalized ledger batches into a DuckLake catalog with history-loader-compatible typed bronze tables.
 

@@ -1,0 +1,314 @@
+package ledgerfixture
+
+import (
+	"bufio"
+	"bytes"
+	"container/heap"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"hash"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+
+	componentsv1 "github.com/withObsrvr/obsrvr-stellar-components/gen/go/stellar/components/v1"
+	"google.golang.org/protobuf/encoding/protojson"
+)
+
+type RecordOptions struct {
+	ManifestPath   string
+	ObjectStoreURL string
+	BatchesPerFile int
+	ReorderWindow  int
+}
+
+type pendingBatch struct {
+	batch      *componentsv1.LedgerBatch
+	lineNumber int
+}
+
+type batchHeap []pendingBatch
+
+func (h batchHeap) Len() int { return len(h) }
+func (h batchHeap) Less(i, j int) bool {
+	if h[i].batch.LedgerSequence == h[j].batch.LedgerSequence {
+		return h[i].lineNumber < h[j].lineNumber
+	}
+	return h[i].batch.LedgerSequence < h[j].batch.LedgerSequence
+}
+func (h batchHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *batchHeap) Push(value any) {
+	*h = append(*h, value.(pendingBatch))
+}
+func (h *batchHeap) Pop() any {
+	old := *h
+	last := len(old) - 1
+	value := old[last]
+	old[last] = pendingBatch{}
+	*h = old[:last]
+	return value
+}
+
+type chunkWriter struct {
+	file   *os.File
+	hash   hash.Hash
+	writer io.Writer
+	path   string
+	bytes  int64
+	count  int
+	start  uint32
+	end    uint32
+}
+
+// RecordJSONL converts the jsonl-sink output into hashed, length-delimited
+// protobuf fixture chunks. Existing files are never overwritten.
+func RecordJSONL(input io.Reader, options RecordOptions) (recorded *Manifest, resultErr error) {
+	if options.ManifestPath == "" {
+		return nil, fmt.Errorf("manifest path is required")
+	}
+	if options.BatchesPerFile <= 0 {
+		return nil, fmt.Errorf("batches per file must be positive")
+	}
+	if options.ReorderWindow < 0 {
+		return nil, fmt.Errorf("reorder window must not be negative")
+	}
+	dir := filepath.Dir(options.ManifestPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil && dir != "." {
+		return nil, fmt.Errorf("create fixture directory: %w", err)
+	}
+	if _, err := os.Stat(options.ManifestPath); err == nil {
+		return nil, fmt.Errorf("manifest %q already exists", options.ManifestPath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("stat manifest %q: %w", options.ManifestPath, err)
+	}
+
+	manifest := &Manifest{
+		FormatVersion:  FormatVersion,
+		MessageType:    MessageType,
+		ObjectStoreURL: options.ObjectStoreURL,
+	}
+	reader := bufio.NewReader(input)
+	var chunk *chunkWriter
+	createdPaths := make([]string, 0)
+	complete := false
+	defer func() {
+		if chunk != nil && chunk.file != nil {
+			if err := chunk.file.Close(); err != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("close fixture chunk %q during cleanup: %w", chunk.path, err))
+			}
+			chunk.file = nil
+		}
+		if complete {
+			return
+		}
+		for i := len(createdPaths) - 1; i >= 0; i-- {
+			if err := os.Remove(createdPaths[i]); err != nil && !errors.Is(err, os.ErrNotExist) {
+				resultErr = errors.Join(resultErr, fmt.Errorf("remove incomplete fixture chunk %q: %w", createdPaths[i], err))
+			}
+		}
+	}()
+	writeBatch := func(record pendingBatch) error {
+		batch := record.batch
+		if validateErr := validateRecordedBatch(manifest, batch); validateErr != nil {
+			return fmt.Errorf("JSONL line %d: %w", record.lineNumber, validateErr)
+		}
+		if chunk == nil || chunk.count == options.BatchesPerFile {
+			if chunk != nil {
+				if closeErr := finishChunk(manifest, chunk); closeErr != nil {
+					return closeErr
+				}
+			}
+			opened, openErr := openChunk(options.ManifestPath, len(manifest.Files), batch.LedgerSequence)
+			if openErr != nil {
+				return openErr
+			}
+			chunk = opened
+			createdPaths = append(createdPaths, filepath.Join(dir, opened.path))
+		}
+		written, writeErr := WriteDelimited(chunk.writer, batch)
+		chunk.bytes += written
+		if writeErr != nil {
+			return fmt.Errorf("write fixture ledger %d: %w", batch.LedgerSequence, writeErr)
+		}
+		chunk.count++
+		chunk.end = batch.LedgerSequence
+		manifest.BatchCount++
+		manifest.LedgerEnd = batch.LedgerSequence
+		return nil
+	}
+
+	pending := &batchHeap{}
+	heap.Init(pending)
+	seen := make(map[uint32]int)
+	for lineNumber := 1; ; lineNumber++ {
+		line, err := reader.ReadBytes('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("read JSONL line %d: %w", lineNumber, err)
+		}
+		line = bytes.TrimSpace(line)
+		if len(line) > 0 {
+			batch := new(componentsv1.LedgerBatch)
+			if unmarshalErr := protojson.Unmarshal(line, batch); unmarshalErr != nil {
+				return nil, fmt.Errorf("decode JSONL line %d: %w", lineNumber, unmarshalErr)
+			}
+			if previousLine, exists := seen[batch.LedgerSequence]; exists {
+				return nil, fmt.Errorf("JSONL line %d: duplicate ledger_sequence %d (first seen on line %d)", lineNumber, batch.LedgerSequence, previousLine)
+			}
+			seen[batch.LedgerSequence] = lineNumber
+			heap.Push(pending, pendingBatch{batch: batch, lineNumber: lineNumber})
+			if pending.Len() > options.ReorderWindow {
+				record := heap.Pop(pending).(pendingBatch)
+				if writeErr := writeBatch(record); writeErr != nil {
+					return nil, writeErr
+				}
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+	}
+	for pending.Len() > 0 {
+		record := heap.Pop(pending).(pendingBatch)
+		if err := writeBatch(record); err != nil {
+			return nil, err
+		}
+	}
+	if chunk != nil {
+		if err := finishChunk(manifest, chunk); err != nil {
+			return nil, err
+		}
+	}
+	if manifest.BatchCount == 0 {
+		return nil, fmt.Errorf("input contains no LedgerBatch records")
+	}
+	if err := manifest.Validate(); err != nil {
+		return nil, fmt.Errorf("validate recorded manifest: %w", err)
+	}
+	if err := writeManifest(options.ManifestPath, manifest); err != nil {
+		return nil, err
+	}
+	complete = true
+	return manifest, nil
+}
+
+func validateRecordedBatch(manifest *Manifest, batch *componentsv1.LedgerBatch) error {
+	if batch.LedgerSequence == 0 {
+		return fmt.Errorf("ledger_sequence must be positive")
+	}
+	if batch.NetworkPassphrase == "" || batch.SchemaVersion == "" || batch.ExtractionVersion == "" {
+		return fmt.Errorf("network_passphrase, schema_version, and extraction_version are required")
+	}
+	if manifest.BatchCount == 0 {
+		manifest.NetworkPassphrase = batch.NetworkPassphrase
+		manifest.SchemaVersion = batch.SchemaVersion
+		manifest.ExtractionVersion = batch.ExtractionVersion
+		manifest.LedgerStart = batch.LedgerSequence
+		return nil
+	}
+	expected := manifest.LedgerEnd + 1
+	if batch.LedgerSequence != expected {
+		return fmt.Errorf("ledger_sequence is %d, want contiguous ledger %d", batch.LedgerSequence, expected)
+	}
+	if batch.NetworkPassphrase != manifest.NetworkPassphrase {
+		return fmt.Errorf("network_passphrase changed at ledger %d", batch.LedgerSequence)
+	}
+	if batch.SchemaVersion != manifest.SchemaVersion {
+		return fmt.Errorf("schema_version changed from %q to %q", manifest.SchemaVersion, batch.SchemaVersion)
+	}
+	if batch.ExtractionVersion != manifest.ExtractionVersion {
+		return fmt.Errorf("extraction_version changed from %q to %q", manifest.ExtractionVersion, batch.ExtractionVersion)
+	}
+	return nil
+}
+
+func openChunk(manifestPath string, index int, start uint32) (*chunkWriter, error) {
+	base := filepath.Base(manifestPath)
+	if strings.HasSuffix(base, ".manifest.json") {
+		base = strings.TrimSuffix(base, ".manifest.json")
+	} else {
+		base = strings.TrimSuffix(base, filepath.Ext(base))
+	}
+	name := fmt.Sprintf("%s-%05d.pb", base, index)
+	path := filepath.Join(filepath.Dir(manifestPath), name)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("create fixture chunk %q: %w", path, err)
+	}
+	hasher := sha256.New()
+	return &chunkWriter{
+		file:   file,
+		hash:   hasher,
+		writer: io.MultiWriter(file, hasher),
+		path:   name,
+		start:  start,
+	}, nil
+}
+
+func finishChunk(manifest *Manifest, chunk *chunkWriter) error {
+	if err := chunk.file.Sync(); err != nil {
+		closeErr := chunk.file.Close()
+		chunk.file = nil
+		return errors.Join(
+			fmt.Errorf("sync fixture chunk %q: %w", chunk.path, err),
+			wrapCloseError(chunk.path, closeErr),
+		)
+	}
+	closeErr := chunk.file.Close()
+	chunk.file = nil
+	if closeErr != nil {
+		return fmt.Errorf("close fixture chunk %q: %w", chunk.path, closeErr)
+	}
+	manifest.Files = append(manifest.Files, ManifestFile{
+		Path:        chunk.path,
+		SHA256:      hex.EncodeToString(chunk.hash.Sum(nil)),
+		Bytes:       chunk.bytes,
+		BatchCount:  chunk.count,
+		LedgerStart: chunk.start,
+		LedgerEnd:   chunk.end,
+	})
+	return nil
+}
+
+func wrapCloseError(path string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("close fixture chunk %q: %w", path, err)
+}
+
+func writeManifest(path string, manifest *Manifest) (resultErr error) {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return fmt.Errorf("create fixture manifest %q: %w", path, err)
+	}
+	defer func() {
+		if file != nil {
+			if err := file.Close(); err != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("close fixture manifest during cleanup: %w", err))
+			}
+		}
+		if resultErr != nil {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				resultErr = errors.Join(resultErr, fmt.Errorf("remove incomplete fixture manifest %q: %w", path, err))
+			}
+		}
+	}()
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(manifest); err != nil {
+		return fmt.Errorf("write fixture manifest: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("sync fixture manifest: %w", err)
+	}
+	closeErr := file.Close()
+	file = nil
+	if closeErr != nil {
+		return fmt.Errorf("close fixture manifest: %w", closeErr)
+	}
+	return nil
+}

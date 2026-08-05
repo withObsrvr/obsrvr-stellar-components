@@ -1,4 +1,4 @@
-.PHONY: build lint proto test test-local-pipeline test-quack-chaos test-ingest-chaos test-telemetry-gate test-manual-checkpoint-gate test-checkpoint-gate test-crash-recovery-gate test-kill-checkpoint-gate test-checkpoint-failure-gate test-checkpoint-controller-gate validate-pipelines validate-nomad docker-flowctl-runner tidy clean
+.PHONY: build lint proto test test-local-pipeline test-quack-chaos test-ingest-chaos test-telemetry-gate test-manual-checkpoint-gate test-checkpoint-gate test-crash-recovery-gate test-kill-checkpoint-gate test-checkpoint-failure-gate test-checkpoint-controller-gate test-ingest-replay-smoke test-cadence-gate validate-pipelines validate-nomad docker-flowctl-runner tidy clean
 
 GO ?= go
 GOFMT ?= gofmt
@@ -6,12 +6,17 @@ PROTOC ?= protoc
 CGO_ENABLED ?= 1
 
 COMPONENTS := stellar-ledger-processor jsonl-sink postgres-sink ducklake-sink quack-ducklake-server index-materializer ducklake-replica-sync ducklake-maintenance
+TOOLS := ledger-smoke ledger-fixture-recorder ingest-replay
 
 build:
 	@mkdir -p bin
 	@for component in $(COMPONENTS); do \
 		echo "building $$component"; \
 		CGO_ENABLED=$(CGO_ENABLED) $(GO) build -o bin/$$component ./components/$$component/cmd/component; \
+	done
+	@for tool in $(TOOLS); do \
+		echo "building $$tool"; \
+		CGO_ENABLED=$(CGO_ENABLED) $(GO) build -o bin/$$tool ./cmd/$$tool; \
 	done
 
 lint:
@@ -55,6 +60,12 @@ test-checkpoint-failure-gate:
 
 test-checkpoint-controller-gate:
 	@scripts/ducklake-controller-gate.sh
+
+test-ingest-replay-smoke:
+	@$(GO) test ./internal/ledgerfixture ./cmd/ledger-fixture-recorder ./cmd/ingest-replay
+
+test-cadence-gate:
+	@scripts/ducklake-cadence-gate.sh
 
 validate-pipelines:
 	@scripts/validate-pipelines.sh
