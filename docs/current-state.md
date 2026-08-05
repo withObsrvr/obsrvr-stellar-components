@@ -142,6 +142,13 @@ The topology is not production-approved until these are complete:
    bounded Flow delivery change, range transaction, checkpoint admission,
    DuckDB 1.5.5 benchmark matrix, and cutover procedure, is specified in
    [`bounded-microbatch-backfill-plan.md`](bounded-microbatch-backfill-plan.md).
+7. Historical workers now have a native `arrow-parquet` candidate mode. It
+   passed all-table logical parity and byte-stable retry gates while retaining
+   `duckdb-appender` as rollback. On the same 120-ledger recent-mainnet range,
+   Obsrvr GCS reduced source wait from 7.22s to 2.06s versus the public AWS
+   archive. Arrow/Zstd reached 10.28 ledgers/s and Arrow/Snappy reached 12.47
+   ledgers/s on one local worker; neither is a 1,000-ledger/s fleet result. See
+   [`parallel-file-backfill-evidence-2026-08-05.md`](parallel-file-backfill-evidence-2026-08-05.md).
 
 ## Operational constraints and residual risks
 

@@ -94,3 +94,17 @@ func TestProjectLedgerDataCoversEveryTypedTable(t *testing.T) {
 		}
 	}
 }
+
+func TestProjectLedgerDataExceptRetainsTypedRowsForColumnarBuilder(t *testing.T) {
+	data := &extract.LedgerData{
+		Ledgers:        []extract.LedgerRowData{{Sequence: 123}},
+		ContractEvents: []extract.ContractEventData{{EventID: "event", LedgerSequence: 123}},
+	}
+	if got := LedgerDataRowCount(data); got != 2 {
+		t.Fatalf("row count = %d, want 2", got)
+	}
+	rows := ProjectLedgerDataExceptWithWorkers(data, nil, 2, "contract_events_stream_v1")
+	if len(rows) != 1 || rows[0].Spec.TableName != "ledgers_row_v2" {
+		t.Fatalf("projected rows = %+v", rows)
+	}
+}

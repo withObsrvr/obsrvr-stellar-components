@@ -167,6 +167,22 @@ compression ratio, and operational complexity. A worker-local DuckDB instance
 is acceptable because it owns only disposable local state; it must never
 attach to the shared catalog.
 
+Decision update, 2026-08-05: select the native Arrow/Parquet writer for the
+historical candidate path and retain DuckDB Appender plus `COPY` as the parity
+oracle and rollback. The Arrow writer owns bounded per-table builders, rolls
+only after complete row groups, pins all physical writer options, publishes
+without replacement, and produces the same logical schemas and rows for all 21
+Bronze tables plus metadata and watermarks. The first generated direct builder
+handles contract events, 53% of the measured recent-mainnet rows, without
+reflection or generic SQL-value conversion. Remaining tables still use the
+generic Arrow bridge and should migrate in measured volume order.
+
+The writer selection does not select one codec for every deployment. Zstd is
+the compact default. Snappy is the backfill throughput profile after the
+120-ledger probe produced essentially uncompressed speed with 3.1 times fewer
+bytes than uncompressed output. Every job pins the codec in its manifest and
+must not mix codecs under one retry identity.
+
 Partitioned output must avoid small-file explosion. DuckDB's own guidance is
 to keep partitions on the order of at least 100 MB; the exact file target is a
 measured tuning parameter, not an invariant. See the official
@@ -228,14 +244,14 @@ shards per registration transaction.
 ## Manifest contract
 
 The manifest is the durable interface between compute and catalog mutation.
-Use canonical JSON for v1 so hashes are stable and Go tooling remains small.
+Use canonical JSON for v2 so hashes are stable and Go tooling remains small.
 Protobuf may be added later if schema evolution warrants it.
 
 ### Job manifest
 
 ```json
 {
-  "format_version": 1,
+  "format_version": 2,
   "job_id": "pubnet-bronze-00000001-63804680-schema7",
   "network_passphrase": "Public Global Stellar Network ; September 2015",
   "ledger_start": 1,
@@ -247,7 +263,11 @@ Protobuf may be added later if schema evolution warrants it.
   "image_digest": "sha256:...",
   "duckdb_version": "1.5.5",
   "ducklake_version": "...",
+  "writer": "arrow-parquet",
+  "compression": "zstd",
   "file_target_bytes": 268435456,
+  "file_max_bytes": 536870912,
+  "row_group_rows": 16384,
   "shards": ["..."]
 }
 ```
@@ -269,7 +289,7 @@ Protobuf may be added later if schema evolution warrants it.
 
 ```json
 {
-  "format_version": 1,
+  "format_version": 2,
   "job_id": "...",
   "shard_id": "sha256:...",
   "ledger_start": 62080000,
@@ -296,10 +316,12 @@ Protobuf may be added later if schema evolution warrants it.
 }
 ```
 
-The production schema will also include source archive hashes, per-table
-logical fingerprints, compression codec, Parquet row-group statistics, and
-the exact extraction configuration. Timestamps are evidence and never part of
-the deterministic shard ID.
+Version 2 pins the writer, compression codec, file bounds, and row-group size;
+version 1 could not distinguish physical writer policies and is rejected by
+the current worker. The production schema will also include source archive
+hashes, per-table logical fingerprints, Parquet row-group statistics, and the
+exact extraction configuration. Timestamps are evidence and never part of the
+deterministic shard ID.
 
 ## Publication and idempotency
 
@@ -660,7 +682,8 @@ commit—before scheduler or fleet work begins.
 
 ## Open decisions that require evidence
 
-1. Native Go Parquet versus worker-local DuckDB `COPY`.
+1. Generated direct Arrow builders for the remaining high-volume tables and
+   whether compression should move to a separate bounded stage.
 2. Initial shard target duration and adaptive sizing algorithm.
 3. 256 MiB versus 512 MiB file targets and row-group sizing per table.
 4. Local shared storage versus S3-compatible object storage for the first

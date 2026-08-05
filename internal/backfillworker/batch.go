@@ -20,12 +20,18 @@ import (
 
 type LedgerBatchConfig struct {
 	Parquet            ParquetConfig
+	WriterMode         string
 	DecodeWorkers      int
 	WatermarkWrittenAt time.Time
 	MaxEncodedBytes    uint64
 	MaxBronzeRows      uint64
 	MemoryLimit        string
 }
+
+const (
+	WriterDuckDBAppender = "duckdb-appender"
+	WriterArrowParquet   = "arrow-parquet"
+)
 
 type envelopeTable struct {
 	Name         string

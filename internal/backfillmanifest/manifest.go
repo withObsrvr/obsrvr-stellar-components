@@ -16,7 +16,9 @@ import (
 	"time"
 )
 
-const FormatVersion = 1
+// FormatVersion 2 pins writer and physical Parquet policy in the immutable job
+// identity. Version 1 jobs did not distinguish Appender, Arrow, or codec.
+const FormatVersion = 2
 
 var (
 	identifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]*$`)
@@ -56,7 +58,11 @@ type JobManifest struct {
 	ImageDigest       string      `json:"image_digest"`
 	DuckDBVersion     string      `json:"duckdb_version"`
 	DuckLakeVersion   string      `json:"ducklake_version"`
+	Writer            string      `json:"writer"`
+	Compression       string      `json:"compression"`
 	FileTargetBytes   uint64      `json:"file_target_bytes"`
+	FileMaxBytes      uint64      `json:"file_max_bytes"`
+	RowGroupRows      uint64      `json:"row_group_rows"`
 	Shards            []ShardSpec `json:"shards"`
 }
 
@@ -209,16 +215,30 @@ func ValidateJob(job JobManifest) error {
 		"code_revision":     job.CodeRevision,
 		"duckdb_version":    job.DuckDBVersion,
 		"ducklake_version":  job.DuckLakeVersion,
+		"writer":            job.Writer,
+		"compression":       job.Compression,
 	} {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("%s is required", name)
 		}
+	}
+	if job.Writer != "duckdb-appender" && job.Writer != "arrow-parquet" {
+		return fmt.Errorf("writer %q is unsupported", job.Writer)
+	}
+	if job.Compression != "zstd" && job.Compression != "snappy" && job.Compression != "uncompressed" {
+		return fmt.Errorf("compression %q is unsupported", job.Compression)
 	}
 	if !digestPattern.MatchString(job.ImageDigest) {
 		return fmt.Errorf("image_digest %q is not a canonical SHA-256 digest", job.ImageDigest)
 	}
 	if job.FileTargetBytes == 0 {
 		return fmt.Errorf("file_target_bytes must be positive")
+	}
+	if job.FileMaxBytes < job.FileTargetBytes {
+		return fmt.Errorf("file_max_bytes must be at least file_target_bytes")
+	}
+	if job.RowGroupRows < 2048 {
+		return fmt.Errorf("row_group_rows must be at least 2048")
 	}
 	if len(job.Shards) == 0 {
 		return fmt.Errorf("job must contain at least one shard")

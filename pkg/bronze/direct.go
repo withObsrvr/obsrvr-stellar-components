@@ -28,31 +28,42 @@ func ProjectLedgerData(data *extract.LedgerData, transactionOverrides Transactio
 // ProjectLedgerDataWithWorkers projects independent rows through one bounded
 // worker pool while retaining exact table and source-row order.
 func ProjectLedgerDataWithWorkers(data *extract.LedgerData, transactionOverrides TransactionOverrides, workers int) []DecodedRow {
+	return projectLedgerDataWithWorkers(data, transactionOverrides, workers, nil)
+}
+
+// ProjectLedgerDataExceptWithWorkers leaves selected tables in their typed
+// extraction slices so a generated columnar builder can consume them without
+// first materializing reflected []any rows.
+func ProjectLedgerDataExceptWithWorkers(data *extract.LedgerData, transactionOverrides TransactionOverrides, workers int, excludedTables ...string) []DecodedRow {
+	excluded := make(map[string]struct{}, len(excludedTables))
+	for _, tableName := range excludedTables {
+		excluded[tableName] = struct{}{}
+	}
+	return projectLedgerDataWithWorkers(data, transactionOverrides, workers, excluded)
+}
+
+// LedgerDataRowCount counts typed extraction rows without projecting them.
+func LedgerDataRowCount(data *extract.LedgerData) int {
+	count := 0
+	for _, table := range ledgerDataTables(data) {
+		count += reflect.ValueOf(table.rows).Len()
+	}
+	return count
+}
+
+func projectLedgerDataWithWorkers(data *extract.LedgerData, transactionOverrides TransactionOverrides, workers int, excluded map[string]struct{}) []DecodedRow {
 	if data == nil {
 		return nil
 	}
-	tables := []ledgerDataTable{
-		{name: "ledgers_row_v2", rows: data.Ledgers},
-		{name: "transactions_row_v2", rows: data.Transactions},
-		{name: "operations_row_v2", rows: data.Operations},
-		{name: "effects_row_v1", rows: data.Effects},
-		{name: "trades_row_v1", rows: data.Trades},
-		{name: "accounts_snapshot_v1", rows: data.Accounts},
-		{name: "offers_snapshot_v1", rows: data.Offers},
-		{name: "trustlines_snapshot_v1", rows: data.Trustlines},
-		{name: "account_signers_snapshot_v1", rows: data.AccountSigners},
-		{name: "claimable_balances_snapshot_v1", rows: data.ClaimableBalances},
-		{name: "liquidity_pools_snapshot_v1", rows: data.LiquidityPools},
-		{name: "config_settings_snapshot_v1", rows: data.ConfigSettings},
-		{name: "ttl_snapshot_v1", rows: data.TTLEntries},
-		{name: "native_balances_snapshot_v1", rows: data.NativeBalances},
-		{name: "contract_events_stream_v1", rows: data.ContractEvents},
-		{name: "contract_data_snapshot_v1", rows: data.ContractData},
-		{name: "contract_code_snapshot_v1", rows: data.ContractCode},
-		{name: "contract_creations_v1", rows: data.ContractCreations},
-		{name: "token_transfers_stream_v1", rows: data.TokenTransfers},
-		{name: "evicted_keys_state_v1", rows: data.EvictedKeys},
-		{name: "restored_keys_state_v1", rows: data.RestoredKeys},
+	tables := ledgerDataTables(data)
+	if len(excluded) > 0 {
+		included := tables[:0]
+		for _, table := range tables {
+			if _, skip := excluded[table.name]; !skip {
+				included = append(included, table)
+			}
+		}
+		tables = included
 	}
 
 	rowCount := 0
@@ -111,6 +122,35 @@ func ProjectLedgerDataWithWorkers(data *extract.LedgerData, transactionOverrides
 	close(jobs)
 	wait.Wait()
 	return projected
+}
+
+func ledgerDataTables(data *extract.LedgerData) []ledgerDataTable {
+	if data == nil {
+		return nil
+	}
+	return []ledgerDataTable{
+		{name: "ledgers_row_v2", rows: data.Ledgers},
+		{name: "transactions_row_v2", rows: data.Transactions},
+		{name: "operations_row_v2", rows: data.Operations},
+		{name: "effects_row_v1", rows: data.Effects},
+		{name: "trades_row_v1", rows: data.Trades},
+		{name: "accounts_snapshot_v1", rows: data.Accounts},
+		{name: "offers_snapshot_v1", rows: data.Offers},
+		{name: "trustlines_snapshot_v1", rows: data.Trustlines},
+		{name: "account_signers_snapshot_v1", rows: data.AccountSigners},
+		{name: "claimable_balances_snapshot_v1", rows: data.ClaimableBalances},
+		{name: "liquidity_pools_snapshot_v1", rows: data.LiquidityPools},
+		{name: "config_settings_snapshot_v1", rows: data.ConfigSettings},
+		{name: "ttl_snapshot_v1", rows: data.TTLEntries},
+		{name: "native_balances_snapshot_v1", rows: data.NativeBalances},
+		{name: "contract_events_stream_v1", rows: data.ContractEvents},
+		{name: "contract_data_snapshot_v1", rows: data.ContractData},
+		{name: "contract_code_snapshot_v1", rows: data.ContractCode},
+		{name: "contract_creations_v1", rows: data.ContractCreations},
+		{name: "token_transfers_stream_v1", rows: data.TokenTransfers},
+		{name: "evicted_keys_state_v1", rows: data.EvictedKeys},
+		{name: "restored_keys_state_v1", rows: data.RestoredKeys},
+	}
 }
 
 func projectTypedStruct(tableName string, row any, overrides map[string]any) DecodedRow {

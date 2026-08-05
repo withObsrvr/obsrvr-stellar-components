@@ -75,6 +75,9 @@ func WriteRawLedgerStream(ctx context.Context, cfg LedgerBatchConfig, opts RawLe
 }
 
 func writeLedgerStream(ctx context.Context, cfg LedgerBatchConfig, nextBatch LedgerBatchSource, nextRaw RawLedgerSource, rawOpts RawLedgerOptions) (result StreamResult, resultErr error) {
+	if cfg.WriterMode == WriterArrowParquet {
+		return writeColumnarLedgerStream(ctx, cfg, nextBatch, nextRaw, rawOpts)
+	}
 	stagingStarted := time.Now()
 	if err := validateStreamingConfig(cfg, nextBatch, nextRaw, rawOpts); err != nil {
 		return StreamResult{}, err
@@ -339,6 +342,9 @@ func validateStreamingConfig(cfg LedgerBatchConfig, nextBatch LedgerBatchSource,
 	if cfg.DecodeWorkers <= 0 {
 		return fmt.Errorf("decode workers must be positive")
 	}
+	if cfg.WriterMode != "" && cfg.WriterMode != WriterDuckDBAppender && cfg.WriterMode != WriterArrowParquet {
+		return fmt.Errorf("unsupported backfill writer mode %q", cfg.WriterMode)
+	}
 	if cfg.WatermarkWrittenAt.IsZero() {
 		return fmt.Errorf("pinned watermark timestamp is required")
 	}
@@ -501,7 +507,7 @@ func appendRawLedgerEnvelope(appenders map[string]*streamingAppender, cfg Ledger
 		ledger.ExtractionVersion,
 		ledger.TransactionCount,
 		ledger.OperationCount,
-		len(ledger.Rows),
+		ledger.BronzeRowCount,
 		nil,
 		ordinal,
 	}

@@ -19,6 +19,23 @@ func TestValidateJobRequiresExactDeterministicCoverage(t *testing.T) {
 	}
 }
 
+func TestValidateJobPinsPhysicalWriterPolicy(t *testing.T) {
+	for name, mutate := range map[string]func(*JobManifest){
+		"writer":      func(job *JobManifest) { job.Writer = "unknown" },
+		"compression": func(job *JobManifest) { job.Compression = "gzip" },
+		"file bounds": func(job *JobManifest) { job.FileMaxBytes = job.FileTargetBytes - 1 },
+		"row groups":  func(job *JobManifest) { job.RowGroupRows = 1 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			job := validJob(t)
+			mutate(&job)
+			if err := ValidateJob(job); err == nil {
+				t.Fatal("ValidateJob succeeded with invalid physical writer policy")
+			}
+		})
+	}
+}
+
 func TestShardIDExcludesAttemptAndWorkerEvidence(t *testing.T) {
 	job := validJob(t)
 	first := job.Shards[0]
@@ -126,7 +143,11 @@ func validJob(t *testing.T) JobManifest {
 		ImageDigest:       Digest([]byte("image")),
 		DuckDBVersion:     "1.5.5",
 		DuckLakeVersion:   "d8a1881e",
+		Writer:            "arrow-parquet",
+		Compression:       "zstd",
 		FileTargetBytes:   256 << 20,
+		FileMaxBytes:      512 << 20,
+		RowGroupRows:      16_384,
 	}
 	job.Shards = []ShardSpec{
 		validShard(t, job, 100, 104),
