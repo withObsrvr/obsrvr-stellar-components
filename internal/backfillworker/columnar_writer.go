@@ -10,6 +10,8 @@ import (
 	"os"
 	"slices"
 	"sort"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -26,12 +28,16 @@ import (
 
 const columnarParquetCreatedBy = "obsrvr-stellar-components/backfill-columnar-v1"
 
+var errColumnarShardAborted = errors.New("columnar shard writer aborted")
+
 type columnarShardWriter struct {
 	cfg       ParquetConfig
 	outputDir string
 	allocator memory.Allocator
 	tables    map[string]*columnarTableWriter
 	files     []backfillmanifest.File
+	filesMu   sync.Mutex
+	async     *columnarWriteCoordinator
 	closed    bool
 }
 
@@ -43,9 +49,13 @@ type columnarTableWriter struct {
 	layout         bronzeColumnar.TypedTableLayout
 	builder        *bronzeColumnar.RecordBuilder
 	contractEvents *bronzeColumnar.ContractEventsBuilder
+	writeQueue     *columnarWriteQueue
 	part           *columnarPart
 	partIndex      int
 	files          []backfillmanifest.File
+	sortNanos      atomic.Int64
+	buildNanos     atomic.Int64
+	rowsAppended   atomic.Uint64
 }
 
 type columnarPart struct {
@@ -68,18 +78,34 @@ func (writer nonClosingFileWriter) Write(data []byte) (int, error) {
 }
 
 func newColumnarShardWriter(cfg ParquetConfig, outputDir string) *columnarShardWriter {
+	writer, err := newColumnarShardWriterWithConcurrency(cfg, outputDir, 1, 2)
+	if err != nil {
+		panic(err)
+	}
+	return writer
+}
+
+func newColumnarShardWriterWithConcurrency(cfg ParquetConfig, outputDir string, parquetWriters, maxPendingRowGroups int) (*columnarShardWriter, error) {
 	if cfg.RowGroupRows == 0 {
 		cfg.RowGroupRows = 16_384
+	}
+	async, err := newColumnarWriteCoordinator(parquetWriters, maxPendingRowGroups)
+	if err != nil {
+		return nil, err
 	}
 	return &columnarShardWriter{
 		cfg:       cfg,
 		outputDir: outputDir,
 		allocator: memory.DefaultAllocator,
 		tables:    make(map[string]*columnarTableWriter, len(bronze.TypedTableSpecs)+2),
-	}
+		async:     async,
+	}, nil
 }
 
 func (writer *columnarShardWriter) appendDecodedLedger(sequence uint32, decoded []bronze.DecodedRow) error {
+	if err := writer.async.Err(); err != nil {
+		return err
+	}
 	grouped := make(map[string][]bronze.DecodedRow)
 	for index, row := range decoded {
 		if row.Err != nil {
@@ -101,13 +127,15 @@ func (writer *columnarShardWriter) appendDecodedLedger(sequence uint32, decoded 
 	slices.Sort(tableNames)
 	for _, tableName := range tableNames {
 		rows := grouped[tableName]
-		slices.SortStableFunc(rows, func(left, right bronze.DecodedRow) int {
-			return compareProjectedRows(left.Values, right.Values)
-		})
 		table, err := writer.typedTable(tableName)
 		if err != nil {
 			return err
 		}
+		sortStarted := time.Now()
+		slices.SortStableFunc(rows, func(left, right bronze.DecodedRow) int {
+			return compareProjectedRows(left.Values, right.Values)
+		})
+		table.sortNanos.Add(int64(time.Since(sortStarted)))
 		for _, row := range rows {
 			if err := table.append(sequence, row.Values); err != nil {
 				return fmt.Errorf("append ledger %d to %s: %w", sequence, tableName, err)
@@ -134,14 +162,19 @@ func (writer *columnarShardWriter) appendContractEvents(sequence uint32, rows []
 	if table.contractEvents == nil {
 		table.contractEvents = bronzeColumnar.NewContractEventsBuilder(writer.allocator, int(writer.cfg.RowGroupRows))
 	}
+	sortStarted := time.Now()
 	bronzeColumnar.SortContractEvents(rows)
+	table.sortNanos.Add(int64(time.Since(sortStarted)))
 	for _, row := range rows {
 		if row.LedgerSequence != sequence {
 			return fmt.Errorf("contract event ledger %d does not match source ledger %d", row.LedgerSequence, sequence)
 		}
+		buildStarted := time.Now()
 		if err := table.contractEvents.Append(row); err != nil {
 			return err
 		}
+		table.buildNanos.Add(int64(time.Since(buildStarted)))
+		table.rowsAppended.Add(1)
 		if uint64(table.contractEvents.Len()) >= writer.cfg.RowGroupRows {
 			if err := table.flushContractEvents(); err != nil {
 				return err
@@ -240,6 +273,11 @@ func (writer *columnarShardWriter) addTable(publicName, tableName string, ledger
 		owner: writer, publicName: publicName, tableName: tableName,
 		ledgerColumn: ledgerColumn, layout: layout, builder: builder,
 	}
+	table.writeQueue = writer.async.Register(publicName)
+	if table.writeQueue == nil {
+		builder.Release()
+		return nil, fmt.Errorf("register columnar write queue for %s", publicName)
+	}
 	writer.tables[publicName] = table
 	return table, nil
 }
@@ -255,9 +293,12 @@ func (table *columnarTableWriter) append(sequence uint32, values []any) error {
 	if rowLedger != sequence {
 		return fmt.Errorf("row ledger %d does not match source ledger %d", rowLedger, sequence)
 	}
+	buildStarted := time.Now()
 	if err := table.builder.Append(values); err != nil {
 		return err
 	}
+	table.buildNanos.Add(int64(time.Since(buildStarted)))
+	table.rowsAppended.Add(1)
 	if uint64(table.builder.Len()) >= table.owner.cfg.RowGroupRows {
 		return table.flush()
 	}
@@ -269,8 +310,7 @@ func (table *columnarTableWriter) flush() error {
 	if record == nil {
 		return nil
 	}
-	defer record.Release()
-	return table.writeRecord(record)
+	return table.enqueueRecord(record)
 }
 
 func (table *columnarTableWriter) flushContractEvents() error {
@@ -284,8 +324,20 @@ func (table *columnarTableWriter) flushContractEvents() error {
 		}
 		return nil
 	}
-	defer record.Release()
-	return table.writeRecord(record)
+	return table.enqueueRecord(record)
+}
+
+func (table *columnarTableWriter) enqueueRecord(record arrow.RecordBatch) error {
+	if record == nil {
+		return nil
+	}
+	return table.writeQueue.Enqueue(columnarWriteTask{
+		rows: uint64(record.NumRows()),
+		run: func() error {
+			return table.writeRecord(record)
+		},
+		release: record.Release,
+	})
 }
 
 func (table *columnarTableWriter) writeRecord(record arrow.RecordBatch) error {
@@ -403,7 +455,9 @@ func (table *columnarTableWriter) closePart() (resultErr error) {
 		ParquetSchemaFingerprint: fingerprint,
 	}
 	table.files = append(table.files, artifact)
+	table.owner.filesMu.Lock()
 	table.owner.files = append(table.owner.files, artifact)
+	table.owner.filesMu.Unlock()
 	table.partIndex++
 	return nil
 }
@@ -547,11 +601,21 @@ func (writer *columnarShardWriter) close() ([]backfillmanifest.File, error) {
 			writer.abort()
 			return nil, err
 		}
+	}
+	if err := writer.async.Close(); err != nil {
+		writer.abort()
+		return nil, err
+	}
+	for _, name := range names {
+		table := writer.tables[name]
 		if err := table.closePart(); err != nil {
 			writer.abort()
 			return nil, err
 		}
-		table.builder.Release()
+		if table.builder != nil {
+			table.builder.Release()
+			table.builder = nil
+		}
 		if table.contractEvents != nil {
 			table.contractEvents.Release()
 			table.contractEvents = nil
@@ -567,8 +631,13 @@ func (writer *columnarShardWriter) close() ([]backfillmanifest.File, error) {
 }
 
 func (writer *columnarShardWriter) abort() {
+	writer.async.fail(errColumnarShardAborted)
+	_ = writer.async.Close()
 	for _, table := range writer.tables {
-		table.builder.Release()
+		if table.builder != nil {
+			table.builder.Release()
+			table.builder = nil
+		}
 		if table.contractEvents != nil {
 			table.contractEvents.Release()
 			table.contractEvents = nil
@@ -580,7 +649,32 @@ func (writer *columnarShardWriter) abort() {
 			table.part = nil
 		}
 	}
-	removeLocalArtifacts(writer.files)
+	writer.filesMu.Lock()
+	files := slices.Clone(writer.files)
+	writer.filesMu.Unlock()
+	removeLocalArtifacts(files)
+}
+
+func (writer *columnarShardWriter) writerMetrics() (columnarWriteCoordinatorMetrics, map[string]TableWriterStats) {
+	coordinator := writer.async.Metrics()
+	tables := make(map[string]TableWriterStats, len(writer.tables))
+	for publicName, table := range writer.tables {
+		queue := table.writeQueue.Metrics()
+		var outputBytes uint64
+		for _, file := range table.files {
+			outputBytes += file.Bytes
+		}
+		tables[publicName] = TableWriterStats{
+			Rows:                 table.rowsAppended.Load(),
+			RecordBatches:        queue.RecordBatches,
+			OutputBytes:          outputBytes,
+			SortSeconds:          time.Duration(table.sortNanos.Load()).Seconds(),
+			BuildSeconds:         time.Duration(table.buildNanos.Load()).Seconds(),
+			AdmissionWaitSeconds: queue.AdmissionWait.Seconds(),
+			EncodeWorkerSeconds:  queue.EncodeWorkerDuration.Seconds(),
+		}
+	}
+	return coordinator, tables
 }
 
 func columnarWriterProperties(cfg ParquetConfig, allocator memory.Allocator) (*parquet.WriterProperties, error) {

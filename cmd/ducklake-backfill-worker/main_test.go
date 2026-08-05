@@ -94,12 +94,14 @@ func TestParseConfigAcceptsArrowThroughputProfile(t *testing.T) {
 		"--compression", "SNAPPY",
 		"--extract-workers", "4",
 		"--max-inflight-ledgers", "8",
+		"--parquet-writers", "3",
+		"--max-pending-row-groups", "6",
 	}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("parse Arrow throughput profile: %v", err)
 	}
-	if cfg.Writer != "arrow-parquet" || cfg.Compression != "snappy" || cfg.ExtractWorkers != 4 || cfg.MaxInFlight != 8 {
-		t.Fatalf("profile = writer %q compression %q extract workers %d max in-flight %d", cfg.Writer, cfg.Compression, cfg.ExtractWorkers, cfg.MaxInFlight)
+	if cfg.Writer != "arrow-parquet" || cfg.Compression != "snappy" || cfg.ExtractWorkers != 4 || cfg.MaxInFlight != 8 || cfg.ParquetWriters != 3 || cfg.MaxPendingRowGroups != 6 {
+		t.Fatalf("profile = %+v", cfg)
 	}
 }
 
@@ -114,6 +116,20 @@ func TestParseConfigRejectsPipelineBoundBelowWorkers(t *testing.T) {
 	}, &bytes.Buffer{})
 	if err == nil {
 		t.Fatal("parseConfig succeeded with fewer in-flight ledgers than extract workers")
+	}
+}
+
+func TestParseConfigRejectsPendingRowGroupsBelowParquetWriters(t *testing.T) {
+	_, err := parseConfig([]string{
+		"--source", "ledger-stream",
+		"--output", t.TempDir(),
+		"--start-ledger", "100",
+		"--end-ledger", "101",
+		"--parquet-writers", "4",
+		"--max-pending-row-groups", "3",
+	}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("parseConfig succeeded with fewer pending row groups than Parquet writers")
 	}
 }
 

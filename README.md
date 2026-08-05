@@ -81,14 +81,18 @@ BACKFILL_WRITER=arrow-parquet \
 BACKFILL_COMPRESSION=snappy \
 BACKFILL_EXTRACT_WORKERS=4 \
 BACKFILL_MAX_INFLIGHT_LEDGERS=8 \
-BACKFILL_DECODE_WORKERS=2
+BACKFILL_DECODE_WORKERS=2 \
+BACKFILL_PARQUET_WRITERS=2 \
+BACKFILL_MAX_PENDING_ROW_GROUPS=4
 ```
 
 The source XDR is borrowed, so the pipeline copies it before the next archive
 read. `BACKFILL_MAX_INFLIGHT_LEDGERS` bounds those owned copies, decoded
 ledgers, and out-of-order results together. See
 [`docs/bounded-arrow-pipeline-evidence-2026-08-05.md`](docs/bounded-arrow-pipeline-evidence-2026-08-05.md)
-for the 1,000-ledger result and configuration knee.
+for the extraction configuration knee and
+[`docs/parallel-arrow-writer-evidence-2026-08-05.md`](docs/parallel-arrow-writer-evidence-2026-08-05.md)
+for the bounded writer result.
 
 ## Contracts
 
@@ -114,6 +118,8 @@ See:
   full-history Bronze/Silver backfill and cutover path
 - `docs/parallel-file-backfill-evidence-2026-08-05.md` — first real-ledger
   file-worker correctness, throughput, and memory evidence
+- `docs/parallel-arrow-writer-evidence-2026-08-05.md` — bounded parallel
+  row-group encoding, determinism, and host-scaling evidence
 - `docs/quickstart.md`
 - `docs/rebuild-plan.md`
 - `docs/architecture.md`

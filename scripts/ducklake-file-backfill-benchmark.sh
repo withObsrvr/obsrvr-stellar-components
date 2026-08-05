@@ -13,6 +13,8 @@ row_group_rows="${BACKFILL_ROW_GROUP_ROWS:-16384}"
 decode_workers="${BACKFILL_DECODE_WORKERS:-8}"
 extract_workers="${BACKFILL_EXTRACT_WORKERS:-1}"
 max_inflight_ledgers="${BACKFILL_MAX_INFLIGHT_LEDGERS:-}"
+parquet_writers="${BACKFILL_PARQUET_WRITERS:-1}"
+max_pending_row_groups="${BACKFILL_MAX_PENDING_ROW_GROUPS:-}"
 writer_mode="${BACKFILL_WRITER:-duckdb-appender}"
 compression="${BACKFILL_COMPRESSION:-zstd}"
 max_encoded_bytes="${BACKFILL_MAX_ENCODED_BYTES:-4294967296}"
@@ -37,6 +39,17 @@ if [[ -z "$max_inflight_ledgers" ]]; then
 fi
 if [[ ! "$max_inflight_ledgers" =~ ^[1-9][0-9]*$ || "$max_inflight_ledgers" -lt "$extract_workers" ]]; then
   echo "BACKFILL_EXTRACT_WORKERS must be positive and BACKFILL_MAX_INFLIGHT_LEDGERS must be at least that value" >&2
+  exit 2
+fi
+if [[ ! "$parquet_writers" =~ ^[1-9][0-9]*$ ]]; then
+  echo "BACKFILL_PARQUET_WRITERS must be a positive integer" >&2
+  exit 2
+fi
+if [[ -z "$max_pending_row_groups" ]]; then
+  max_pending_row_groups=$((parquet_writers * 2))
+fi
+if [[ ! "$max_pending_row_groups" =~ ^[1-9][0-9]*$ || "$max_pending_row_groups" -lt "$parquet_writers" ]]; then
+  echo "BACKFILL_MAX_PENDING_ROW_GROUPS must be at least BACKFILL_PARQUET_WRITERS" >&2
   exit 2
 fi
 
@@ -121,6 +134,8 @@ for ((worker_index = 0; worker_index < concurrency; worker_index++)); do
     --decode-workers "$decode_workers"
     --extract-workers "$extract_workers"
     --max-inflight-ledgers "$max_inflight_ledgers"
+    --parquet-writers "$parquet_writers"
+    --max-pending-row-groups "$max_pending_row_groups"
     --writer "$writer_mode"
     --compression "$compression"
     --max-encoded-bytes "$max_encoded_bytes"
@@ -185,6 +200,8 @@ jq -s \
   --arg source "$backfill_source" \
   --argjson extract_workers "$extract_workers" \
   --argjson max_inflight_ledgers "$max_inflight_ledgers" \
+  --argjson parquet_writers "$parquet_writers" \
+  --argjson max_pending_row_groups "$max_pending_row_groups" \
   --arg writer "$writer_mode" \
   --arg compression "$compression" \
   --arg fixture_manifest "$fixture_manifest" \
@@ -194,6 +211,8 @@ jq -s \
       source: $source,
       extract_workers: $extract_workers,
       max_inflight_ledgers: $max_inflight_ledgers,
+      parquet_writers: $parquet_writers,
+      max_pending_row_groups: $max_pending_row_groups,
       writer: $writer,
       compression: $compression,
       fixture_manifest: $fixture_manifest,
@@ -224,6 +243,11 @@ jq -s \
       critical_worker_pipeline_wait_seconds: (map(.pipeline_wait_seconds) | max),
       peak_inflight_ledgers: (map(.peak_inflight_ledgers) | max),
       peak_reorder_buffered_ledgers: (map(.peak_reorder_buffered_ledgers) | max),
+      critical_worker_parquet_admission_wait_seconds: (map(.parquet_admission_wait_seconds) | max),
+      critical_worker_parquet_encode_worker_seconds: (map(.parquet_encode_worker_seconds) | max),
+      critical_worker_parquet_drain_wait_seconds: (map(.parquet_drain_wait_seconds) | max),
+      peak_parquet_writers: (map(.peak_parquet_writers) | max),
+      peak_pending_row_groups: (map(.peak_pending_row_groups) | max),
       critical_worker_append_seconds: (map(.append_seconds) | max),
       workers_detail: .
     }
