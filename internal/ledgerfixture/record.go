@@ -2,6 +2,8 @@ package ledgerfixture
 
 import (
 	"bufio"
+	"bytes"
+	"container/heap"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -21,6 +23,34 @@ type RecordOptions struct {
 	ManifestPath   string
 	ObjectStoreURL string
 	BatchesPerFile int
+	ReorderWindow  int
+}
+
+type pendingBatch struct {
+	batch      *componentsv1.LedgerBatch
+	lineNumber int
+}
+
+type batchHeap []pendingBatch
+
+func (h batchHeap) Len() int { return len(h) }
+func (h batchHeap) Less(i, j int) bool {
+	if h[i].batch.LedgerSequence == h[j].batch.LedgerSequence {
+		return h[i].lineNumber < h[j].lineNumber
+	}
+	return h[i].batch.LedgerSequence < h[j].batch.LedgerSequence
+}
+func (h batchHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *batchHeap) Push(value any) {
+	*h = append(*h, value.(pendingBatch))
+}
+func (h *batchHeap) Pop() any {
+	old := *h
+	last := len(old) - 1
+	value := old[last]
+	old[last] = pendingBatch{}
+	*h = old[:last]
+	return value
 }
 
 type chunkWriter struct {
@@ -42,6 +72,9 @@ func RecordJSONL(input io.Reader, options RecordOptions) (*Manifest, error) {
 	}
 	if options.BatchesPerFile <= 0 {
 		return nil, fmt.Errorf("batches per file must be positive")
+	}
+	if options.ReorderWindow < 0 {
+		return nil, fmt.Errorf("reorder window must not be negative")
 	}
 	dir := filepath.Dir(options.ManifestPath)
 	if err := os.MkdirAll(dir, 0o755); err != nil && dir != "." {
@@ -65,44 +98,70 @@ func RecordJSONL(input io.Reader, options RecordOptions) (*Manifest, error) {
 			_ = chunk.file.Close()
 		}
 	}()
+	writeBatch := func(record pendingBatch) error {
+		batch := record.batch
+		if validateErr := validateRecordedBatch(manifest, batch); validateErr != nil {
+			return fmt.Errorf("JSONL line %d: %w", record.lineNumber, validateErr)
+		}
+		if chunk == nil || chunk.count == options.BatchesPerFile {
+			if chunk != nil {
+				if closeErr := finishChunk(manifest, chunk); closeErr != nil {
+					return closeErr
+				}
+			}
+			opened, openErr := openChunk(options.ManifestPath, len(manifest.Files), batch.LedgerSequence)
+			if openErr != nil {
+				return openErr
+			}
+			chunk = opened
+		}
+		written, writeErr := WriteDelimited(chunk.writer, batch)
+		chunk.bytes += written
+		if writeErr != nil {
+			_ = chunk.file.Close()
+			return fmt.Errorf("write fixture ledger %d: %w", batch.LedgerSequence, writeErr)
+		}
+		chunk.count++
+		chunk.end = batch.LedgerSequence
+		manifest.BatchCount++
+		manifest.LedgerEnd = batch.LedgerSequence
+		return nil
+	}
+
+	pending := &batchHeap{}
+	heap.Init(pending)
+	seen := make(map[uint32]int)
 	for lineNumber := 1; ; lineNumber++ {
 		line, err := reader.ReadBytes('\n')
 		if err != nil && !errors.Is(err, io.EOF) {
 			return nil, fmt.Errorf("read JSONL line %d: %w", lineNumber, err)
 		}
-		line = []byte(strings.TrimSpace(string(line)))
+		line = bytes.TrimSpace(line)
 		if len(line) > 0 {
-			var batch componentsv1.LedgerBatch
-			if unmarshalErr := protojson.Unmarshal(line, &batch); unmarshalErr != nil {
+			batch := new(componentsv1.LedgerBatch)
+			if unmarshalErr := protojson.Unmarshal(line, batch); unmarshalErr != nil {
 				return nil, fmt.Errorf("decode JSONL line %d: %w", lineNumber, unmarshalErr)
 			}
-			if validateErr := validateRecordedBatch(manifest, &batch); validateErr != nil {
-				return nil, fmt.Errorf("JSONL line %d: %w", lineNumber, validateErr)
+			if previousLine, exists := seen[batch.LedgerSequence]; exists {
+				return nil, fmt.Errorf("JSONL line %d: duplicate ledger_sequence %d (first seen on line %d)", lineNumber, batch.LedgerSequence, previousLine)
 			}
-			if chunk == nil || chunk.count == options.BatchesPerFile {
-				if chunk != nil {
-					if closeErr := finishChunk(manifest, chunk); closeErr != nil {
-						return nil, closeErr
-					}
-				}
-				chunk, err = openChunk(options.ManifestPath, len(manifest.Files), batch.LedgerSequence)
-				if err != nil {
-					return nil, err
+			seen[batch.LedgerSequence] = lineNumber
+			heap.Push(pending, pendingBatch{batch: batch, lineNumber: lineNumber})
+			if pending.Len() > options.ReorderWindow {
+				record := heap.Pop(pending).(pendingBatch)
+				if writeErr := writeBatch(record); writeErr != nil {
+					return nil, writeErr
 				}
 			}
-			written, writeErr := WriteDelimited(chunk.writer, &batch)
-			chunk.bytes += written
-			if writeErr != nil {
-				_ = chunk.file.Close()
-				return nil, fmt.Errorf("write fixture ledger %d: %w", batch.LedgerSequence, writeErr)
-			}
-			chunk.count++
-			chunk.end = batch.LedgerSequence
-			manifest.BatchCount++
-			manifest.LedgerEnd = batch.LedgerSequence
 		}
 		if errors.Is(err, io.EOF) {
 			break
+		}
+	}
+	for pending.Len() > 0 {
+		record := heap.Pop(pending).(pendingBatch)
+		if err := writeBatch(record); err != nil {
+			return nil, err
 		}
 	}
 	if chunk != nil {

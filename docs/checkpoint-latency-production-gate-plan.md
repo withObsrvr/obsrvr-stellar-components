@@ -674,7 +674,9 @@ Work has started on the remaining cadence gate:
 
 - `ledger-fixture-recorder` converts the existing protobuf-JSONL sink output
   into bounded, length-delimited protobuf chunks plus a strict manifest with
-  per-file SHA-256 and byte counts.
+  per-file SHA-256 and byte counts. Its bounded reorder window absorbs the
+  sink SDK's concurrent delivery without allowing duplicates or gaps into the
+  corpus.
 - `ingest-replay` validates the complete local corpus before dialing, supports
   live/future/catch-up/checkpoint/maintenance profiles, records per-ledger
   send-to-ack and schedule-lag data, and gates scheduled arrival-to-ack latency.

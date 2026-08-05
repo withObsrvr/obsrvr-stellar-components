@@ -25,6 +25,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 	manifestPath := flags.String("manifest", "", "output manifest path (required)")
 	objectStoreURL := flags.String("object-url", "", "optional URL for the externally stored complete fixture corpus")
 	batchesPerFile := flags.Int("batches-per-file", 100, "number of LedgerBatch messages per protobuf chunk")
+	reorderWindow := flags.Int("reorder-window", 16, "maximum bounded input reordering to sort before recording; 0 requires strict input order")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -50,6 +51,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 		ManifestPath:   *manifestPath,
 		ObjectStoreURL: *objectStoreURL,
 		BatchesPerFile: *batchesPerFile,
+		ReorderWindow:  *reorderWindow,
 	})
 	if err != nil {
 		return err

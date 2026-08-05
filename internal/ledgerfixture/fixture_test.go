@@ -61,6 +61,32 @@ func TestRecordAndLoadJSONLFixture(t *testing.T) {
 	}
 }
 
+func TestExternalFixtureCorpus(t *testing.T) {
+	manifestPath := os.Getenv("LEDGER_FIXTURE_MANIFEST")
+	if manifestPath == "" {
+		t.Skip("set LEDGER_FIXTURE_MANIFEST to validate an external fixture corpus")
+	}
+	manifest, err := LoadManifest(manifestPath)
+	if err != nil {
+		t.Fatalf("load and hash fixture manifest: %v", err)
+	}
+	reader := NewReader(manifestPath, manifest)
+	defer reader.Close()
+	for index := 0; index < manifest.BatchCount; index++ {
+		expected := manifest.LedgerStart + uint32(index)
+		batch, err := reader.Next()
+		if err != nil {
+			t.Fatalf("read ledger %d: %v", expected, err)
+		}
+		if batch.LedgerSequence != expected {
+			t.Fatalf("ledger = %d, want %d", batch.LedgerSequence, expected)
+		}
+	}
+	if _, err := reader.Next(); !errors.Is(err, io.EOF) {
+		t.Fatalf("final read error = %v, want EOF", err)
+	}
+}
+
 func TestLoadManifestRejectsCorruptFixture(t *testing.T) {
 	dir := t.TempDir()
 	manifestPath := filepath.Join(dir, "fixture.manifest.json")
@@ -143,6 +169,78 @@ func TestRecordJSONLRejectsNoncontiguousLedgers(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "want contiguous ledger 11") {
 		t.Fatalf("RecordJSONL error = %v, want contiguous ledger error", err)
+	}
+}
+
+func TestRecordJSONLReordersWithinWindow(t *testing.T) {
+	var input strings.Builder
+	for _, ledger := range []uint32{100, 102, 101, 103} {
+		data, err := protojson.Marshal(testBatch(ledger))
+		if err != nil {
+			t.Fatal(err)
+		}
+		input.Write(data)
+		input.WriteByte('\n')
+	}
+	manifestPath := filepath.Join(t.TempDir(), "fixture.manifest.json")
+	recorded, err := RecordJSONL(strings.NewReader(input.String()), RecordOptions{
+		ManifestPath:   manifestPath,
+		BatchesPerFile: 2,
+		ReorderWindow:  2,
+	})
+	if err != nil {
+		t.Fatalf("RecordJSONL: %v", err)
+	}
+	reader := NewReader(manifestPath, recorded)
+	defer reader.Close()
+	for ledger := uint32(100); ledger <= 103; ledger++ {
+		batch, err := reader.Next()
+		if err != nil {
+			t.Fatalf("read ledger %d: %v", ledger, err)
+		}
+		if batch.LedgerSequence != ledger {
+			t.Fatalf("ledger = %d, want %d", batch.LedgerSequence, ledger)
+		}
+	}
+}
+
+func TestRecordJSONLRejectsReorderingBeyondWindow(t *testing.T) {
+	var input strings.Builder
+	for _, ledger := range []uint32{100, 102, 103, 101} {
+		data, err := protojson.Marshal(testBatch(ledger))
+		if err != nil {
+			t.Fatal(err)
+		}
+		input.Write(data)
+		input.WriteByte('\n')
+	}
+	_, err := RecordJSONL(strings.NewReader(input.String()), RecordOptions{
+		ManifestPath:   filepath.Join(t.TempDir(), "fixture.manifest.json"),
+		BatchesPerFile: 10,
+		ReorderWindow:  1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "want contiguous ledger 101") {
+		t.Fatalf("RecordJSONL error = %v, want bounded reorder error", err)
+	}
+}
+
+func TestRecordJSONLRejectsDuplicateLedgers(t *testing.T) {
+	var input strings.Builder
+	for _, ledger := range []uint32{100, 101, 101} {
+		data, err := protojson.Marshal(testBatch(ledger))
+		if err != nil {
+			t.Fatal(err)
+		}
+		input.Write(data)
+		input.WriteByte('\n')
+	}
+	_, err := RecordJSONL(strings.NewReader(input.String()), RecordOptions{
+		ManifestPath:   filepath.Join(t.TempDir(), "fixture.manifest.json"),
+		BatchesPerFile: 10,
+		ReorderWindow:  2,
+	})
+	if err == nil || !strings.Contains(err.Error(), "duplicate ledger_sequence 101") {
+		t.Fatalf("RecordJSONL error = %v, want duplicate ledger error", err)
 	}
 }
 
