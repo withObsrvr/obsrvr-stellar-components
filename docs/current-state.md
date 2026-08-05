@@ -124,8 +124,11 @@ The topology is not production-approved until these are complete:
    dropped, and all eight scoped rules are healthy. The measured controller
    candidates are 64MiB soft/512MiB hard. A disabled-by-default scheduler and
    real-ledger trigger gate now pass one soft-idle and one hard-limit checkpoint
-   with no ingest errors/retries. The cadence-shaped SLO gate remains open and
-   the controller remains disabled; Grafana and mainnet promotion are deferred.
+   with no ingest errors/retries. The deterministic fixture recorder, paced
+   ingest replay profiles, and checkpoint/maintenance/restart gate are now
+   implemented, but the 1,000-ledger corpus and retained one-hour evidence
+   remain open. The controller therefore remains disabled; Grafana and mainnet
+   promotion are deferred.
 5. Dependencies now use `stellar-extract v0.1.4`, `flowctl-sdk v0.1.3`, and
    `go-stellar-sdk v0.7.1`. The SDK release is dependency-only: its exported
    runtime remains unchanged from `v0.1.2`, so delivery backpressure,

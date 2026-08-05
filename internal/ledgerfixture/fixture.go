@@ -1,0 +1,330 @@
+package ledgerfixture
+
+import (
+	"bufio"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+
+	componentsv1 "github.com/withObsrvr/obsrvr-stellar-components/gen/go/stellar/components/v1"
+	"google.golang.org/protobuf/proto"
+)
+
+const (
+	FormatVersion  = "stellar-ledger-batch-delimited-v1"
+	MessageType    = "stellar.components.v1.LedgerBatch"
+	MaxMessageSize = 64 * 1024 * 1024
+)
+
+// Manifest describes an ordered set of length-delimited LedgerBatch protobufs.
+// File paths are relative to the manifest so the corpus can be moved intact.
+type Manifest struct {
+	FormatVersion     string         `json:"format_version"`
+	MessageType       string         `json:"message_type"`
+	NetworkPassphrase string         `json:"network_passphrase"`
+	LedgerStart       uint32         `json:"ledger_start"`
+	LedgerEnd         uint32         `json:"ledger_end"`
+	BatchCount        int            `json:"batch_count"`
+	SchemaVersion     string         `json:"schema_version"`
+	ExtractionVersion string         `json:"extraction_version"`
+	ObjectStoreURL    string         `json:"object_store_url,omitempty"`
+	Files             []ManifestFile `json:"files"`
+}
+
+type ManifestFile struct {
+	Path        string `json:"path"`
+	SHA256      string `json:"sha256"`
+	Bytes       int64  `json:"bytes"`
+	BatchCount  int    `json:"batch_count"`
+	LedgerStart uint32 `json:"ledger_start"`
+	LedgerEnd   uint32 `json:"ledger_end"`
+}
+
+// LoadManifest parses and validates a fixture manifest and verifies every
+// referenced file hash before any batch is sent to an ingest server.
+func LoadManifest(path string) (*Manifest, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read fixture manifest: %w", err)
+	}
+	var manifest Manifest
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&manifest); err != nil {
+		return nil, fmt.Errorf("decode fixture manifest: %w", err)
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
+		return nil, fmt.Errorf("decode fixture manifest: %w", err)
+	}
+	if err := manifest.Validate(); err != nil {
+		return nil, err
+	}
+	base := filepath.Dir(path)
+	for _, file := range manifest.Files {
+		fullPath, err := resolveFile(base, file.Path)
+		if err != nil {
+			return nil, err
+		}
+		info, err := os.Lstat(fullPath)
+		if err != nil {
+			return nil, fmt.Errorf("stat fixture file %q: %w", file.Path, err)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("fixture file %q is not a regular file", file.Path)
+		}
+		if info.Size() != file.Bytes {
+			return nil, fmt.Errorf("fixture file %q size is %d, manifest requires %d", file.Path, info.Size(), file.Bytes)
+		}
+		actual, err := hashFile(fullPath)
+		if err != nil {
+			return nil, fmt.Errorf("hash fixture file %q: %w", file.Path, err)
+		}
+		if !strings.EqualFold(actual, file.SHA256) {
+			return nil, fmt.Errorf("fixture file %q sha256 is %s, manifest requires %s", file.Path, actual, file.SHA256)
+		}
+	}
+	return &manifest, nil
+}
+
+func ensureJSONEOF(decoder *json.Decoder) error {
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return fmt.Errorf("unexpected trailing JSON value")
+		}
+		return err
+	}
+	return nil
+}
+
+func (m *Manifest) Validate() error {
+	if m.FormatVersion != FormatVersion {
+		return fmt.Errorf("fixture format_version is %q, want %q", m.FormatVersion, FormatVersion)
+	}
+	if m.MessageType != MessageType {
+		return fmt.Errorf("fixture message_type is %q, want %q", m.MessageType, MessageType)
+	}
+	if m.NetworkPassphrase == "" {
+		return fmt.Errorf("fixture network_passphrase is required")
+	}
+	if m.SchemaVersion == "" {
+		return fmt.Errorf("fixture schema_version is required")
+	}
+	if m.ExtractionVersion == "" {
+		return fmt.Errorf("fixture extraction_version is required")
+	}
+	if m.BatchCount <= 0 {
+		return fmt.Errorf("fixture batch_count must be positive")
+	}
+	if len(m.Files) == 0 {
+		return fmt.Errorf("fixture files must not be empty")
+	}
+	if m.LedgerEnd < m.LedgerStart || uint64(m.LedgerEnd)-uint64(m.LedgerStart)+1 != uint64(m.BatchCount) {
+		return fmt.Errorf("fixture ledger range %d-%d does not contain batch_count %d", m.LedgerStart, m.LedgerEnd, m.BatchCount)
+	}
+
+	expectedLedger := m.LedgerStart
+	totalBatches := 0
+	seenPaths := make(map[string]struct{}, len(m.Files))
+	for i, file := range m.Files {
+		if _, err := resolveFile(".", file.Path); err != nil {
+			return err
+		}
+		cleanPath := filepath.Clean(file.Path)
+		if _, ok := seenPaths[cleanPath]; ok {
+			return fmt.Errorf("fixture file path %q is duplicated", file.Path)
+		}
+		seenPaths[cleanPath] = struct{}{}
+		if _, err := hex.DecodeString(file.SHA256); err != nil || len(file.SHA256) != sha256.Size*2 {
+			return fmt.Errorf("fixture file %q has invalid sha256", file.Path)
+		}
+		if file.Bytes <= 0 {
+			return fmt.Errorf("fixture file %q bytes must be positive", file.Path)
+		}
+		if file.BatchCount <= 0 {
+			return fmt.Errorf("fixture file %q batch_count must be positive", file.Path)
+		}
+		if file.LedgerStart != expectedLedger {
+			return fmt.Errorf("fixture file %d starts at ledger %d, want %d", i, file.LedgerStart, expectedLedger)
+		}
+		if file.LedgerEnd < file.LedgerStart || uint64(file.LedgerEnd)-uint64(file.LedgerStart)+1 != uint64(file.BatchCount) {
+			return fmt.Errorf("fixture file %q range %d-%d does not contain batch_count %d", file.Path, file.LedgerStart, file.LedgerEnd, file.BatchCount)
+		}
+		totalBatches += file.BatchCount
+		expectedLedger = file.LedgerEnd + 1
+	}
+	if totalBatches != m.BatchCount {
+		return fmt.Errorf("fixture files contain %d batches, manifest requires %d", totalBatches, m.BatchCount)
+	}
+	if expectedLedger-1 != m.LedgerEnd {
+		return fmt.Errorf("fixture files end at ledger %d, manifest requires %d", expectedLedger-1, m.LedgerEnd)
+	}
+	return nil
+}
+
+func resolveFile(base, relative string) (string, error) {
+	if relative == "" || filepath.IsAbs(relative) {
+		return "", fmt.Errorf("fixture file path %q must be relative", relative)
+	}
+	clean := filepath.Clean(relative)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("fixture file path %q escapes the manifest directory", relative)
+	}
+	return filepath.Join(base, clean), nil
+}
+
+func hashFile(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+// Reader streams batches without retaining the fixture corpus in memory.
+type Reader struct {
+	manifest *Manifest
+	base     string
+	file     *os.File
+	buffer   *bufio.Reader
+	fileIdx  int
+	fileSeen int
+	total    int
+}
+
+func NewReader(manifestPath string, manifest *Manifest) *Reader {
+	return &Reader{manifest: manifest, base: filepath.Dir(manifestPath)}
+}
+
+func (r *Reader) Next() (*componentsv1.LedgerBatch, error) {
+	for {
+		if r.file == nil {
+			if r.fileIdx >= len(r.manifest.Files) {
+				if r.total != r.manifest.BatchCount {
+					return nil, fmt.Errorf("fixture ended after %d batches, want %d", r.total, r.manifest.BatchCount)
+				}
+				return nil, io.EOF
+			}
+			path, err := resolveFile(r.base, r.manifest.Files[r.fileIdx].Path)
+			if err != nil {
+				return nil, err
+			}
+			r.file, err = os.Open(path)
+			if err != nil {
+				return nil, fmt.Errorf("open fixture file %q: %w", r.manifest.Files[r.fileIdx].Path, err)
+			}
+			r.buffer = bufio.NewReader(r.file)
+			r.fileSeen = 0
+		}
+
+		batch, err := readDelimited(r.buffer)
+		if errors.Is(err, io.EOF) {
+			fileSpec := r.manifest.Files[r.fileIdx]
+			if r.fileSeen != fileSpec.BatchCount {
+				return nil, fmt.Errorf("fixture file %q contains %d batches, want %d", fileSpec.Path, r.fileSeen, fileSpec.BatchCount)
+			}
+			if err := r.file.Close(); err != nil {
+				return nil, fmt.Errorf("close fixture file %q: %w", fileSpec.Path, err)
+			}
+			r.file = nil
+			r.buffer = nil
+			r.fileIdx++
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read fixture file %q batch %d: %w", r.manifest.Files[r.fileIdx].Path, r.fileSeen, err)
+		}
+		expected := r.manifest.LedgerStart + uint32(r.total)
+		if batch.LedgerSequence != expected {
+			return nil, fmt.Errorf("fixture batch %d has ledger %d, want %d", r.total, batch.LedgerSequence, expected)
+		}
+		if batch.NetworkPassphrase != r.manifest.NetworkPassphrase {
+			return nil, fmt.Errorf("fixture ledger %d network passphrase does not match manifest", batch.LedgerSequence)
+		}
+		if batch.SchemaVersion != r.manifest.SchemaVersion {
+			return nil, fmt.Errorf("fixture ledger %d schema_version is %q, want %q", batch.LedgerSequence, batch.SchemaVersion, r.manifest.SchemaVersion)
+		}
+		if batch.ExtractionVersion != r.manifest.ExtractionVersion {
+			return nil, fmt.Errorf("fixture ledger %d extraction_version is %q, want %q", batch.LedgerSequence, batch.ExtractionVersion, r.manifest.ExtractionVersion)
+		}
+		r.fileSeen++
+		r.total++
+		return batch, nil
+	}
+}
+
+func (r *Reader) Close() error {
+	if r.file == nil {
+		return nil
+	}
+	err := r.file.Close()
+	r.file = nil
+	r.buffer = nil
+	return err
+}
+
+func readDelimited(reader *bufio.Reader) (*componentsv1.LedgerBatch, error) {
+	size, err := binary.ReadUvarint(reader)
+	if err != nil {
+		return nil, err
+	}
+	if size == 0 {
+		return nil, fmt.Errorf("zero-length protobuf message")
+	}
+	if size > MaxMessageSize {
+		return nil, fmt.Errorf("protobuf message is %d bytes, maximum is %d", size, MaxMessageSize)
+	}
+	data := make([]byte, int(size))
+	if _, err := io.ReadFull(reader, data); err != nil {
+		return nil, fmt.Errorf("read %d-byte protobuf message: %w", size, err)
+	}
+	var batch componentsv1.LedgerBatch
+	if err := proto.Unmarshal(data, &batch); err != nil {
+		return nil, fmt.Errorf("unmarshal LedgerBatch: %w", err)
+	}
+	return &batch, nil
+}
+
+func WriteDelimited(writer io.Writer, batch *componentsv1.LedgerBatch) (int64, error) {
+	data, err := proto.Marshal(batch)
+	if err != nil {
+		return 0, fmt.Errorf("marshal LedgerBatch: %w", err)
+	}
+	if len(data) == 0 {
+		return 0, fmt.Errorf("refusing to write empty LedgerBatch")
+	}
+	if len(data) > MaxMessageSize {
+		return 0, fmt.Errorf("protobuf message is %d bytes, maximum is %d", len(data), MaxMessageSize)
+	}
+	var prefix [binary.MaxVarintLen64]byte
+	prefixLength := binary.PutUvarint(prefix[:], uint64(len(data)))
+	n, err := writer.Write(prefix[:prefixLength])
+	written := int64(n)
+	if err != nil {
+		return written, err
+	}
+	if n != prefixLength {
+		return written, io.ErrShortWrite
+	}
+	n, err = writer.Write(data)
+	written += int64(n)
+	if err != nil {
+		return written, err
+	}
+	if n != len(data) {
+		return written, io.ErrShortWrite
+	}
+	return written, nil
+}

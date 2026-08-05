@@ -230,6 +230,34 @@ Keep `CHECKPOINT_CONTROLLER_ENABLED=false` in deployments until the
 cadence-shaped gate observes multiple checkpoints. The 1GB DuckDB threshold
 remains the emergency fallback.
 
+## Cadence-Shaped Ingest Release Gate
+
+Build a real mainnet fixture manifest and local chunks as documented in
+`testdata/ledger-batches/README.md`, then run:
+
+```bash
+CADENCE_GATE_FIXTURES=testdata/ledger-batches/pubnet-62080000-62080999.manifest.json \
+make test-cadence-gate
+```
+
+The default release profile sends 720 ledgers at five-second cadence with
+deterministic +/-250ms jitter and a 400ms scheduled-arrival-to-ack ceiling. It
+runs DuckLake flush/merge/expiry maintenance concurrently, requires at least
+three successful idle checkpoints, gracefully restarts the server against the
+same catalog, resumes with the next fixture ledger, and requires contiguous
+watermarks plus one ledger-batch row per commit. By default it also ingests the
+same range into a controller-free baseline and compares deterministic logical
+fingerprints.
+
+Evidence is retained under `/tmp/obsrvr-ducklake-cadence-gate`. The JSON summary
+separates RPC send-to-ack, schedule lag, and scheduled arrival-to-ack so a slow
+prior ledger cannot disappear from the live SLO. A 30-ledger shortened-cadence
+run is useful for iteration but is not release evidence.
+
+Until the real-cadence run passes across at least three checkpoints, keep the
+controller disabled and retain the 1GB DuckDB threshold as the measured interim
+fallback.
+
 ## Historical evidence (superseded SQL-literal transport)
 
 Local evidence captured on 2026-07-02 (pre-rewrite; script sizes reflect the

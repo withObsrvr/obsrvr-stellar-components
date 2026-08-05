@@ -668,6 +668,32 @@ bin/ingest-replay \
 - checkpoint-inclusive release gate
 - final SLO decision
 
+### PR 4 implementation checkpoint — 2026-08-04
+
+Work has started on the remaining cadence gate:
+
+- `ledger-fixture-recorder` converts the existing protobuf-JSONL sink output
+  into bounded, length-delimited protobuf chunks plus a strict manifest with
+  per-file SHA-256 and byte counts.
+- `ingest-replay` validates the complete local corpus before dialing, supports
+  live/future/catch-up/checkpoint/maintenance profiles, records per-ledger
+  send-to-ack and schedule-lag data, and gates scheduled arrival-to-ack latency.
+- The catch-up burst is explicitly SLO-exempt while the following live cadence
+  is gated, preserving the separate backfill/live contracts.
+- The checkpoint profile observes a pre-run metric baseline and requires new
+  successful idle checkpoints; a server restart cannot satisfy the count with
+  stale metric state.
+- `scripts/ducklake-cadence-gate.sh` runs maintenance during cadence, requires
+  checkpoints, restarts and resumes from the next fixture, verifies watermark
+  and ledger-batch consistency, and optionally compares a deterministic logical
+  fingerprint with a no-controller baseline.
+- Unit coverage includes a deterministic 30-ledger smoke tier and the actual
+  bidirectional gRPC authentication/ack protocol.
+
+The 1,000-ledger mainnet corpus and retained one-hour gate evidence remain
+external release artifacts. No hard 400ms claim should be made until that gate
+passes with at least three observed idle checkpoints.
+
 ## Rollout plan
 
 1. Deploy telemetry with checkpoint scheduling disabled.
