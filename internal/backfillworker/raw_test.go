@@ -69,6 +69,62 @@ func TestWriteRawLedgerStreamIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestArrowRawPipelineMatchesSequentialArtifacts(t *testing.T) {
+	ledgers := [][]byte{
+		emptyRawLedgerXDR(t, 12345, 1_700_000_000),
+		emptyRawLedgerXDR(t, 12346, 1_700_000_005),
+		emptyRawLedgerXDR(t, 12347, 1_700_000_010),
+		emptyRawLedgerXDR(t, 12348, 1_700_000_015),
+	}
+	pinned := time.Unix(1_800_000_000, 0).UTC()
+	run := func(output string, extractWorkers, maxInFlight int) StreamResult {
+		index := 0
+		borrowed := make([]byte, len(ledgers[0]))
+		result, err := WriteRawLedgerStream(context.Background(), LedgerBatchConfig{
+			Parquet: ParquetConfig{
+				OutputDir: output, LedgerStart: 12345, LedgerEnd: 12348,
+				Compression: "snappy", FileTargetBytes: 1 << 20,
+				FileMaxBytes: 2 << 20, RowGroupRows: 2048,
+			},
+			WriterMode: WriterArrowParquet, DecodeWorkers: 1,
+			RawExtractWorkers: extractWorkers, MaxInFlightLedgers: maxInFlight,
+			WatermarkWrittenAt: pinned, MaxEncodedBytes: 1 << 20, MaxBronzeRows: 100,
+		}, RawLedgerOptions{
+			NetworkPassphrase: network.PublicNetworkPassphrase,
+			MaterializedAt:    pinned,
+		}, func() ([]byte, error) {
+			if index == len(ledgers) {
+				return nil, io.EOF
+			}
+			if len(ledgers[index]) != len(borrowed) {
+				t.Fatalf("test ledger %d length = %d, want %d", index, len(ledgers[index]), len(borrowed))
+			}
+			copy(borrowed, ledgers[index])
+			index++
+			return borrowed, nil
+		})
+		if err != nil {
+			t.Fatalf("WriteRawLedgerStream(%d workers): %v", extractWorkers, err)
+		}
+		return result
+	}
+
+	sequential := run(t.TempDir(), 1, 0)
+	pipelined := run(t.TempDir(), 3, 4)
+	if sequential.Descriptor != pipelined.Descriptor {
+		t.Fatalf("descriptors differ:\nsequential=%+v\npipelined=%+v", sequential.Descriptor, pipelined.Descriptor)
+	}
+	if !reflect.DeepEqual(fileLogicalIdentities(sequential.Files), fileLogicalIdentities(pipelined.Files)) {
+		t.Fatalf("pipeline artifacts differ:\nsequential=%v\npipelined=%v", fileLogicalIdentities(sequential.Files), fileLogicalIdentities(pipelined.Files))
+	}
+	if pipelined.PeakInFlightLedgers < 2 || pipelined.PeakInFlightLedgers > 4 {
+		t.Fatalf("pipeline peak in-flight = %d, want 2-4", pipelined.PeakInFlightLedgers)
+	}
+	if pipelined.RawCopiedBytes != pipelined.Descriptor.EncodedBytes {
+		t.Fatalf("pipeline copied bytes = %d, want source bytes %d", pipelined.RawCopiedBytes, pipelined.Descriptor.EncodedBytes)
+	}
+}
+
 func fileLogicalIdentities(files []backfillmanifest.File) map[string]string {
 	identities := make(map[string]string, len(files))
 	for _, file := range files {

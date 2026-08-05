@@ -22,6 +22,8 @@ type LedgerBatchConfig struct {
 	Parquet            ParquetConfig
 	WriterMode         string
 	DecodeWorkers      int
+	RawExtractWorkers  int
+	MaxInFlightLedgers int
 	WatermarkWrittenAt time.Time
 	MaxEncodedBytes    uint64
 	MaxBronzeRows      uint64

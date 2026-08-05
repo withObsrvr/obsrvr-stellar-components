@@ -92,12 +92,28 @@ func TestParseConfigAcceptsArrowThroughputProfile(t *testing.T) {
 		"--end-ledger", "101",
 		"--writer", "ARROW-PARQUET",
 		"--compression", "SNAPPY",
+		"--extract-workers", "4",
+		"--max-inflight-ledgers", "8",
 	}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("parse Arrow throughput profile: %v", err)
 	}
-	if cfg.Writer != "arrow-parquet" || cfg.Compression != "snappy" {
-		t.Fatalf("profile = writer %q compression %q", cfg.Writer, cfg.Compression)
+	if cfg.Writer != "arrow-parquet" || cfg.Compression != "snappy" || cfg.ExtractWorkers != 4 || cfg.MaxInFlight != 8 {
+		t.Fatalf("profile = writer %q compression %q extract workers %d max in-flight %d", cfg.Writer, cfg.Compression, cfg.ExtractWorkers, cfg.MaxInFlight)
+	}
+}
+
+func TestParseConfigRejectsPipelineBoundBelowWorkers(t *testing.T) {
+	_, err := parseConfig([]string{
+		"--source", "ledger-stream",
+		"--output", t.TempDir(),
+		"--start-ledger", "100",
+		"--end-ledger", "101",
+		"--extract-workers", "4",
+		"--max-inflight-ledgers", "3",
+	}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("parseConfig succeeded with fewer in-flight ledgers than extract workers")
 	}
 }
 

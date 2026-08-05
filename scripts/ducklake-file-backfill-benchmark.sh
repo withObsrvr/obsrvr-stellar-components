@@ -11,6 +11,8 @@ file_target_bytes="${BACKFILL_FILE_TARGET_BYTES:-268435456}"
 file_max_bytes="${BACKFILL_FILE_MAX_BYTES:-536870912}"
 row_group_rows="${BACKFILL_ROW_GROUP_ROWS:-16384}"
 decode_workers="${BACKFILL_DECODE_WORKERS:-8}"
+extract_workers="${BACKFILL_EXTRACT_WORKERS:-1}"
+max_inflight_ledgers="${BACKFILL_MAX_INFLIGHT_LEDGERS:-}"
 writer_mode="${BACKFILL_WRITER:-duckdb-appender}"
 compression="${BACKFILL_COMPRESSION:-zstd}"
 max_encoded_bytes="${BACKFILL_MAX_ENCODED_BYTES:-4294967296}"
@@ -24,6 +26,17 @@ if [[ ! -x "$worker_bin" ]]; then
 fi
 if [[ ! "$concurrency" =~ ^[1-9][0-9]*$ ]]; then
   echo "BACKFILL_CONCURRENCY must be a positive integer" >&2
+  exit 2
+fi
+if [[ ! "$extract_workers" =~ ^[1-9][0-9]*$ ]]; then
+  echo "BACKFILL_EXTRACT_WORKERS must be a positive integer" >&2
+  exit 2
+fi
+if [[ -z "$max_inflight_ledgers" ]]; then
+  max_inflight_ledgers=$((extract_workers * 2))
+fi
+if [[ ! "$max_inflight_ledgers" =~ ^[1-9][0-9]*$ || "$max_inflight_ledgers" -lt "$extract_workers" ]]; then
+  echo "BACKFILL_EXTRACT_WORKERS must be positive and BACKFILL_MAX_INFLIGHT_LEDGERS must be at least that value" >&2
   exit 2
 fi
 
@@ -106,6 +119,8 @@ for ((worker_index = 0; worker_index < concurrency; worker_index++)); do
     --job-id "benchmark-${ledger_start}-${ledger_end}-c${concurrency}"
     --worker-id "$worker_id"
     --decode-workers "$decode_workers"
+    --extract-workers "$extract_workers"
+    --max-inflight-ledgers "$max_inflight_ledgers"
     --writer "$writer_mode"
     --compression "$compression"
     --max-encoded-bytes "$max_encoded_bytes"
@@ -168,6 +183,8 @@ jq -s \
   --argjson workers "$concurrency" \
   --argjson wall_seconds "$wall_seconds" \
   --arg source "$backfill_source" \
+  --argjson extract_workers "$extract_workers" \
+  --argjson max_inflight_ledgers "$max_inflight_ledgers" \
   --arg writer "$writer_mode" \
   --arg compression "$compression" \
   --arg fixture_manifest "$fixture_manifest" \
@@ -175,6 +192,8 @@ jq -s \
     {
       workers: $workers,
       source: $source,
+      extract_workers: $extract_workers,
+      max_inflight_ledgers: $max_inflight_ledgers,
       writer: $writer,
       compression: $compression,
       fixture_manifest: $fixture_manifest,
@@ -201,6 +220,10 @@ jq -s \
       critical_worker_raw_pin_seconds: (map(.raw_pin_seconds) | max),
       critical_worker_raw_envelope_seconds: (map(.raw_envelope_seconds) | max),
       critical_worker_raw_project_seconds: (map(.raw_project_seconds) | max),
+      critical_worker_raw_copy_seconds: (map(.raw_copy_seconds) | max),
+      critical_worker_pipeline_wait_seconds: (map(.pipeline_wait_seconds) | max),
+      peak_inflight_ledgers: (map(.peak_inflight_ledgers) | max),
+      peak_reorder_buffered_ledgers: (map(.peak_reorder_buffered_ledgers) | max),
       critical_worker_append_seconds: (map(.append_seconds) | max),
       workers_detail: .
     }

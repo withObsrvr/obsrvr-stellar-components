@@ -183,6 +183,23 @@ the compact default. Snappy is the backfill throughput profile after the
 bytes than uncompressed output. Every job pins the codec in its manifest and
 must not mix codecs under one retry identity.
 
+Decision update, 2026-08-05: overlap raw source reads and ledger extraction
+through a bounded, ordered pipeline. The SDK source lends its XDR buffer only
+until the next read, so admission owns a copy before advancing the source.
+Workers may finish out of order, but a sequence-indexed reorder buffer exposes
+only the next source ordinal to hashing and Arrow. One semaphore covers queued
+copies, active extraction, completed results, and the ledger currently being
+written. Worker count and admission depth are execution evidence rather than
+artifact identity: sequential and concurrent attempts must produce identical
+files.
+
+The measured local knee is four extraction workers, two projection workers per
+ledger, and eight ledgers in flight. Eight extraction workers increased RSS
+and reduced throughput. A 1,000-ledger run moved the critical path to the
+single Arrow writer, so the next implementation must measure per-table work
+and add bounded parallel row-group encoding rather than increasing extraction
+concurrency again.
+
 Partitioned output must avoid small-file explosion. DuckDB's own guidance is
 to keep partitions on the order of at least 100 MB; the exact file target is a
 measured tuning parameter, not an invariant. See the official
