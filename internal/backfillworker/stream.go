@@ -27,8 +27,8 @@ import (
 // the worker does not retain a batch after it has been decoded and appended.
 type LedgerBatchSource func() (*componentsv1.LedgerBatch, error)
 
-// RawLedgerSource yields borrowed canonical LedgerCloseMeta XDR. The worker
-// fully extracts and appends each result before requesting the next slice.
+// RawLedgerSource yields borrowed canonical LedgerCloseMeta XDR. A concurrent
+// consumer must copy each result before requesting the next slice.
 type RawLedgerSource func() ([]byte, error)
 
 type StreamResult struct {
@@ -49,6 +49,11 @@ type StreamResult struct {
 	RawPinDuration        time.Duration
 	RawEnvelopeDuration   time.Duration
 	RawProjectDuration    time.Duration
+	RawCopyDuration       time.Duration
+	RawPipelineWait       time.Duration
+	RawCopiedBytes        uint64
+	PeakInFlightLedgers   int
+	PeakReorderBuffered   int
 	AppendDuration        time.Duration
 }
 
@@ -342,6 +347,13 @@ func validateStreamingConfig(cfg LedgerBatchConfig, nextBatch LedgerBatchSource,
 	if cfg.DecodeWorkers <= 0 {
 		return fmt.Errorf("decode workers must be positive")
 	}
+	if cfg.RawExtractWorkers < 0 || cfg.MaxInFlightLedgers < 0 {
+		return fmt.Errorf("raw extract workers and max in-flight ledgers cannot be negative")
+	}
+	rawWorkers := effectiveRawExtractWorkers(cfg)
+	if nextRaw != nil && cfg.MaxInFlightLedgers > 0 && cfg.MaxInFlightLedgers < rawWorkers {
+		return fmt.Errorf("max in-flight ledgers %d must be at least raw extract workers %d", cfg.MaxInFlightLedgers, rawWorkers)
+	}
 	if cfg.WriterMode != "" && cfg.WriterMode != WriterDuckDBAppender && cfg.WriterMode != WriterArrowParquet {
 		return fmt.Errorf("unsupported backfill writer mode %q", cfg.WriterMode)
 	}
@@ -360,6 +372,20 @@ func validateStreamingConfig(cfg LedgerBatchConfig, nextBatch LedgerBatchSource,
 		return fmt.Errorf("invalid DuckDB memory limit %q", cfg.MemoryLimit)
 	}
 	return nil
+}
+
+func effectiveRawExtractWorkers(cfg LedgerBatchConfig) int {
+	if cfg.RawExtractWorkers <= 0 {
+		return 1
+	}
+	return cfg.RawExtractWorkers
+}
+
+func effectiveMaxInFlightLedgers(cfg LedgerBatchConfig) int {
+	if cfg.MaxInFlightLedgers > 0 {
+		return cfg.MaxInFlightLedgers
+	}
+	return effectiveRawExtractWorkers(cfg) * 2
 }
 
 func validateNextRawLedger(cfg LedgerBatchConfig, accumulator *rawLedgerAccumulator, ledger *RawLedger) error {

@@ -34,6 +34,19 @@ func writeColumnarLedgerStream(ctx context.Context, cfg LedgerBatchConfig, nextB
 	if err := ensureOutputDirectory(absOutputDir); err != nil {
 		return StreamResult{}, err
 	}
+	var rawPipeline *rawDecodePipeline
+	if nextRaw != nil && effectiveRawExtractWorkers(cfg) > 1 {
+		rawPipeline, err = newRawDecodePipeline(ctx, rawDecodePipelineConfig{
+			Workers: effectiveRawExtractWorkers(cfg), MaxInFlight: effectiveMaxInFlightLedgers(cfg),
+		}, rawOpts, nextRaw, DecodeRawLedger)
+		if err != nil {
+			return StreamResult{}, err
+		}
+		defer func() {
+			rawPipeline.Close()
+			applyRawPipelineMetrics(&result, rawPipeline.Metrics())
+		}()
+	}
 	columnar := newColumnarShardWriter(cfg.Parquet, absOutputDir)
 	complete := false
 	defer func() {
@@ -65,21 +78,19 @@ func writeColumnarLedgerStream(ctx context.Context, cfg LedgerBatchConfig, nextB
 		if nextBatch != nil {
 			batch, err = nextBatch()
 			result.SourceDuration += time.Since(sourceStarted)
+		} else if rawPipeline != nil {
+			rawLedger, err = rawPipeline.Next()
+			if err == nil {
+				accumulateRawLedgerDurations(&result, rawLedger)
+			}
 		} else {
 			var raw []byte
 			raw, err = nextRaw()
 			result.SourceDuration += time.Since(sourceStarted)
 			if err == nil {
-				extractionStarted := time.Now()
 				rawLedger, err = DecodeRawLedger(raw, rawOpts)
-				result.ExtractionDuration += time.Since(extractionStarted)
 				if err == nil {
-					result.RawViewDuration += rawLedger.ViewDuration
-					result.RawDecodeDuration += rawLedger.DecodeDuration
-					result.RawExtractDuration += rawLedger.ExtractDuration
-					result.RawPinDuration += rawLedger.PinDuration
-					result.RawEnvelopeDuration += rawLedger.EnvelopeDuration
-					result.RawProjectDuration += rawLedger.ProjectDuration
+					accumulateRawLedgerDurations(&result, rawLedger)
 				}
 			}
 		}
@@ -149,10 +160,12 @@ func writeColumnarLedgerStream(ctx context.Context, cfg LedgerBatchConfig, nextB
 		}
 		if rawLedger != nil && rawLedger.ExtractedData != nil {
 			contractEvents := rawLedger.ExtractedData.ContractEvents
-			if err := columnar.appendContractEvents(sequence, contractEvents); err != nil {
-				return StreamResult{}, err
+			if len(contractEvents) > 0 {
+				if err := columnar.appendContractEvents(sequence, contractEvents); err != nil {
+					return StreamResult{}, err
+				}
+				tableCounts["bronze."+bronzeColumnar.ContractEventsTable] += uint64(len(contractEvents))
 			}
-			tableCounts["bronze."+bronzeColumnar.ContractEventsTable] += uint64(len(contractEvents))
 		}
 		var envelope ledgerEnvelopeValues
 		if batch != nil {
@@ -208,6 +221,31 @@ func writeColumnarLedgerStream(ctx context.Context, cfg LedgerBatchConfig, nextB
 	result.Files = files
 	complete = true
 	return result, nil
+}
+
+func accumulateRawLedgerDurations(result *StreamResult, ledger *RawLedger) {
+	if result == nil || ledger == nil {
+		return
+	}
+	result.ExtractionDuration += ledger.ProcessingDuration
+	result.RawViewDuration += ledger.ViewDuration
+	result.RawDecodeDuration += ledger.DecodeDuration
+	result.RawExtractDuration += ledger.ExtractDuration
+	result.RawPinDuration += ledger.PinDuration
+	result.RawEnvelopeDuration += ledger.EnvelopeDuration
+	result.RawProjectDuration += ledger.ProjectDuration
+}
+
+func applyRawPipelineMetrics(result *StreamResult, metrics rawDecodePipelineMetrics) {
+	if result == nil {
+		return
+	}
+	result.SourceDuration += metrics.SourceDuration
+	result.RawCopyDuration += metrics.CopyDuration
+	result.RawPipelineWait += metrics.WaitDuration
+	result.RawCopiedBytes += metrics.CopiedBytes
+	result.PeakInFlightLedgers = max(result.PeakInFlightLedgers, metrics.PeakInFlight)
+	result.PeakReorderBuffered = max(result.PeakReorderBuffered, metrics.PeakReorderBuffered)
 }
 
 func ensureOutputDirectory(path string) error {

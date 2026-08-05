@@ -73,6 +73,23 @@ FILES_PER_PARTITION=64000
 Use `BACKFILL_COMPRESSION=snappy` for the measured throughput profile or keep
 the default `zstd` when minimizing persisted bytes is more important.
 
+Raw Arrow workers can overlap source acquisition and extraction without
+changing artifact order. The measured single-host profile is:
+
+```bash
+BACKFILL_WRITER=arrow-parquet \
+BACKFILL_COMPRESSION=snappy \
+BACKFILL_EXTRACT_WORKERS=4 \
+BACKFILL_MAX_INFLIGHT_LEDGERS=8 \
+BACKFILL_DECODE_WORKERS=2
+```
+
+The source XDR is borrowed, so the pipeline copies it before the next archive
+read. `BACKFILL_MAX_INFLIGHT_LEDGERS` bounds those owned copies, decoded
+ledgers, and out-of-order results together. See
+[`docs/bounded-arrow-pipeline-evidence-2026-08-05.md`](docs/bounded-arrow-pipeline-evidence-2026-08-05.md)
+for the 1,000-ledger result and configuration knee.
+
 ## Contracts
 
 The canonical normalized batch event is:

@@ -40,6 +40,8 @@ type config struct {
 	WorkerID        string
 	Attempt         uint
 	DecodeWorkers   int
+	ExtractWorkers  int
+	MaxInFlight     int
 	Writer          string
 	Compression     string
 	FileTargetBytes uint64
@@ -54,41 +56,48 @@ type config struct {
 }
 
 type runSummary struct {
-	Source             string  `json:"source"`
-	Writer             string  `json:"writer"`
-	JobID              string  `json:"job_id"`
-	ShardID            string  `json:"shard_id"`
-	GenerationDigest   string  `json:"generation_digest"`
-	LedgerStart        uint32  `json:"ledger_start"`
-	LedgerEnd          uint32  `json:"ledger_end"`
-	Ledgers            uint32  `json:"ledgers"`
-	InputBytes         uint64  `json:"input_bytes"`
-	BronzeRows         uint64  `json:"bronze_rows"`
-	ParquetFiles       int     `json:"parquet_files"`
-	ParquetBytes       uint64  `json:"parquet_bytes"`
-	OutputRows         uint64  `json:"output_rows"`
-	ElapsedSeconds     float64 `json:"elapsed_seconds"`
-	LedgersPerSecond   float64 `json:"ledgers_per_second"`
-	RowsPerSecond      float64 `json:"rows_per_second"`
-	BytesPerSecond     float64 `json:"input_bytes_per_second"`
-	PeakBatchBytes     uint64  `json:"peak_batch_bytes"`
-	PeakBatchRows      uint64  `json:"peak_batch_bronze_rows"`
-	StagingSeconds     float64 `json:"staging_seconds"`
-	ExportSeconds      float64 `json:"export_seconds"`
-	SetupSeconds       float64 `json:"setup_seconds"`
-	SourceSeconds      float64 `json:"source_seconds"`
-	DigestSeconds      float64 `json:"digest_seconds"`
-	DecodeSeconds      float64 `json:"decode_seconds"`
-	ExtractionSeconds  float64 `json:"extraction_seconds"`
-	RawViewSeconds     float64 `json:"raw_view_seconds"`
-	RawDecodeSeconds   float64 `json:"raw_decode_seconds"`
-	RawExtractSeconds  float64 `json:"raw_extract_seconds"`
-	RawPinSeconds      float64 `json:"raw_pin_seconds"`
-	RawEnvelopeSeconds float64 `json:"raw_envelope_seconds"`
-	RawProjectSeconds  float64 `json:"raw_project_seconds"`
-	AppendSeconds      float64 `json:"append_seconds"`
-	JobManifest        string  `json:"job_manifest"`
-	ResultManifest     string  `json:"result_manifest"`
+	Source              string  `json:"source"`
+	Writer              string  `json:"writer"`
+	ExtractWorkers      int     `json:"extract_workers"`
+	MaxInFlight         int     `json:"max_inflight_ledgers"`
+	JobID               string  `json:"job_id"`
+	ShardID             string  `json:"shard_id"`
+	GenerationDigest    string  `json:"generation_digest"`
+	LedgerStart         uint32  `json:"ledger_start"`
+	LedgerEnd           uint32  `json:"ledger_end"`
+	Ledgers             uint32  `json:"ledgers"`
+	InputBytes          uint64  `json:"input_bytes"`
+	BronzeRows          uint64  `json:"bronze_rows"`
+	ParquetFiles        int     `json:"parquet_files"`
+	ParquetBytes        uint64  `json:"parquet_bytes"`
+	OutputRows          uint64  `json:"output_rows"`
+	ElapsedSeconds      float64 `json:"elapsed_seconds"`
+	LedgersPerSecond    float64 `json:"ledgers_per_second"`
+	RowsPerSecond       float64 `json:"rows_per_second"`
+	BytesPerSecond      float64 `json:"input_bytes_per_second"`
+	PeakBatchBytes      uint64  `json:"peak_batch_bytes"`
+	PeakBatchRows       uint64  `json:"peak_batch_bronze_rows"`
+	StagingSeconds      float64 `json:"staging_seconds"`
+	ExportSeconds       float64 `json:"export_seconds"`
+	SetupSeconds        float64 `json:"setup_seconds"`
+	SourceSeconds       float64 `json:"source_seconds"`
+	DigestSeconds       float64 `json:"digest_seconds"`
+	DecodeSeconds       float64 `json:"decode_seconds"`
+	ExtractionSeconds   float64 `json:"extraction_seconds"`
+	RawViewSeconds      float64 `json:"raw_view_seconds"`
+	RawDecodeSeconds    float64 `json:"raw_decode_seconds"`
+	RawExtractSeconds   float64 `json:"raw_extract_seconds"`
+	RawPinSeconds       float64 `json:"raw_pin_seconds"`
+	RawEnvelopeSeconds  float64 `json:"raw_envelope_seconds"`
+	RawProjectSeconds   float64 `json:"raw_project_seconds"`
+	RawCopySeconds      float64 `json:"raw_copy_seconds"`
+	PipelineWaitSeconds float64 `json:"pipeline_wait_seconds"`
+	RawCopiedBytes      uint64  `json:"raw_copied_bytes"`
+	PeakInFlightLedgers int     `json:"peak_inflight_ledgers"`
+	PeakReorderBuffered int     `json:"peak_reorder_buffered_ledgers"`
+	AppendSeconds       float64 `json:"append_seconds"`
+	JobManifest         string  `json:"job_manifest"`
+	ResultManifest      string  `json:"result_manifest"`
 }
 
 type jobSource struct {
@@ -202,6 +211,8 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		},
 		WriterMode:         cfg.Writer,
 		DecodeWorkers:      cfg.DecodeWorkers,
+		RawExtractWorkers:  cfg.ExtractWorkers,
+		MaxInFlightLedgers: cfg.MaxInFlight,
 		WatermarkWrittenAt: writtenAt,
 		MaxEncodedBytes:    cfg.MaxEncodedBytes,
 		MaxBronzeRows:      cfg.MaxBronzeRows,
@@ -273,38 +284,45 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	}
 	elapsed := completed.Sub(started)
 	summary := runSummary{
-		Source:             cfg.Source,
-		Writer:             cfg.Writer,
-		JobID:              job.JobID,
-		ShardID:            shard.ShardID,
-		GenerationDigest:   result.GenerationDigest,
-		LedgerStart:        start,
-		LedgerEnd:          end,
-		Ledgers:            descriptor.LedgerCount,
-		InputBytes:         descriptor.EncodedBytes,
-		BronzeRows:         descriptor.BronzeRows,
-		ParquetFiles:       len(files),
-		ParquetBytes:       parquetBytes,
-		OutputRows:         outputRows,
-		ElapsedSeconds:     elapsed.Seconds(),
-		PeakBatchBytes:     stream.PeakBatchEncodedBytes,
-		PeakBatchRows:      stream.PeakBatchBronzeRows,
-		StagingSeconds:     stream.StagingDuration.Seconds(),
-		ExportSeconds:      stream.ExportDuration.Seconds(),
-		SetupSeconds:       stream.SetupDuration.Seconds(),
-		SourceSeconds:      stream.SourceDuration.Seconds(),
-		DigestSeconds:      stream.DigestDuration.Seconds(),
-		DecodeSeconds:      stream.DecodeDuration.Seconds(),
-		ExtractionSeconds:  stream.ExtractionDuration.Seconds(),
-		RawViewSeconds:     stream.RawViewDuration.Seconds(),
-		RawDecodeSeconds:   stream.RawDecodeDuration.Seconds(),
-		RawExtractSeconds:  stream.RawExtractDuration.Seconds(),
-		RawPinSeconds:      stream.RawPinDuration.Seconds(),
-		RawEnvelopeSeconds: stream.RawEnvelopeDuration.Seconds(),
-		RawProjectSeconds:  stream.RawProjectDuration.Seconds(),
-		AppendSeconds:      stream.AppendDuration.Seconds(),
-		JobManifest:        jobPath,
-		ResultManifest:     resultPath,
+		Source:              cfg.Source,
+		Writer:              cfg.Writer,
+		ExtractWorkers:      cfg.ExtractWorkers,
+		MaxInFlight:         cfg.MaxInFlight,
+		JobID:               job.JobID,
+		ShardID:             shard.ShardID,
+		GenerationDigest:    result.GenerationDigest,
+		LedgerStart:         start,
+		LedgerEnd:           end,
+		Ledgers:             descriptor.LedgerCount,
+		InputBytes:          descriptor.EncodedBytes,
+		BronzeRows:          descriptor.BronzeRows,
+		ParquetFiles:        len(files),
+		ParquetBytes:        parquetBytes,
+		OutputRows:          outputRows,
+		ElapsedSeconds:      elapsed.Seconds(),
+		PeakBatchBytes:      stream.PeakBatchEncodedBytes,
+		PeakBatchRows:       stream.PeakBatchBronzeRows,
+		StagingSeconds:      stream.StagingDuration.Seconds(),
+		ExportSeconds:       stream.ExportDuration.Seconds(),
+		SetupSeconds:        stream.SetupDuration.Seconds(),
+		SourceSeconds:       stream.SourceDuration.Seconds(),
+		DigestSeconds:       stream.DigestDuration.Seconds(),
+		DecodeSeconds:       stream.DecodeDuration.Seconds(),
+		ExtractionSeconds:   stream.ExtractionDuration.Seconds(),
+		RawViewSeconds:      stream.RawViewDuration.Seconds(),
+		RawDecodeSeconds:    stream.RawDecodeDuration.Seconds(),
+		RawExtractSeconds:   stream.RawExtractDuration.Seconds(),
+		RawPinSeconds:       stream.RawPinDuration.Seconds(),
+		RawEnvelopeSeconds:  stream.RawEnvelopeDuration.Seconds(),
+		RawProjectSeconds:   stream.RawProjectDuration.Seconds(),
+		RawCopySeconds:      stream.RawCopyDuration.Seconds(),
+		PipelineWaitSeconds: stream.RawPipelineWait.Seconds(),
+		RawCopiedBytes:      stream.RawCopiedBytes,
+		PeakInFlightLedgers: stream.PeakInFlightLedgers,
+		PeakReorderBuffered: stream.PeakReorderBuffered,
+		AppendSeconds:       stream.AppendDuration.Seconds(),
+		JobManifest:         jobPath,
+		ResultManifest:      resultPath,
 	}
 	if elapsed > 0 {
 		summary.LedgersPerSecond = float64(summary.Ledgers) / elapsed.Seconds()
@@ -329,6 +347,8 @@ func parseConfig(args []string, output io.Writer) (config, error) {
 	flags.StringVar(&cfg.WorkerID, "worker-id", "local-worker", "worker evidence ID")
 	flags.UintVar(&cfg.Attempt, "attempt", 1, "one-based worker attempt")
 	flags.IntVar(&cfg.DecodeWorkers, "decode-workers", min(runtime.NumCPU(), 8), "bounded decode worker count")
+	flags.IntVar(&cfg.ExtractWorkers, "extract-workers", 1, "concurrent raw-ledger decode/extract workers for Arrow ledger-stream mode")
+	flags.IntVar(&cfg.MaxInFlight, "max-inflight-ledgers", 0, "hard raw-ledger pipeline bound; defaults to twice extract-workers")
 	flags.StringVar(&cfg.Writer, "writer", backfillworker.WriterDuckDBAppender, "worker writer: duckdb-appender or arrow-parquet")
 	flags.StringVar(&cfg.Compression, "compression", "zstd", "Parquet compression: zstd, snappy, or uncompressed")
 	flags.Uint64Var(&cfg.FileTargetBytes, "file-target-bytes", 256<<20, "target Parquet part bytes before the selected writer rolls at a row-group boundary")
@@ -349,6 +369,9 @@ func parseConfig(args []string, output io.Writer) (config, error) {
 	cfg.Source = strings.ToLower(strings.TrimSpace(cfg.Source))
 	cfg.Writer = strings.ToLower(strings.TrimSpace(cfg.Writer))
 	cfg.Compression = strings.ToLower(strings.TrimSpace(cfg.Compression))
+	if cfg.MaxInFlight == 0 && cfg.ExtractWorkers > 0 {
+		cfg.MaxInFlight = cfg.ExtractWorkers * 2
+	}
 	if cfg.OutputDir == "" {
 		return cfg, fmt.Errorf("--output is required")
 	}
@@ -364,8 +387,11 @@ func parseConfig(args []string, output io.Writer) (config, error) {
 	if cfg.Attempt == 0 || cfg.Attempt > uint(^uint32(0)) {
 		return cfg, fmt.Errorf("--attempt must fit a positive uint32")
 	}
-	if cfg.DecodeWorkers <= 0 || cfg.MaxEncodedBytes == 0 || cfg.MaxBronzeRows == 0 || cfg.FileTargetBytes == 0 || cfg.FileMaxBytes == 0 || cfg.RowGroupRows < 2048 {
+	if cfg.DecodeWorkers <= 0 || cfg.ExtractWorkers <= 0 || cfg.MaxEncodedBytes == 0 || cfg.MaxBronzeRows == 0 || cfg.FileTargetBytes == 0 || cfg.FileMaxBytes == 0 || cfg.RowGroupRows < 2048 {
 		return cfg, fmt.Errorf("decode, byte, row, and file bounds must be positive, and row-group-rows must be at least 2048")
+	}
+	if cfg.MaxInFlight < cfg.ExtractWorkers {
+		return cfg, fmt.Errorf("--max-inflight-ledgers must be at least --extract-workers")
 	}
 	if cfg.FileMaxBytes < cfg.FileTargetBytes {
 		return cfg, fmt.Errorf("--file-max-bytes must be greater than or equal to --file-target-bytes")

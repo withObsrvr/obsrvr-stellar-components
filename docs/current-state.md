@@ -149,6 +149,14 @@ The topology is not production-approved until these are complete:
    archive. Arrow/Zstd reached 10.28 ledgers/s and Arrow/Snappy reached 12.47
    ledgers/s on one local worker; neither is a 1,000-ledger/s fleet result. See
    [`parallel-file-backfill-evidence-2026-08-05.md`](parallel-file-backfill-evidence-2026-08-05.md).
+8. Raw Arrow workers now support a bounded cross-ledger extraction pipeline.
+   Four extract workers with eight ledgers in flight processed 1,000 real GCS
+   ledgers at 24.70 ledgers/s; two independent bounded workers reached 35.64
+   aggregate ledgers/s. Retry artifacts matched exactly after excluding their
+   attempt-local file URIs. The writer occupied 37.24s of the 39.84s staging
+   interval, making parallel table encoding and direct builders the next
+   measured constraint. See
+   [`bounded-arrow-pipeline-evidence-2026-08-05.md`](bounded-arrow-pipeline-evidence-2026-08-05.md).
 
 ## Operational constraints and residual risks
 
