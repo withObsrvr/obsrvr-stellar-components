@@ -66,7 +66,7 @@ type chunkWriter struct {
 
 // RecordJSONL converts the jsonl-sink output into hashed, length-delimited
 // protobuf fixture chunks. Existing files are never overwritten.
-func RecordJSONL(input io.Reader, options RecordOptions) (*Manifest, error) {
+func RecordJSONL(input io.Reader, options RecordOptions) (recorded *Manifest, resultErr error) {
 	if options.ManifestPath == "" {
 		return nil, fmt.Errorf("manifest path is required")
 	}
@@ -93,9 +93,22 @@ func RecordJSONL(input io.Reader, options RecordOptions) (*Manifest, error) {
 	}
 	reader := bufio.NewReader(input)
 	var chunk *chunkWriter
+	createdPaths := make([]string, 0)
+	complete := false
 	defer func() {
 		if chunk != nil && chunk.file != nil {
-			_ = chunk.file.Close()
+			if err := chunk.file.Close(); err != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("close fixture chunk %q during cleanup: %w", chunk.path, err))
+			}
+			chunk.file = nil
+		}
+		if complete {
+			return
+		}
+		for i := len(createdPaths) - 1; i >= 0; i-- {
+			if err := os.Remove(createdPaths[i]); err != nil && !errors.Is(err, os.ErrNotExist) {
+				resultErr = errors.Join(resultErr, fmt.Errorf("remove incomplete fixture chunk %q: %w", createdPaths[i], err))
+			}
 		}
 	}()
 	writeBatch := func(record pendingBatch) error {
@@ -114,11 +127,11 @@ func RecordJSONL(input io.Reader, options RecordOptions) (*Manifest, error) {
 				return openErr
 			}
 			chunk = opened
+			createdPaths = append(createdPaths, filepath.Join(dir, opened.path))
 		}
 		written, writeErr := WriteDelimited(chunk.writer, batch)
 		chunk.bytes += written
 		if writeErr != nil {
-			_ = chunk.file.Close()
 			return fmt.Errorf("write fixture ledger %d: %w", batch.LedgerSequence, writeErr)
 		}
 		chunk.count++
@@ -178,6 +191,7 @@ func RecordJSONL(input io.Reader, options RecordOptions) (*Manifest, error) {
 	if err := writeManifest(options.ManifestPath, manifest); err != nil {
 		return nil, err
 	}
+	complete = true
 	return manifest, nil
 }
 
@@ -236,13 +250,18 @@ func openChunk(manifestPath string, index int, start uint32) (*chunkWriter, erro
 
 func finishChunk(manifest *Manifest, chunk *chunkWriter) error {
 	if err := chunk.file.Sync(); err != nil {
-		_ = chunk.file.Close()
-		return fmt.Errorf("sync fixture chunk %q: %w", chunk.path, err)
+		closeErr := chunk.file.Close()
+		chunk.file = nil
+		return errors.Join(
+			fmt.Errorf("sync fixture chunk %q: %w", chunk.path, err),
+			wrapCloseError(chunk.path, closeErr),
+		)
 	}
-	if err := chunk.file.Close(); err != nil {
-		return fmt.Errorf("close fixture chunk %q: %w", chunk.path, err)
-	}
+	closeErr := chunk.file.Close()
 	chunk.file = nil
+	if closeErr != nil {
+		return fmt.Errorf("close fixture chunk %q: %w", chunk.path, closeErr)
+	}
 	manifest.Files = append(manifest.Files, ManifestFile{
 		Path:        chunk.path,
 		SHA256:      hex.EncodeToString(chunk.hash.Sum(nil)),
@@ -254,23 +273,42 @@ func finishChunk(manifest *Manifest, chunk *chunkWriter) error {
 	return nil
 }
 
-func writeManifest(path string, manifest *Manifest) error {
+func wrapCloseError(path string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("close fixture chunk %q: %w", path, err)
+}
+
+func writeManifest(path string, manifest *Manifest) (resultErr error) {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return fmt.Errorf("create fixture manifest %q: %w", path, err)
 	}
+	defer func() {
+		if file != nil {
+			if err := file.Close(); err != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("close fixture manifest during cleanup: %w", err))
+			}
+		}
+		if resultErr != nil {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				resultErr = errors.Join(resultErr, fmt.Errorf("remove incomplete fixture manifest %q: %w", path, err))
+			}
+		}
+	}()
 	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(manifest); err != nil {
-		_ = file.Close()
 		return fmt.Errorf("write fixture manifest: %w", err)
 	}
 	if err := file.Sync(); err != nil {
-		_ = file.Close()
 		return fmt.Errorf("sync fixture manifest: %w", err)
 	}
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("close fixture manifest: %w", err)
+	closeErr := file.Close()
+	file = nil
+	if closeErr != nil {
+		return fmt.Errorf("close fixture manifest: %w", closeErr)
 	}
 	return nil
 }

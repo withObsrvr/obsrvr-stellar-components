@@ -244,6 +244,50 @@ func TestRecordJSONLRejectsDuplicateLedgers(t *testing.T) {
 	}
 }
 
+func TestRecordJSONLCleansCreatedChunksAfterFailure(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "fixture.manifest.json")
+	input := fixtureJSONL(t, 100, 101, 103)
+	_, err := RecordJSONL(strings.NewReader(input), RecordOptions{
+		ManifestPath:   manifestPath,
+		BatchesPerFile: 1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "want contiguous ledger 102") {
+		t.Fatalf("RecordJSONL error = %v, want contiguous ledger error", err)
+	}
+	chunks, err := filepath.Glob(filepath.Join(dir, "*.pb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 0 {
+		t.Fatalf("failed recording left fixture chunks: %v", chunks)
+	}
+	if _, err := os.Stat(manifestPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed recording manifest stat error = %v, want not exist", err)
+	}
+
+	if _, err := RecordJSONL(strings.NewReader(fixtureJSONL(t, 100, 101, 102)), RecordOptions{
+		ManifestPath:   manifestPath,
+		BatchesPerFile: 1,
+	}); err != nil {
+		t.Fatalf("retry recording: %v", err)
+	}
+}
+
+func fixtureJSONL(t *testing.T, ledgers ...uint32) string {
+	t.Helper()
+	var input strings.Builder
+	for _, ledger := range ledgers {
+		data, err := protojson.Marshal(testBatch(ledger))
+		if err != nil {
+			t.Fatal(err)
+		}
+		input.Write(data)
+		input.WriteByte('\n')
+	}
+	return input.String()
+}
+
 func testBatch(ledger uint32) *componentsv1.LedgerBatch {
 	return &componentsv1.LedgerBatch{
 		NetworkPassphrase: "Public Global Stellar Network ; September 2015",

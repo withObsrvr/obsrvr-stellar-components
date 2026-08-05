@@ -194,6 +194,16 @@ QUACK_TOKEN="$token" bin/ingest-replay \
   --summary "$runtime_dir/cadence-summary.json" \
   --results "$runtime_dir/cadence-results.jsonl"
 jq -e '.success == true and .acknowledged == .requested_count' "$runtime_dir/cadence-summary.json" >/dev/null
+observed_idle_checkpoints="$(jq -er '
+  .observed_idle_checkpoints
+  | if type == "number" and . >= 0 and floor == . then .
+    else error("observed_idle_checkpoints must be a non-negative integer")
+    end
+' "$runtime_dir/cadence-summary.json")"
+(( observed_idle_checkpoints >= required_checkpoints )) || {
+  echo "new successful idle checkpoints=$observed_idle_checkpoints, want at least $required_checkpoints" >&2
+  exit 1
+}
 curl -fsS "http://127.0.0.1:$health_port/metrics" >"$runtime_dir/server-metrics.prom"
 metric_sum() {
   local metric="$1" label_one="${2:-}" label_two="${3:-}"
@@ -207,14 +217,9 @@ metric_sum() {
 ingest_errors="$(metric_sum obsrvr_ducklake_ingest_batches_total 'result="error"')"
 ingest_retries="$(metric_sum obsrvr_ducklake_ingest_retries_total)"
 checkpoint_errors="$(metric_sum obsrvr_ducklake_checkpoint_total 'result="error"')"
-idle_checkpoints="$(metric_sum obsrvr_ducklake_checkpoint_total 'result="success"' 'trigger="idle"')"
 [[ "$ingest_errors" == 0 ]] || { echo "ingest errors=$ingest_errors, want 0" >&2; exit 1; }
 [[ "$ingest_retries" == 0 ]] || { echo "ingest retries=$ingest_retries, want 0" >&2; exit 1; }
 [[ "$checkpoint_errors" == 0 ]] || { echo "checkpoint errors=$checkpoint_errors, want 0" >&2; exit 1; }
-(( idle_checkpoints >= required_checkpoints )) || {
-  echo "successful idle checkpoints=$idle_checkpoints, want at least $required_checkpoints" >&2
-  exit 1
-}
 if ! kill -0 "$maintenance_pid" 2>/dev/null; then
   echo "maintenance process exited during cadence replay" >&2
   tail -n 160 "$runtime_dir/maintenance.log" >&2 || true
@@ -339,7 +344,7 @@ initial_startup_seconds=$initial_startup_seconds
 restart_startup_seconds=$restart_startup_seconds
 baseline_startup_seconds=$baseline_startup_seconds
 required_idle_checkpoints=$required_checkpoints
-observed_idle_checkpoints=$(jq -r '.observed_idle_checkpoints' "$runtime_dir/cadence-summary.json")
+observed_idle_checkpoints=$observed_idle_checkpoints
 over_budget=$(jq -r '.over_budget' "$runtime_dir/cadence-summary.json")
 ingest_errors=$ingest_errors
 ingest_retries=$ingest_retries
