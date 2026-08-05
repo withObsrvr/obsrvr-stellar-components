@@ -6,7 +6,7 @@ PROTOC ?= protoc
 CGO_ENABLED ?= 1
 
 COMPONENTS := stellar-ledger-processor jsonl-sink postgres-sink ducklake-sink quack-ducklake-server index-materializer ducklake-replica-sync ducklake-maintenance ducklake-gatekeeper
-TOOLS := ledger-smoke ledger-fixture-recorder ingest-replay
+TOOLS := ledger-smoke ledger-fixture-recorder ingest-replay ducklake-backfill-worker
 
 build:
 	@mkdir -p bin

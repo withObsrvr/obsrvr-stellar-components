@@ -1,7 +1,7 @@
 # Parallel File Backfill Implementation Plan
 
 **Date:** 2026-08-05
-**Status:** PR 1 implementation started
+**Status:** Stage 1 local worker smoke passed; registration remains open
 **Target stack:** DuckDB 1.5.5 with matching current DuckLake and Quack
 extensions
 
@@ -36,14 +36,22 @@ The first PR 1 slice now exists on
   typed Bronze rows through table-specific Appenders, adds a staging-only
   ordinal for stable output order, writes Zstd Parquet, fingerprints and hashes
   each file, and publishes it without overwriting an existing artifact.
+- `cmd/ducklake-backfill-worker` now provides a bounded runnable entrypoint
+  from a verified fixture range to job/result manifests and complete typed
+  Bronze, ledger metadata, and watermark Parquet artifacts.
 - Tests prove stable Parquet hashes across two independent worker runs, exact
   typed schema, no staging-column leakage, range rejection, overwrite
   rejection, cleanup of partial files, manifest coverage, and retry identity.
 
-This is not yet a complete shard worker. Per-ledger metadata and watermark
-files, streaming decode with a hard memory limit, size-based file rolling,
-fixture/archive source adapters, the CLI, object-store publication, and
-DuckLake registration remain open.
+A 30-ledger mainnet smoke produced 18 byte-stable files and exact source/table
+count parity with zero watermark gaps. The measurements and limitations are
+recorded in
+[`parallel-file-backfill-evidence-2026-08-05.md`](parallel-file-backfill-evidence-2026-08-05.md).
+
+This is not yet a complete distributed shard worker. Streaming decode with a
+hard memory limit, size-based file rolling, direct archive input,
+attempt-scoped object-store publication, independent validation, and DuckLake
+registration remain open.
 
 ## Why a second backfill lane is necessary
 

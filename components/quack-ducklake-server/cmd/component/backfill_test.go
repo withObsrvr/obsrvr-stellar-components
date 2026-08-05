@@ -6,6 +6,7 @@ import (
 
 	componentsv1 "github.com/withObsrvr/obsrvr-stellar-components/gen/go/stellar/components/v1"
 	"github.com/withObsrvr/obsrvr-stellar-components/internal/ingestbatch"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestValidateMicroBatchBeginEnforcesRangeAndResourceLimits(t *testing.T) {
@@ -41,9 +42,9 @@ func TestValidateMicroBatchBeginEnforcesRangeAndResourceLimits(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			begin := *valid
-			test.mutate(&begin)
-			err := server.validateMicroBatchBegin(&begin)
+			begin := proto.Clone(valid).(*componentsv1.IngestMicroBatchBegin)
+			test.mutate(begin)
+			err := server.validateMicroBatchBegin(begin)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("validation error = %v, want substring %q", err, test.want)
 			}

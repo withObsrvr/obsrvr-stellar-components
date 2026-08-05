@@ -26,10 +26,11 @@ import (
 const ordinalColumn = "__backfill_ordinal"
 
 type ParquetConfig struct {
-	OutputDir   string
-	LedgerStart uint32
-	LedgerEnd   uint32
-	Compression string
+	OutputDir       string
+	LedgerStart     uint32
+	LedgerEnd       uint32
+	Compression     string
+	FileTargetBytes uint64
 }
 
 // WriteParquetShard writes one deterministic Parquet file per non-empty typed
@@ -253,6 +254,9 @@ func writeTableParquet(ctx context.Context, conn *sql.Conn, outputDir string, cf
 	sha, bytes, err := hashFile(temporaryPath)
 	if err != nil {
 		return backfillmanifest.File{}, "", fmt.Errorf("hash Parquet for %s: %w", spec.TableName, err)
+	}
+	if cfg.FileTargetBytes > 0 && bytes > cfg.FileTargetBytes {
+		return backfillmanifest.File{}, "", fmt.Errorf("Parquet for %s is %d bytes, exceeds the unrolled file target %d", spec.TableName, bytes, cfg.FileTargetBytes)
 	}
 	if err := publishNoReplace(temporaryPath, finalPath); err != nil {
 		return backfillmanifest.File{}, "", fmt.Errorf("publish Parquet for %s: %w", spec.TableName, err)
