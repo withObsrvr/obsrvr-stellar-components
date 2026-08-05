@@ -25,9 +25,11 @@ make build
 - `ingest-replay`: replays fixture corpora directly to the ingest RPC with
   deterministic live/future/catch-up cadence gates or bounded saturated
   micro-batch backfill.
-- `ducklake-backfill-worker`: materializes one verified historical fixture
-  range into immutable, hashed Parquet shard files without attaching to the
-  shared catalog.
+- `ducklake-backfill-worker`: streams one verified historical range through a
+  memory-limited local DuckDB into rolled, immutable, hashed Parquet parts
+  without attaching to the shared catalog. Use
+  `make test-file-backfill-benchmark` with `BACKFILL_FIXTURE_MANIFEST` and
+  `BACKFILL_CONCURRENCY` to record aggregate throughput and phase evidence.
 - `postgres-sink`: idempotently writes ledgers, transactions, and operations to Postgres.
 - `ducklake-sink`: writes normalized ledger batches into a DuckLake catalog with history-loader-compatible typed bronze tables.
 - `ducklake-gatekeeper`: verifies snapshot-pinned transformation proposals and atomically promotes accepted Silver output with provenance.

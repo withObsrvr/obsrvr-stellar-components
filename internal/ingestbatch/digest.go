@@ -21,6 +21,67 @@ type Descriptor struct {
 	PayloadSHA256 string
 }
 
+// Accumulator computes a Descriptor one ledger at a time so bounded workers do
+// not need to retain a complete range in memory.
+type Accumulator struct {
+	descriptor Descriptor
+	network    string
+	hasher     hash.Hash
+}
+
+func NewAccumulator() *Accumulator {
+	return &Accumulator{hasher: sha256.New()}
+}
+
+func (a *Accumulator) Add(batch *componentsv1.LedgerBatch) error {
+	if batch == nil {
+		return fmt.Errorf("micro-batch ledger %d is nil", a.descriptor.LedgerCount)
+	}
+	if batch.NetworkPassphrase == "" {
+		return fmt.Errorf("micro-batch ledger %d has empty network passphrase", batch.LedgerSequence)
+	}
+	if a.descriptor.LedgerCount == 0 {
+		a.descriptor.LedgerStart = batch.LedgerSequence
+		a.network = batch.NetworkPassphrase
+	} else {
+		expected := a.descriptor.LedgerEnd + 1
+		if batch.LedgerSequence != expected {
+			return fmt.Errorf("micro-batch ledger %d follows %d, want %d", batch.LedgerSequence, a.descriptor.LedgerEnd, expected)
+		}
+		if batch.NetworkPassphrase != a.network {
+			return fmt.Errorf("micro-batch ledger %d changes network passphrase", batch.LedgerSequence)
+		}
+	}
+
+	encoded, err := (proto.MarshalOptions{Deterministic: true}).Marshal(batch)
+	if err != nil {
+		return fmt.Errorf("marshal micro-batch ledger %d: %w", batch.LedgerSequence, err)
+	}
+	writeDelimited(a.hasher, encoded)
+	a.descriptor.LedgerEnd = batch.LedgerSequence
+	a.descriptor.LedgerCount++
+	a.descriptor.EncodedBytes += uint64(len(encoded))
+	a.descriptor.BronzeRows += uint64(len(batch.BronzeRows))
+	return nil
+}
+
+func (a *Accumulator) Descriptor() (Descriptor, error) {
+	if a.descriptor.LedgerCount == 0 {
+		return Descriptor{}, fmt.Errorf("micro-batch is empty")
+	}
+	descriptor := a.descriptor
+	descriptor.PayloadSHA256 = hex.EncodeToString(a.hasher.Sum(nil))
+	descriptor.ID = descriptor.PayloadSHA256
+	return descriptor, nil
+}
+
+// Totals returns the accumulated range and resource counts without computing
+// the payload digest. Hot paths can use this after every Add and finalize the
+// digest once after the stream ends.
+func (a *Accumulator) Totals() Descriptor {
+	return a.descriptor
+}
+
 // MeasureLedger returns the protobuf payload bytes and Bronze row count used
 // by both client assembly and server resource enforcement. Length-delimiter
 // bytes are excluded because each LedgerBatch remains an individual gRPC
@@ -33,51 +94,13 @@ func MeasureLedger(batch *componentsv1.LedgerBatch) (encodedBytes, bronzeRows ui
 }
 
 func Describe(batches []*componentsv1.LedgerBatch) (Descriptor, error) {
-	if len(batches) == 0 {
-		return Descriptor{}, fmt.Errorf("micro-batch is empty")
-	}
-
-	hasher := sha256.New()
-	network := ""
-	var descriptor Descriptor
-	for index, batch := range batches {
-		if batch == nil {
-			return Descriptor{}, fmt.Errorf("micro-batch ledger %d is nil", index)
-		}
-		if batch.NetworkPassphrase == "" {
-			return Descriptor{}, fmt.Errorf("micro-batch ledger %d has empty network passphrase", batch.LedgerSequence)
-		}
-		if index == 0 {
-			descriptor.LedgerStart = batch.LedgerSequence
-			network = batch.NetworkPassphrase
-		} else {
-			expected := batches[index-1].LedgerSequence + 1
-			if batch.LedgerSequence != expected {
-				return Descriptor{}, fmt.Errorf("micro-batch ledger %d follows %d, want %d", batch.LedgerSequence, batches[index-1].LedgerSequence, expected)
-			}
-			if batch.NetworkPassphrase != network {
-				return Descriptor{}, fmt.Errorf("micro-batch ledger %d changes network passphrase", batch.LedgerSequence)
-			}
-		}
-
-		encoded, err := (proto.MarshalOptions{Deterministic: true}).Marshal(batch)
-		if err != nil {
-			return Descriptor{}, fmt.Errorf("marshal micro-batch ledger %d: %w", batch.LedgerSequence, err)
-		}
-		writeDelimited(hasher, encoded)
-		encodedBytes, bronzeRows, err := MeasureLedger(batch)
-		if err != nil {
+	accumulator := NewAccumulator()
+	for _, batch := range batches {
+		if err := accumulator.Add(batch); err != nil {
 			return Descriptor{}, err
 		}
-		descriptor.EncodedBytes += encodedBytes
-		descriptor.BronzeRows += bronzeRows
 	}
-
-	descriptor.LedgerEnd = batches[len(batches)-1].LedgerSequence
-	descriptor.LedgerCount = uint32(len(batches))
-	descriptor.PayloadSHA256 = hex.EncodeToString(hasher.Sum(nil))
-	descriptor.ID = descriptor.PayloadSHA256
-	return descriptor, nil
+	return accumulator.Descriptor()
 }
 
 func writeDelimited(writer hash.Hash, encoded []byte) {

@@ -31,6 +31,8 @@ type ParquetConfig struct {
 	LedgerEnd       uint32
 	Compression     string
 	FileTargetBytes uint64
+	FileMaxBytes    uint64
+	RowGroupRows    uint64
 }
 
 // WriteParquetShard writes one deterministic Parquet file per non-empty typed

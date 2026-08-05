@@ -1,7 +1,7 @@
 # Parallel File Backfill Implementation Plan
 
 **Date:** 2026-08-05
-**Status:** Stage 1 local worker smoke passed; registration remains open
+**Status:** Stage 1 bounded worker and local scale harness passed; direct columnar writer and registration remain open
 **Target stack:** DuckDB 1.5.5 with matching current DuckLake and Quack
 extensions
 

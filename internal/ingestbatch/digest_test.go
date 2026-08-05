@@ -30,6 +30,30 @@ func TestDescribeIsDeterministicAndAccountsForRange(t *testing.T) {
 	}
 }
 
+func TestAccumulatorMatchesSliceDescriptor(t *testing.T) {
+	batches := []*componentsv1.LedgerBatch{
+		{NetworkPassphrase: "pubnet", LedgerSequence: 100, BronzeRows: []*componentsv1.BronzeRow{{Id: "a"}}},
+		{NetworkPassphrase: "pubnet", LedgerSequence: 101, BronzeRows: []*componentsv1.BronzeRow{{Id: "b"}, {Id: "c"}}},
+	}
+	want, err := Describe(batches)
+	if err != nil {
+		t.Fatalf("describe: %v", err)
+	}
+	accumulator := NewAccumulator()
+	for _, batch := range batches {
+		if err := accumulator.Add(batch); err != nil {
+			t.Fatalf("add ledger: %v", err)
+		}
+	}
+	got, err := accumulator.Descriptor()
+	if err != nil {
+		t.Fatalf("finish accumulator: %v", err)
+	}
+	if got != want {
+		t.Fatalf("stream descriptor = %+v, want %+v", got, want)
+	}
+}
+
 func TestDescribeRejectsGapAndNetworkChange(t *testing.T) {
 	for _, test := range []struct {
 		name    string

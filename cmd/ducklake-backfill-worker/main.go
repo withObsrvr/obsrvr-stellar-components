@@ -18,10 +18,8 @@ import (
 	"sort"
 	"time"
 
-	componentsv1 "github.com/withObsrvr/obsrvr-stellar-components/gen/go/stellar/components/v1"
 	"github.com/withObsrvr/obsrvr-stellar-components/internal/backfillmanifest"
 	"github.com/withObsrvr/obsrvr-stellar-components/internal/backfillworker"
-	"github.com/withObsrvr/obsrvr-stellar-components/internal/ingestbatch"
 	"github.com/withObsrvr/obsrvr-stellar-components/internal/ledgerfixture"
 	"github.com/withObsrvr/obsrvr-stellar-components/pkg/bronze"
 )
@@ -37,8 +35,11 @@ type config struct {
 	DecodeWorkers   int
 	Compression     string
 	FileTargetBytes uint64
+	FileMaxBytes    uint64
+	RowGroupRows    uint64
 	MaxEncodedBytes uint64
 	MaxBronzeRows   uint64
+	MemoryLimit     string
 	CodeRevision    string
 	ImageDigest     string
 	WatermarkTime   string
@@ -60,6 +61,15 @@ type runSummary struct {
 	LedgersPerSecond float64 `json:"ledgers_per_second"`
 	RowsPerSecond    float64 `json:"rows_per_second"`
 	BytesPerSecond   float64 `json:"input_bytes_per_second"`
+	PeakBatchBytes   uint64  `json:"peak_batch_bytes"`
+	PeakBatchRows    uint64  `json:"peak_batch_bronze_rows"`
+	StagingSeconds   float64 `json:"staging_seconds"`
+	ExportSeconds    float64 `json:"export_seconds"`
+	SetupSeconds     float64 `json:"setup_seconds"`
+	SourceSeconds    float64 `json:"source_seconds"`
+	DigestSeconds    float64 `json:"digest_seconds"`
+	DecodeSeconds    float64 `json:"decode_seconds"`
+	AppendSeconds    float64 `json:"append_seconds"`
 	JobManifest      string  `json:"job_manifest"`
 	ResultManifest   string  `json:"result_manifest"`
 }
@@ -76,7 +86,7 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	fixture, err := ledgerfixture.LoadManifest(cfg.Fixtures)
+	fixture, err := ledgerfixture.ReadManifest(cfg.Fixtures)
 	if err != nil {
 		return err
 	}
@@ -95,31 +105,39 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		return fmt.Errorf("create output directory: %w", err)
 	}
 
-	batches, descriptor, err := readFixtureRange(cfg, fixture, start, end)
-	if err != nil {
-		return err
-	}
 	job, shard, err := buildJob(cfg, fixture, start, end)
 	if err != nil {
 		return err
 	}
+	reader, err := ledgerfixture.NewRangeReader(cfg.Fixtures, fixture, start, end)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
 
 	started := time.Now().UTC()
-	files, err := backfillworker.WriteLedgerBatchShard(ctx, backfillworker.LedgerBatchConfig{
+	stream, err := backfillworker.WriteLedgerBatchStream(ctx, backfillworker.LedgerBatchConfig{
 		Parquet: backfillworker.ParquetConfig{
 			OutputDir:       cfg.OutputDir,
 			LedgerStart:     start,
 			LedgerEnd:       end,
 			Compression:     cfg.Compression,
 			FileTargetBytes: cfg.FileTargetBytes,
+			FileMaxBytes:    cfg.FileMaxBytes,
+			RowGroupRows:    cfg.RowGroupRows,
 		},
 		DecodeWorkers:      cfg.DecodeWorkers,
 		WatermarkWrittenAt: writtenAt,
-	}, batches)
+		MaxEncodedBytes:    cfg.MaxEncodedBytes,
+		MaxBronzeRows:      cfg.MaxBronzeRows,
+		MemoryLimit:        cfg.MemoryLimit,
+	}, reader.Next)
 	if err != nil {
 		return err
 	}
 	completed := time.Now().UTC()
+	files := stream.Files
+	descriptor := stream.Descriptor
 
 	tableCounts := make(map[string]uint64)
 	var parquetBytes, outputRows uint64
@@ -180,6 +198,15 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		ParquetBytes:     parquetBytes,
 		OutputRows:       outputRows,
 		ElapsedSeconds:   elapsed.Seconds(),
+		PeakBatchBytes:   stream.PeakBatchEncodedBytes,
+		PeakBatchRows:    stream.PeakBatchBronzeRows,
+		StagingSeconds:   stream.StagingDuration.Seconds(),
+		ExportSeconds:    stream.ExportDuration.Seconds(),
+		SetupSeconds:     stream.SetupDuration.Seconds(),
+		SourceSeconds:    stream.SourceDuration.Seconds(),
+		DigestSeconds:    stream.DigestDuration.Seconds(),
+		DecodeSeconds:    stream.DecodeDuration.Seconds(),
+		AppendSeconds:    stream.AppendDuration.Seconds(),
 		JobManifest:      jobPath,
 		ResultManifest:   resultPath,
 	}
@@ -206,9 +233,12 @@ func parseConfig(args []string, output io.Writer) (config, error) {
 	flags.UintVar(&cfg.Attempt, "attempt", 1, "one-based worker attempt")
 	flags.IntVar(&cfg.DecodeWorkers, "decode-workers", min(runtime.NumCPU(), 8), "bounded decode worker count")
 	flags.StringVar(&cfg.Compression, "compression", "zstd", "Parquet compression: zstd, snappy, or uncompressed")
-	flags.Uint64Var(&cfg.FileTargetBytes, "file-target-bytes", 256<<20, "maximum bytes before file rolling is required")
+	flags.Uint64Var(&cfg.FileTargetBytes, "file-target-bytes", 256<<20, "target Parquet part bytes before DuckDB rolls at a row-group boundary")
+	flags.Uint64Var(&cfg.FileMaxBytes, "file-max-bytes", 512<<20, "hard maximum bytes for any rolled Parquet part")
+	flags.Uint64Var(&cfg.RowGroupRows, "row-group-rows", 16_384, "Parquet rows per row group; minimum 2048")
 	flags.Uint64Var(&cfg.MaxEncodedBytes, "max-encoded-bytes", 512<<20, "hard selected-range protobuf byte limit")
 	flags.Uint64Var(&cfg.MaxBronzeRows, "max-bronze-rows", 500_000, "hard selected-range Bronze row limit")
+	flags.StringVar(&cfg.MemoryLimit, "memory-limit", "1GB", "hard DuckDB buffer-manager memory limit per worker")
 	flags.StringVar(&cfg.CodeRevision, "code-revision", "local", "code revision recorded in the job manifest")
 	flags.StringVar(&cfg.ImageDigest, "image-digest", backfillmanifest.Digest([]byte("local-unpinned-image")), "image SHA-256 recorded in the job manifest")
 	flags.StringVar(&cfg.WatermarkTime, "watermark-time", "2026-08-05T00:00:00Z", "pinned deterministic UTC watermark timestamp")
@@ -224,8 +254,11 @@ func parseConfig(args []string, output io.Writer) (config, error) {
 	if cfg.Attempt == 0 || cfg.Attempt > uint(^uint32(0)) {
 		return cfg, fmt.Errorf("--attempt must fit a positive uint32")
 	}
-	if cfg.DecodeWorkers <= 0 || cfg.MaxEncodedBytes == 0 || cfg.MaxBronzeRows == 0 || cfg.FileTargetBytes == 0 {
-		return cfg, fmt.Errorf("decode, byte, row, and file bounds must be positive")
+	if cfg.DecodeWorkers <= 0 || cfg.MaxEncodedBytes == 0 || cfg.MaxBronzeRows == 0 || cfg.FileTargetBytes == 0 || cfg.FileMaxBytes == 0 || cfg.RowGroupRows < 2048 {
+		return cfg, fmt.Errorf("decode, byte, row, and file bounds must be positive, and row-group-rows must be at least 2048")
+	}
+	if cfg.FileMaxBytes < cfg.FileTargetBytes {
+		return cfg, fmt.Errorf("--file-max-bytes must be greater than or equal to --file-target-bytes")
 	}
 	return cfg, nil
 }
@@ -246,49 +279,6 @@ func selectedRange(cfg config, fixture *ledgerfixture.Manifest) (uint32, uint32,
 		return 0, 0, fmt.Errorf("selected range %d-%d falls outside fixture %d-%d", start, end, fixture.LedgerStart, fixture.LedgerEnd)
 	}
 	return start, end, nil
-}
-
-func readFixtureRange(cfg config, fixture *ledgerfixture.Manifest, start, end uint32) ([]*componentsv1.LedgerBatch, ingestbatch.Descriptor, error) {
-	reader := ledgerfixture.NewReader(cfg.Fixtures, fixture)
-	defer reader.Close()
-	batches := make([]*componentsv1.LedgerBatch, 0, uint64(end)-uint64(start)+1)
-	var encodedBytes, bronzeRows uint64
-	for {
-		batch, err := reader.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, ingestbatch.Descriptor{}, err
-		}
-		if batch.LedgerSequence < start {
-			continue
-		}
-		if batch.LedgerSequence > end {
-			break
-		}
-		batchBytes, batchRows, err := ingestbatch.MeasureLedger(batch)
-		if err != nil {
-			return nil, ingestbatch.Descriptor{}, err
-		}
-		encodedBytes += batchBytes
-		bronzeRows += batchRows
-		if encodedBytes > cfg.MaxEncodedBytes {
-			return nil, ingestbatch.Descriptor{}, fmt.Errorf("selected range exceeds --max-encoded-bytes: %d > %d", encodedBytes, cfg.MaxEncodedBytes)
-		}
-		if bronzeRows > cfg.MaxBronzeRows {
-			return nil, ingestbatch.Descriptor{}, fmt.Errorf("selected range exceeds --max-bronze-rows: %d > %d", bronzeRows, cfg.MaxBronzeRows)
-		}
-		batches = append(batches, batch)
-	}
-	descriptor, err := ingestbatch.Describe(batches)
-	if err != nil {
-		return nil, ingestbatch.Descriptor{}, err
-	}
-	if descriptor.LedgerStart != start || descriptor.LedgerEnd != end {
-		return nil, ingestbatch.Descriptor{}, fmt.Errorf("fixture produced range %d-%d, want %d-%d", descriptor.LedgerStart, descriptor.LedgerEnd, start, end)
-	}
-	return batches, descriptor, nil
 }
 
 func buildJob(cfg config, fixture *ledgerfixture.Manifest, start, end uint32) (backfillmanifest.JobManifest, backfillmanifest.ShardSpec, error) {

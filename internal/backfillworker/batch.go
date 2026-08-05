@@ -5,10 +5,10 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -22,6 +22,9 @@ type LedgerBatchConfig struct {
 	Parquet            ParquetConfig
 	DecodeWorkers      int
 	WatermarkWrittenAt time.Time
+	MaxEncodedBytes    uint64
+	MaxBronzeRows      uint64
+	MemoryLimit        string
 }
 
 type envelopeTable struct {
@@ -35,40 +38,19 @@ type envelopeTable struct {
 // per-ledger metadata and watermark tables needed for complete coverage. The
 // watermark timestamp is pinned by the job so retries remain byte-stable.
 func WriteLedgerBatchShard(ctx context.Context, cfg LedgerBatchConfig, batches []*componentsv1.LedgerBatch) (files []backfillmanifest.File, err error) {
-	if err := validateLedgerBatches(cfg, batches); err != nil {
-		return nil, err
-	}
-	decoded := bronze.DecodeTypedRowsBatches(batches, cfg.DecodeWorkers)
-	expectedCounts, err := expectedCompleteTableCounts(batches, decoded)
-	if err != nil {
-		return nil, err
-	}
-	typedFiles, err := WriteParquetShard(ctx, cfg.Parquet, decoded)
-	if err != nil {
-		return nil, err
-	}
-	files = append(files, typedFiles...)
-	defer func() {
-		if err != nil {
-			removeLocalArtifacts(files)
+	index := 0
+	result, err := WriteLedgerBatchStream(ctx, cfg, func() (*componentsv1.LedgerBatch, error) {
+		if index >= len(batches) {
+			return nil, io.EOF
 		}
-	}()
-
-	envelopeFiles, err := writeEnvelopeTables(ctx, cfg, batches)
-	if err != nil {
-		return nil, err
-	}
-	files = append(files, envelopeFiles...)
-	sort.Slice(files, func(i, j int) bool {
-		if files[i].Table != files[j].Table {
-			return files[i].Table < files[j].Table
-		}
-		return files[i].URI < files[j].URI
+		batch := batches[index]
+		index++
+		return batch, nil
 	})
-	if err := validateCompleteTableCounts(expectedCounts, files); err != nil {
+	if err != nil {
 		return nil, err
 	}
-	return files, nil
+	return result.Files, nil
 }
 
 func expectedCompleteTableCounts(batches []*componentsv1.LedgerBatch, decoded []bronze.DecodedRow) (map[string]uint64, error) {

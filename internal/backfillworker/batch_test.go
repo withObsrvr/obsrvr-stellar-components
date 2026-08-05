@@ -3,14 +3,17 @@ package backfillworker
 import (
 	"context"
 	"database/sql"
+	"io"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	componentsv1 "github.com/withObsrvr/obsrvr-stellar-components/gen/go/stellar/components/v1"
 	"github.com/withObsrvr/obsrvr-stellar-components/internal/backfillmanifest"
 	"github.com/withObsrvr/obsrvr-stellar-components/pkg/bronze"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestWriteLedgerBatchShardIncludesDeterministicMetadataAndWatermarks(t *testing.T) {
@@ -84,6 +87,65 @@ func TestWriteLedgerBatchShardRejectsUnsupportedBronzeRowsWithoutArtifacts(t *te
 	}
 	if len(matches) != 0 {
 		t.Fatalf("artifacts left after unsupported table rejection: %v", matches)
+	}
+}
+
+func TestWriteLedgerBatchStreamReportsOneBatchDecodeWindow(t *testing.T) {
+	batches := testLedgerBatches(100, 102)
+	for index := 0; index < 2; index++ {
+		row := proto.Clone(batches[1].BronzeRows[0]).(*componentsv1.BronzeRow)
+		row.Id = "extra"
+		batches[1].BronzeRows = append(batches[1].BronzeRows, row)
+	}
+	index := 0
+	result, err := WriteLedgerBatchStream(context.Background(), LedgerBatchConfig{
+		Parquet: ParquetConfig{
+			OutputDir:   t.TempDir(),
+			LedgerStart: 100,
+			LedgerEnd:   102,
+		},
+		DecodeWorkers:      2,
+		WatermarkWrittenAt: time.Date(2026, 8, 5, 0, 0, 0, 0, time.UTC),
+		MaxEncodedBytes:    1 << 20,
+		MaxBronzeRows:      10,
+	}, func() (*componentsv1.LedgerBatch, error) {
+		if index == len(batches) {
+			return nil, io.EOF
+		}
+		batch := batches[index]
+		batches[index] = nil
+		index++
+		return batch, nil
+	})
+	if err != nil {
+		t.Fatalf("write streamed shard: %v", err)
+	}
+	if result.Descriptor.LedgerCount != 3 || result.Descriptor.BronzeRows != 5 {
+		t.Fatalf("descriptor = %+v", result.Descriptor)
+	}
+	if result.PeakBatchBronzeRows != 3 || result.PeakBatchEncodedBytes == 0 {
+		t.Fatalf("peak batch window = %d rows / %d bytes", result.PeakBatchBronzeRows, result.PeakBatchEncodedBytes)
+	}
+	if len(result.Files) != 3 {
+		t.Fatalf("files = %d, want one typed table plus metadata and watermarks", len(result.Files))
+	}
+}
+
+func TestWriteLedgerBatchStreamRejectsInvalidMemoryLimit(t *testing.T) {
+	_, err := WriteLedgerBatchStream(context.Background(), LedgerBatchConfig{
+		Parquet: ParquetConfig{
+			OutputDir:   t.TempDir(),
+			LedgerStart: 100,
+			LedgerEnd:   100,
+		},
+		DecodeWorkers:      1,
+		WatermarkWrittenAt: time.Date(2026, 8, 5, 0, 0, 0, 0, time.UTC),
+		MemoryLimit:        "1GB'; DROP TABLE bronze.ledgers_row_v2; --",
+	}, func() (*componentsv1.LedgerBatch, error) {
+		return nil, io.EOF
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid DuckDB memory limit") {
+		t.Fatalf("WriteLedgerBatchStream error = %v, want invalid memory limit", err)
 	}
 }
 

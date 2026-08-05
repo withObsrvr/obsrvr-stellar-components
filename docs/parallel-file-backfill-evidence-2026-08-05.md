@@ -1,7 +1,7 @@
 # Parallel File Backfill: First Real-Ledger Evidence
 
 **Date:** 2026-08-05
-**Status:** Local file-worker smoke passed; catalog registration is not yet implemented
+**Status:** Bounded streaming and local scaling probes passed; 1,000 ledgers/s and catalog registration remain open
 
 This report covers the first executable slice of the parallel file-oriented
 backfill. It proves the boundary from a verified real `LedgerBatch` corpus to
@@ -12,9 +12,12 @@ cutover remain open.
 
 ## Implementation exercised
 
-- a bounded CLI reads and verifies a length-delimited fixture manifest
+- a bounded CLI reads a length-delimited fixture manifest and verifies each
+  selected chunk inline while streaming it exactly once
 - input is rejected before materialization when protobuf-byte or Bronze-row
   limits are exceeded
+- only one protobuf batch and its decoded Bronze rows are retained in Go at a
+  time; input bytes, row count, and DuckDB buffer memory have explicit limits
 - typed Bronze rows are decoded with one shared worker budget
 - every recognized table is loaded through the DuckDB Appender API into a
   disposable local database
@@ -24,8 +27,13 @@ cutover remain open.
 - unsupported Bronze table names fail closed before any Parquet is published
 - per-table source and output row counts must match before the result manifest
   is accepted
-- every artifact is size-bounded, schema-fingerprinted, SHA-256 hashed, and
-  published without overwrite
+- DuckDB rolls output near a configured file target at row-group boundaries;
+  every artifact also has a separate hard size maximum
+- every artifact is schema-fingerprinted, SHA-256 hashed, and published without
+  overwrite
+- `scripts/ducklake-file-backfill-benchmark.sh` plans disjoint local shards,
+  runs 1-N workers, records phase/resource evidence, and can enforce an
+  aggregate ledgers/s floor
 
 The worker uses `duckdb-go` `v2.10505.0` and its DuckDB 1.5.5 bindings. It does
 not load DuckLake; workers deliberately have no shared catalog authority.
@@ -86,6 +94,60 @@ workers before accounting for archive fetch, extraction, upload, validation,
 registration, skew, or contention. The experiment therefore validates the
 parallelization direction, not the fleet target.
 
+## Bounded-streaming and scaling probe
+
+The next implementation slice used 120 real mainnet ledgers,
+`62,080,000-62,080,119`, split into twelve independently hashed 10-ledger
+fixture chunks. The corpus contains 1,337,822,269 protobuf bytes and 974,166
+Bronze rows. A worker verifies only chunks overlapping its assigned range and
+never reads earlier chunks to seek to its start.
+
+The benchmark ran on an AMD Ryzen 9 7940HS with 8 physical cores / 16 logical
+CPUs and local NVMe. Each row below processed the same complete 120-ledger
+range as disjoint shards:
+
+| Workers | Aggregate ledgers/s | Rows/s | Input MB/s | Parallel efficiency | Peak RSS per worker |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 9.04 | 73,444 | 100.8 | 100.0% | 1,708,468 KiB |
+| 2 | 14.78 | 120,052 | 164.8 | 81.7% | 1,175,056 KiB |
+| 4 | 22.36 | 181,561 | 249.3 | 61.8% | 788,636 KiB |
+| 8 | 27.08 | 219,871 | 301.9 | 37.4% | 514,100 KiB |
+
+The final memory-limited one-worker critical path was 10.79 seconds of staging
+and 2.22 seconds of Parquet export. Staging was not dominated by one
+replaceable operation:
+
+```text
+fixture protobuf read/unmarshal/hash verification: 1.47s
+deterministic source-digest protobuf encoding:     1.27s
+typed JSON/reflection decode:                      2.92s
+DuckDB Appender calls:                             3.45s
+Appender close and other staging overhead:         1.53s
+Parquet export, hashing, and validation:            2.22s
+```
+
+Inline fixture verification removed a redundant filesystem pass but did not
+materially change the warm-cache result. The resource contract now also sets
+a `1GB` DuckDB buffer-manager limit by default. Total process RSS can exceed
+that limit because protobuf, decoded Go values, and driver allocations live
+outside DuckDB; the measured one-worker run peaked at 1.63 GiB even with the
+DuckDB limit active.
+
+This host does not meet the 1,000-ledger/s target. At the measured 8-worker
+rate it would need about 37 equivalent hosts, and the recent-ledger corpus
+implies approximately 11.15 GB/s of protobuf input, 8.12 million Bronze rows/s,
+and 516 MB/s of Parquet output at the target. These are capacity requirements,
+not a validated fleet projection. At exactly 1,000 ledgers/s, 63,804,680
+ledgers take 17.72 hours before archive extraction, publication, validation,
+registration, retries, or skew.
+
+The next throughput implementation priority is therefore a columnar worker
+spike: produce table-partitioned Arrow/Parquet directly from extraction, avoid
+the `LedgerBatch -> protobuf -> row JSON -> reflection -> DuckDB Appender`
+round trip, and compare it against this measured baseline. Distributed
+execution remains required, but adding workers to the present row-oriented
+path alone is not an honest route to the target.
+
 ## Correctness gates
 
 All of the following passed:
@@ -113,27 +175,28 @@ All of the following passed:
 ## Findings and next gates
 
 The current slice is correct for this bounded sample, but it is not ready to
-scale by simply increasing the shard size:
+claim the production throughput gate:
 
-1. Peak worker RSS was 2.1-2.4 GiB for only 30 recent ledgers. The command
-   retains the complete protobuf range and decoded row values. Streaming
-   decode into bounded per-table buffers and real file rolling are required
-   before a larger shard benchmark.
-2. The 256 MiB setting is currently a hard post-write rejection, not a rolling
-   policy. No file in this sample approached the target, so rolling remains
-   untested.
+1. The complete protobuf range and decoded row collection are no longer held
+   in Go memory, and deterministic rolling is covered by a forced small-target
+   regression. DuckDB plus driver memory is still substantial, so production
+   shard sizing must obey measured process RSS rather than the `1GB`
+   DuckDB-only limit.
+2. Local scaling falls from 81.7% efficiency at two workers to 37.4% at eight.
+   The current row-oriented representation and writer cannot be multiplied to
+   1,000 ledgers/s without an uneconomic CPU and input-bandwidth footprint.
 3. Retry artifacts are byte-stable, and the kill tests confirm that the result
    manifest is the acceptance boundary. A killed attempt still needs an
    attempt-scoped staging prefix plus orphan cleanup semantics. Reusing its
    partially occupied output directory correctly refuses overwrite; a fresh
    attempt directory is required.
-4. This sample exercises only one recent, dense era and one local worker. The
-   early/middle/pre-Soroban matrix and 1/4/16-worker scaling run remain
-   mandatory.
+4. This sample exercises only one recent, dense era and one local host. The
+   early/middle/pre-Soroban matrix and multi-host 1/4/16/32/64/128-worker run
+   remain mandatory.
 5. The next architectural gate is strict independent validation followed by
    transactional registration into a candidate DuckLake catalog. Until that
    exists, these files are artifacts, not queryable Obsrvr Lake history.
 
-The immediate implementation priority is therefore bounded streaming and
+The immediate implementation priority is the direct columnar writer spike and
 attempt-scoped publication, followed by the two-shard out-of-order
 registration/restart test described in the implementation plan.
