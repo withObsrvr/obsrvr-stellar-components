@@ -134,3 +134,12 @@ than add generic concurrency:
 3. evaluate transaction XDR buffer ownership and row-group sizing; and
 4. test source prefetch/caching separately from encoding so network variance
    does not obscure CPU improvements.
+
+Item 4 is complete. Archive prefetch, not encoding, was the dominant limit at
+the SDK defaults, and the two-process regression above is a shared source
+bandwidth ceiling rather than CPU contention. Measured under tuned prefetch,
+this range reaches 39.45 ledgers/s cold and 42.17 ledgers/s warm, and the
+four-worker, two-encoder knee re-validated network-free. Items 1 through 3
+remain open and should now be measured with `--stage` and a warm source cache
+so network variance is excluded. See
+[`bounded-source-prefetch-evidence-2026-08-06.md`](bounded-source-prefetch-evidence-2026-08-06.md).
