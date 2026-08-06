@@ -1,7 +1,7 @@
 # Parallel File Backfill Implementation Plan
 
 **Date:** 2026-08-05
-**Status:** Native Arrow worker, bounded extraction, and bounded row-group encoding passed; registration remains open
+**Status:** Native Arrow worker, bounded extraction, row-group encoding, and generated hot-table builders passed; registration remains open
 **Target stack:** DuckDB 1.5.5 with matching current DuckLake and Quack
 extensions
 
@@ -208,6 +208,18 @@ matched across every concurrency setting. The resulting per-table evidence
 selects generated typed builders and removal of redundant canonical sorts as
 the next worker optimization. See
 [`parallel-arrow-writer-evidence-2026-08-05.md`](parallel-arrow-writer-evidence-2026-08-05.md).
+
+Decision update, 2026-08-06: generate typed Arrow appenders for transactions,
+operations, effects, and token transfers from the authoritative Bronze specs.
+This removes the reflected `[]any` bridge while retaining schema checks, exact
+raw transaction XDR overrides, bounded row groups, and the generic writer as a
+parity oracle. The same 1,000-ledger GCS range improved from 35.22 to 37.32
+ledgers/s and produced byte-identical normalized file identities. Moving
+canonical sorting into extraction workers was rejected after it caused CPU
+contention and a 22.25-ledger/s regression. Two-process probes are now limited
+by concurrent source acquisition, while contract-event sort/build/encode and
+transaction XDR remain the largest single-worker costs. See
+[`typed-arrow-builder-evidence-2026-08-06.md`](typed-arrow-builder-evidence-2026-08-06.md).
 
 Partitioned output must avoid small-file explosion. DuckDB's own guidance is
 to keep partitions on the order of at least 100 MB; the exact file target is a

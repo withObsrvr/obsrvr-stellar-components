@@ -12,7 +12,6 @@ import (
 	componentsv1 "github.com/withObsrvr/obsrvr-stellar-components/gen/go/stellar/components/v1"
 	"github.com/withObsrvr/obsrvr-stellar-components/internal/ingestbatch"
 	"github.com/withObsrvr/obsrvr-stellar-components/pkg/bronze"
-	bronzeColumnar "github.com/withObsrvr/obsrvr-stellar-components/pkg/bronze/columnar"
 )
 
 // writeColumnarLedgerStream performs the same bounded source, extraction, and
@@ -22,7 +21,7 @@ import (
 func writeColumnarLedgerStream(ctx context.Context, cfg LedgerBatchConfig, nextBatch LedgerBatchSource, nextRaw RawLedgerSource, rawOpts RawLedgerOptions) (result StreamResult, resultErr error) {
 	started := time.Now()
 	if nextRaw != nil {
-		rawOpts.DirectContractEvents = true
+		rawOpts.DirectColumnarTables = true
 	}
 	if err := validateStreamingConfig(cfg, nextBatch, nextRaw, rawOpts); err != nil {
 		return StreamResult{}, err
@@ -167,12 +166,23 @@ func writeColumnarLedgerStream(ctx context.Context, cfg LedgerBatchConfig, nextB
 			tableCounts["bronze."+row.Spec.TableName]++
 		}
 		if rawLedger != nil && rawLedger.ExtractedData != nil {
-			contractEvents := rawLedger.ExtractedData.ContractEvents
-			if len(contractEvents) > 0 {
-				if err := columnar.appendContractEvents(sequence, contractEvents); err != nil {
-					return StreamResult{}, err
+			if err := columnar.appendExtractedData(
+				sequence,
+				rawLedger.ExtractedData,
+				rawLedger.TransactionOverrides,
+			); err != nil {
+				return StreamResult{}, err
+			}
+			for tableName, count := range map[string]int{
+				"bronze.contract_events_stream_v1": len(rawLedger.ExtractedData.ContractEvents),
+				"bronze.transactions_row_v2":       len(rawLedger.ExtractedData.Transactions),
+				"bronze.operations_row_v2":         len(rawLedger.ExtractedData.Operations),
+				"bronze.effects_row_v1":            len(rawLedger.ExtractedData.Effects),
+				"bronze.token_transfers_stream_v1": len(rawLedger.ExtractedData.TokenTransfers),
+			} {
+				if count > 0 {
+					tableCounts[tableName] += uint64(count)
 				}
-				tableCounts["bronze."+bronzeColumnar.ContractEventsTable] += uint64(len(contractEvents))
 			}
 		}
 		var envelope ledgerEnvelopeValues

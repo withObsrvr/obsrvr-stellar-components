@@ -164,6 +164,70 @@ func TestDirectContractEventsBuilderMatchesGenericColumnarValues(t *testing.T) {
 	}
 }
 
+func TestDirectHotBuildersMatchGenericColumnarArtifacts(t *testing.T) {
+	const sequence = uint32(777001)
+	createdAt := time.Date(2026, 8, 5, 12, 0, 0, 123456000, time.UTC)
+	text := "value"
+	operationID := int64(777001000002)
+	operationIndex := int32(2)
+	data := &extract.LedgerData{
+		Transactions: []extract.TransactionData{
+			{LedgerSequence: sequence, TransactionHash: "tx-b", SourceAccount: "GB", CreatedAt: createdAt, LedgerRange: sequence, TransactionID: 2},
+			{LedgerSequence: sequence, TransactionHash: "tx-a", SourceAccount: "GA", CreatedAt: createdAt, LedgerRange: sequence, TransactionID: 1},
+		},
+		Operations: []extract.OperationData{
+			{TransactionHash: "tx-b", OperationIndex: 2, LedgerSequence: sequence, SourceAccount: "GB", TypeString: "payment", CreatedAt: createdAt, LedgerRange: sequence, TransactionID: 2, OperationID: 2},
+			{TransactionHash: "tx-a", OperationIndex: 1, LedgerSequence: sequence, SourceAccount: "GA", TypeString: "payment", CreatedAt: createdAt, LedgerRange: sequence, ContractsInvolved: []string{"CA"}, TransactionID: 1, OperationID: 1},
+		},
+		Effects: []extract.EffectData{
+			{LedgerSequence: sequence, TransactionHash: "tx-b", OperationIndex: 2, EffectIndex: 1, EffectTypeString: "b", CreatedAt: createdAt, LedgerRange: sequence},
+			{LedgerSequence: sequence, TransactionHash: "tx-a", OperationIndex: 1, EffectIndex: 1, EffectTypeString: "a", CreatedAt: createdAt, LedgerRange: sequence},
+		},
+		TokenTransfers: []extract.TokenTransferData{
+			{LedgerSequence: sequence, TransactionHash: "tx-b", TransactionID: 2, OperationID: &operationID, OperationIndex: &operationIndex, EventType: "transfer", From: &text, Asset: "native", AssetType: "native", AmountRaw: "2", ClosedAt: createdAt, CreatedAt: createdAt, LedgerRange: sequence},
+			{LedgerSequence: sequence, TransactionHash: "tx-a", TransactionID: 1, EventType: "fee", To: &text, Asset: "native", AssetType: "native", AmountRaw: "1", ClosedAt: createdAt, CreatedAt: createdAt, LedgerRange: sequence},
+		},
+	}
+	overrides := bronze.TransactionOverrides{
+		"tx-a": {"tx_envelope": "envelope-a", "tx_result": "result-a", "tx_meta": "meta-a"},
+		"tx-b": {"tx_envelope": "envelope-b", "tx_result": "result-b", "tx_meta": "meta-b"},
+	}
+	cfg := ParquetConfig{
+		LedgerStart: sequence, LedgerEnd: sequence, Compression: "zstd",
+		FileTargetBytes: 16 << 20, FileMaxBytes: 32 << 20, RowGroupRows: 2048,
+	}
+	writeGeneric := func(outputDir string) []backfillmanifest.File {
+		cfg.OutputDir = outputDir
+		writer := newColumnarShardWriter(cfg, outputDir)
+		rows := bronze.ProjectLedgerData(data, overrides)
+		if err := writer.appendDecodedLedger(sequence, rows); err != nil {
+			t.Fatal(err)
+		}
+		files, err := writer.close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return files
+	}
+	writeDirect := func(outputDir string) []backfillmanifest.File {
+		cfg.OutputDir = outputDir
+		writer := newColumnarShardWriter(cfg, outputDir)
+		if err := writer.appendExtractedData(sequence, data, overrides); err != nil {
+			t.Fatal(err)
+		}
+		files, err := writer.close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return files
+	}
+	generic := fileLogicalIdentities(writeGeneric(t.TempDir()))
+	direct := fileLogicalIdentities(writeDirect(t.TempDir()))
+	if !reflect.DeepEqual(generic, direct) {
+		t.Fatalf("direct hot-table artifacts diverge from generic artifacts:\ngeneric=%v\ndirect=%v", generic, direct)
+	}
+}
+
 func TestArrowParquetFooterCanonicalizesEncodingStats(t *testing.T) {
 	const sequence = uint32(777001)
 	events := make([]extract.ContractEventData, 6_000)

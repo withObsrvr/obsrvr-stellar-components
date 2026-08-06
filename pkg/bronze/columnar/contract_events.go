@@ -73,6 +73,10 @@ func NewContractEventsBuilder(allocator memory.Allocator, reserve int) *Contract
 	return &ContractEventsBuilder{record: record}
 }
 
+func (builder *ContractEventsBuilder) Schema() *arrow.Schema {
+	return ContractEventsSchema
+}
+
 func (builder *ContractEventsBuilder) Release() {
 	if builder == nil || builder.record == nil {
 		return
