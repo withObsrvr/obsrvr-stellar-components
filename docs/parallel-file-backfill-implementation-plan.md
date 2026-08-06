@@ -1,7 +1,7 @@
 # Parallel File Backfill Implementation Plan
 
-**Date:** 2026-08-05
-**Status:** Native Arrow worker, bounded extraction, row-group encoding, and generated hot-table builders passed; registration remains open
+**Date:** 2026-08-06
+**Status:** Native Arrow worker, bounded extraction, row-group encoding, generated hot-table builders, and bounded source prefetch passed; registration remains open
 **Target stack:** DuckDB 1.5.5 with matching current DuckLake and Quack
 extensions
 
@@ -220,6 +220,26 @@ contention and a 22.25-ledger/s regression. Two-process probes are now limited
 by concurrent source acquisition, while contract-event sort/build/encode and
 transaction XDR remain the largest single-worker costs. See
 [`typed-arrow-builder-evidence-2026-08-06.md`](typed-arrow-builder-evidence-2026-08-06.md).
+
+Decision update, 2026-08-06: tune archive prefetch per worker and treat source
+acquisition as an independently provisioned resource. The SDK defaults of five
+buffered ledgers and two fetchers delivered only 20 ledgers/s of source on the
+test host and left the writer waiting 34.1 of 51.1 seconds. Forty buffered
+ledgers and sixteen fetchers is the measured knee; it doubles single-worker
+end-to-end throughput to 39.45 ledgers/s and reduces pipeline wait by 96%.
+Removing the network entirely adds only a further 5.7%, so a correctly
+prefetched worker is CPU-bound.
+
+Stage isolation (`--stage=source|extract|full`) and an evidence-only local raw
+ledger cache now make that attribution repeatable. Both probe stages publish
+nothing and report the same payload digest the artifact path computes. With
+those seams, the two-process regression resolves to a shared source ceiling:
+acquisition saturates near 100 MiB/s on this host and does not improve with
+more processes or fetchers, while the same host reaches 53.6 ledgers/s once the
+network is removed. Colocating shard workers on a bandwidth-saturated host is
+measurably negative. The four-worker, two-encoder concurrency knee was
+re-validated network-free and still stands. See
+[`bounded-source-prefetch-evidence-2026-08-06.md`](bounded-source-prefetch-evidence-2026-08-06.md).
 
 Partitioned output must avoid small-file explosion. DuckDB's own guidance is
 to keep partitions on the order of at least 100 MB; the exact file target is a
@@ -590,6 +610,13 @@ the following measurements:
 
 Stop adding workers when aggregate throughput flattens. The result should name
 the bottleneck instead of hiding it behind ledger/s.
+
+Measurements 1 and 2 are available as `--stage=source` and `--stage=extract`.
+Both publish nothing and report the artifact path's payload digest, so a fetch
+measurement is provably reading the shard's exact bytes. `--source-cache-dir`
+serves a fully cached range without contacting the object store, which
+separates CPU scaling from bandwidth scaling on a shared host. Every scale run
+must record the prefetch depth it used, because the default is not the knee.
 
 ### Failure matrix
 

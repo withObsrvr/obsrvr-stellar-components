@@ -25,6 +25,7 @@ import (
 	"github.com/withObsrvr/obsrvr-stellar-components/internal/backfillmanifest"
 	"github.com/withObsrvr/obsrvr-stellar-components/internal/backfillworker"
 	"github.com/withObsrvr/obsrvr-stellar-components/internal/ledgerfixture"
+	"github.com/withObsrvr/obsrvr-stellar-components/internal/rawledgercache"
 	"github.com/withObsrvr/obsrvr-stellar-components/pkg/bronze"
 	"github.com/withObsrvr/obsrvr-stellar-components/pkg/contracts"
 	"github.com/withObsrvr/stellar-raw-ledger-origin/source/ledgerstream"
@@ -32,6 +33,7 @@ import (
 
 type config struct {
 	Source              string
+	Stage               string
 	Fixtures            string
 	OutputDir           string
 	LedgerStart         uint
@@ -42,6 +44,10 @@ type config struct {
 	DecodeWorkers       int
 	ExtractWorkers      int
 	MaxInFlight         int
+	SourceBufferSize    uint
+	SourceWorkers       uint
+	SourceCacheDir      string
+	SourceCacheMaxBytes uint64
 	ParquetWriters      int
 	MaxPendingRowGroups int
 	Writer              string
@@ -57,8 +63,56 @@ type config struct {
 	WatermarkTime       string
 }
 
+// sourceSummary reports how the shard's raw ledger bytes were acquired. It is
+// shared by probe and artifact runs so a prefetch or cache change can be
+// compared across stages without re-deriving the configuration.
+type sourceSummary struct {
+	Source             string  `json:"source"`
+	Stage              string  `json:"stage"`
+	BufferSize         uint32  `json:"source_buffer_size"`
+	Workers            uint32  `json:"source_workers"`
+	CacheMode          string  `json:"source_cache_mode"`
+	CacheBytes         uint64  `json:"source_cache_bytes"`
+	CacheReadSeconds   float64 `json:"source_cache_read_seconds"`
+	CacheWriteSeconds  float64 `json:"source_cache_write_seconds"`
+	CacheVerifySeconds float64 `json:"source_cache_verify_seconds"`
+	CacheTruncated     bool    `json:"source_cache_truncated"`
+}
+
+// probeSummary is the evidence-only result of a measurement stage. It reports
+// no artifact fields because a probe deliberately produces none.
+type probeSummary struct {
+	sourceSummary
+	ExtractWorkers      int     `json:"extract_workers"`
+	MaxInFlight         int     `json:"max_inflight_ledgers"`
+	LedgerStart         uint32  `json:"ledger_start"`
+	LedgerEnd           uint32  `json:"ledger_end"`
+	Ledgers             uint32  `json:"ledgers"`
+	InputBytes          uint64  `json:"input_bytes"`
+	BronzeRows          uint64  `json:"bronze_rows"`
+	SourceDigest        string  `json:"source_digest"`
+	ElapsedSeconds      float64 `json:"elapsed_seconds"`
+	LedgersPerSecond    float64 `json:"ledgers_per_second"`
+	BytesPerSecond      float64 `json:"input_bytes_per_second"`
+	SourceSeconds       float64 `json:"source_seconds"`
+	DigestSeconds       float64 `json:"digest_seconds"`
+	ExtractionSeconds   float64 `json:"extraction_seconds"`
+	RawViewSeconds      float64 `json:"raw_view_seconds"`
+	RawDecodeSeconds    float64 `json:"raw_decode_seconds"`
+	RawExtractSeconds   float64 `json:"raw_extract_seconds"`
+	RawPinSeconds       float64 `json:"raw_pin_seconds"`
+	RawEnvelopeSeconds  float64 `json:"raw_envelope_seconds"`
+	RawProjectSeconds   float64 `json:"raw_project_seconds"`
+	RawCopySeconds      float64 `json:"raw_copy_seconds"`
+	PipelineWaitSeconds float64 `json:"pipeline_wait_seconds"`
+	RawCopiedBytes      uint64  `json:"raw_copied_bytes"`
+	PeakInFlightLedgers int     `json:"peak_inflight_ledgers"`
+	PeakReorderBuffered int     `json:"peak_reorder_buffered_ledgers"`
+	PeakLedgerBytes     uint64  `json:"peak_ledger_bytes"`
+}
+
 type runSummary struct {
-	Source                      string                                     `json:"source"`
+	sourceSummary
 	Writer                      string                                     `json:"writer"`
 	ExtractWorkers              int                                        `json:"extract_workers"`
 	MaxInFlight                 int                                        `json:"max_inflight_ledgers"`
@@ -67,6 +121,7 @@ type runSummary struct {
 	JobID                       string                                     `json:"job_id"`
 	ShardID                     string                                     `json:"shard_id"`
 	GenerationDigest            string                                     `json:"generation_digest"`
+	SourceDigest                string                                     `json:"source_digest"`
 	LedgerStart                 uint32                                     `json:"ledger_start"`
 	LedgerEnd                   uint32                                     `json:"ledger_end"`
 	Ledgers                     uint32                                     `json:"ledgers"`
@@ -140,6 +195,11 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		return fmt.Errorf("create output directory: %w", err)
 	}
 
+	stage, err := backfillworker.ParseProbeStage(cfg.Stage)
+	if err != nil {
+		return err
+	}
+
 	var (
 		start       uint32
 		end         uint32
@@ -147,6 +207,8 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		batchNext   backfillworker.LedgerBatchSource
 		rawNext     backfillworker.RawLedgerSource
 		closeSource func()
+		cacheStats  *rawledgercache.Stats
+		sourceInfo  = sourceSummary{Source: cfg.Source, Stage: string(stage), CacheMode: rawledgercache.ModeDisabled}
 	)
 	switch cfg.Source {
 	case "fixture":
@@ -181,22 +243,57 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 			return err
 		}
 		streamConfig := ledgerstream.ConfigFromEnv()
-		stream, err := ledgerstream.New(streamConfig)
-		if err != nil {
-			return fmt.Errorf("create ledger stream: %w", err)
+		if cfg.SourceBufferSize > 0 {
+			streamConfig.BufferSize = uint32(cfg.SourceBufferSize)
 		}
+		if cfg.SourceWorkers > 0 {
+			streamConfig.NumWorkers = uint32(cfg.SourceWorkers)
+		}
+		sourceInfo.BufferSize = streamConfig.BufferSize
+		sourceInfo.Workers = streamConfig.NumWorkers
 		source, err = ledgerStreamJobSource(streamConfig)
 		if err != nil {
 			return err
 		}
-		next, stop := iter.Pull2(stream.RawLedgers(ctx, ledgerbackend.BoundedRange(start, end)))
-		closeSource = stop
-		rawNext = func() ([]byte, error) {
-			raw, streamErr, ok := next()
-			if !ok {
-				return nil, io.EOF
+
+		var cache *rawledgercache.Cache
+		if cfg.SourceCacheDir != "" {
+			cache, err = rawledgercache.New(cfg.SourceCacheDir, streamConfig.NetworkPassphrase, cfg.SourceCacheMaxBytes)
+			if err != nil {
+				return err
 			}
-			return raw, streamErr
+		}
+		if cache != nil && cache.Complete(start, end) {
+			// A fully cached range is served without constructing the object
+			// store backend at all, so a warm run measures local CPU only.
+			rawNext, cacheStats, err = cachedRawSource(cache, start, end)
+			if err != nil {
+				return err
+			}
+			closeSource = func() {}
+			// No object store backend exists on this path, so reporting a
+			// prefetch depth would misattribute the measurement.
+			sourceInfo.BufferSize = 0
+			sourceInfo.Workers = 0
+		} else {
+			stream, streamErr := ledgerstream.New(streamConfig)
+			if streamErr != nil {
+				return fmt.Errorf("create ledger stream: %w", streamErr)
+			}
+			next, stop := iter.Pull2(stream.RawLedgers(ctx, ledgerbackend.BoundedRange(start, end)))
+			closeSource = stop
+			rawNext = func() ([]byte, error) {
+				raw, pullErr, ok := next()
+				if !ok {
+					return nil, io.EOF
+				}
+				return raw, pullErr
+			}
+			if cache != nil {
+				var populated rawledgercache.Source
+				populated, cacheStats = cache.Populate(rawledgercache.Source(rawNext), start, end)
+				rawNext = backfillworker.RawLedgerSource(populated)
+			}
 		}
 	default:
 		return fmt.Errorf("unsupported --source %q", cfg.Source)
@@ -230,17 +327,30 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		MaxBronzeRows:       cfg.MaxBronzeRows,
 		MemoryLimit:         cfg.MemoryLimit,
 	}
+	rawOptions := backfillworker.RawLedgerOptions{
+		NetworkPassphrase: source.NetworkPassphrase,
+		SchemaVersion:     contracts.SchemaVersion,
+		ExtractionVersion: source.ExtractorVersion,
+		MaterializedAt:    writtenAt,
+		ProjectWorkers:    cfg.DecodeWorkers,
+	}
+	if stage != backfillworker.ProbeStageFull {
+		if rawNext == nil {
+			return fmt.Errorf("--stage=%s requires --source=ledger-stream", stage)
+		}
+		probe, err := backfillworker.MeasureRawLedgerStream(ctx, workerConfig, rawOptions, rawNext, stage)
+		if err != nil {
+			return err
+		}
+		applyCacheStats(&sourceInfo, cacheStats)
+		return writeJSON(stdout, probeRunSummary(cfg, sourceInfo, probe, time.Since(started)))
+	}
+
 	var stream backfillworker.StreamResult
 	if batchNext != nil {
 		stream, err = backfillworker.WriteLedgerBatchStream(ctx, workerConfig, batchNext)
 	} else {
-		stream, err = backfillworker.WriteRawLedgerStream(ctx, workerConfig, backfillworker.RawLedgerOptions{
-			NetworkPassphrase: source.NetworkPassphrase,
-			SchemaVersion:     contracts.SchemaVersion,
-			ExtractionVersion: source.ExtractorVersion,
-			MaterializedAt:    writtenAt,
-			ProjectWorkers:    cfg.DecodeWorkers,
-		}, rawNext)
+		stream, err = backfillworker.WriteRawLedgerStream(ctx, workerConfig, rawOptions, rawNext)
 	}
 	if err != nil {
 		return err
@@ -295,8 +405,9 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		return err
 	}
 	elapsed := completed.Sub(started)
+	applyCacheStats(&sourceInfo, cacheStats)
 	summary := runSummary{
-		Source:                      cfg.Source,
+		sourceSummary:               sourceInfo,
 		Writer:                      cfg.Writer,
 		ExtractWorkers:              cfg.ExtractWorkers,
 		MaxInFlight:                 cfg.MaxInFlight,
@@ -305,6 +416,7 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		JobID:                       job.JobID,
 		ShardID:                     shard.ShardID,
 		GenerationDigest:            result.GenerationDigest,
+		SourceDigest:                result.SourceDigest,
 		LedgerStart:                 start,
 		LedgerEnd:                   end,
 		Ledgers:                     descriptor.LedgerCount,
@@ -349,9 +461,69 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		summary.RowsPerSecond = float64(summary.OutputRows) / elapsed.Seconds()
 		summary.BytesPerSecond = float64(summary.InputBytes) / elapsed.Seconds()
 	}
+	return writeJSON(stdout, summary)
+}
+
+func writeJSON(stdout io.Writer, value any) error {
 	encoder := json.NewEncoder(stdout)
 	encoder.SetIndent("", "  ")
-	return encoder.Encode(summary)
+	return encoder.Encode(value)
+}
+
+// cachedRawSource serves a fully cached range without opening the object store.
+func cachedRawSource(cache *rawledgercache.Cache, start, end uint32) (backfillworker.RawLedgerSource, *rawledgercache.Stats, error) {
+	reader, stats, err := cache.Reader(start, end)
+	if err != nil {
+		return nil, nil, err
+	}
+	return backfillworker.RawLedgerSource(reader), stats, nil
+}
+
+func applyCacheStats(info *sourceSummary, stats *rawledgercache.Stats) {
+	if info == nil || stats == nil {
+		return
+	}
+	info.CacheMode = stats.Mode
+	info.CacheBytes = stats.Bytes
+	info.CacheReadSeconds = stats.ReadDuration.Seconds()
+	info.CacheWriteSeconds = stats.WriteDuration.Seconds()
+	info.CacheVerifySeconds = stats.VerifyDuration.Seconds()
+	info.CacheTruncated = stats.Truncated
+}
+
+func probeRunSummary(cfg config, info sourceSummary, probe backfillworker.ProbeResult, elapsed time.Duration) probeSummary {
+	summary := probeSummary{
+		sourceSummary:       info,
+		ExtractWorkers:      cfg.ExtractWorkers,
+		MaxInFlight:         cfg.MaxInFlight,
+		LedgerStart:         probe.Descriptor.LedgerStart,
+		LedgerEnd:           probe.Descriptor.LedgerEnd,
+		Ledgers:             probe.Descriptor.LedgerCount,
+		InputBytes:          probe.Descriptor.EncodedBytes,
+		BronzeRows:          probe.Descriptor.BronzeRows,
+		SourceDigest:        "sha256:" + probe.Descriptor.PayloadSHA256,
+		ElapsedSeconds:      elapsed.Seconds(),
+		SourceSeconds:       probe.SourceDuration.Seconds(),
+		DigestSeconds:       probe.DigestDuration.Seconds(),
+		ExtractionSeconds:   probe.ExtractionDuration.Seconds(),
+		RawViewSeconds:      probe.RawViewDuration.Seconds(),
+		RawDecodeSeconds:    probe.RawDecodeDuration.Seconds(),
+		RawExtractSeconds:   probe.RawExtractDuration.Seconds(),
+		RawPinSeconds:       probe.RawPinDuration.Seconds(),
+		RawEnvelopeSeconds:  probe.RawEnvelopeDuration.Seconds(),
+		RawProjectSeconds:   probe.RawProjectDuration.Seconds(),
+		RawCopySeconds:      probe.RawCopyDuration.Seconds(),
+		PipelineWaitSeconds: probe.RawPipelineWait.Seconds(),
+		RawCopiedBytes:      probe.RawCopiedBytes,
+		PeakInFlightLedgers: probe.PeakInFlightLedgers,
+		PeakReorderBuffered: probe.PeakReorderBuffered,
+		PeakLedgerBytes:     probe.PeakLedgerBytes,
+	}
+	if elapsed > 0 {
+		summary.LedgersPerSecond = float64(summary.Ledgers) / elapsed.Seconds()
+		summary.BytesPerSecond = float64(summary.InputBytes) / elapsed.Seconds()
+	}
+	return summary
 }
 
 func parseConfig(args []string, output io.Writer) (config, error) {
@@ -359,6 +531,7 @@ func parseConfig(args []string, output io.Writer) (config, error) {
 	flags := flag.NewFlagSet("ducklake-backfill-worker", flag.ContinueOnError)
 	flags.SetOutput(output)
 	flags.StringVar(&cfg.Source, "source", "fixture", "input source: fixture or ledger-stream")
+	flags.StringVar(&cfg.Stage, "stage", string(backfillworker.ProbeStageFull), "pipeline stage: source or extract measure only and publish nothing; full produces artifacts")
 	flags.StringVar(&cfg.Fixtures, "fixtures", "", "LedgerBatch fixture manifest (required for --source=fixture)")
 	flags.StringVar(&cfg.OutputDir, "output", "", "new shard output directory (required)")
 	flags.UintVar(&cfg.LedgerStart, "start-ledger", 0, "inclusive ledger start; defaults to fixture start")
@@ -369,6 +542,10 @@ func parseConfig(args []string, output io.Writer) (config, error) {
 	flags.IntVar(&cfg.DecodeWorkers, "decode-workers", min(runtime.NumCPU(), 8), "bounded decode worker count")
 	flags.IntVar(&cfg.ExtractWorkers, "extract-workers", 1, "concurrent raw-ledger decode/extract workers for Arrow ledger-stream mode")
 	flags.IntVar(&cfg.MaxInFlight, "max-inflight-ledgers", 0, "hard raw-ledger pipeline bound; defaults to twice extract-workers")
+	flags.UintVar(&cfg.SourceBufferSize, "source-buffer-size", 0, "archive read-ahead buffer depth; overrides BUFFER_SIZE when positive")
+	flags.UintVar(&cfg.SourceWorkers, "source-workers", 0, "concurrent archive object fetchers; overrides NUM_WORKERS when positive")
+	flags.StringVar(&cfg.SourceCacheDir, "source-cache-dir", "", "evidence-only local raw ledger cache directory; empty disables caching")
+	flags.Uint64Var(&cfg.SourceCacheMaxBytes, "source-cache-max-bytes", 8<<30, "hard byte ceiling for one cached range; caching stops rather than exceeding it")
 	flags.IntVar(&cfg.ParquetWriters, "parquet-writers", 1, "concurrent Parquet row-group encoders for Arrow writer mode")
 	flags.IntVar(&cfg.MaxPendingRowGroups, "max-pending-row-groups", 0, "hard immutable Arrow row-group bound; defaults to twice parquet-writers")
 	flags.StringVar(&cfg.Writer, "writer", backfillworker.WriterDuckDBAppender, "worker writer: duckdb-appender or arrow-parquet")
@@ -389,6 +566,7 @@ func parseConfig(args []string, output io.Writer) (config, error) {
 		return cfg, fmt.Errorf("unexpected positional arguments: %v", flags.Args())
 	}
 	cfg.Source = strings.ToLower(strings.TrimSpace(cfg.Source))
+	cfg.Stage = strings.ToLower(strings.TrimSpace(cfg.Stage))
 	cfg.Writer = strings.ToLower(strings.TrimSpace(cfg.Writer))
 	cfg.Compression = strings.ToLower(strings.TrimSpace(cfg.Compression))
 	if cfg.MaxInFlight == 0 && cfg.ExtractWorkers > 0 {
@@ -402,6 +580,22 @@ func parseConfig(args []string, output io.Writer) (config, error) {
 	}
 	if cfg.Source != "fixture" && cfg.Source != "ledger-stream" {
 		return cfg, fmt.Errorf("--source must be fixture or ledger-stream")
+	}
+	stage, err := backfillworker.ParseProbeStage(cfg.Stage)
+	if err != nil {
+		return cfg, err
+	}
+	if stage != backfillworker.ProbeStageFull && cfg.Source != "ledger-stream" {
+		return cfg, fmt.Errorf("--stage=%s requires --source=ledger-stream", stage)
+	}
+	if cfg.SourceBufferSize > uint(^uint32(0)) || cfg.SourceWorkers > uint(^uint32(0)) {
+		return cfg, fmt.Errorf("--source-buffer-size and --source-workers must fit uint32")
+	}
+	if cfg.Source != "ledger-stream" && (cfg.SourceCacheDir != "" || cfg.SourceBufferSize > 0 || cfg.SourceWorkers > 0) {
+		return cfg, fmt.Errorf("--source-cache-dir, --source-buffer-size, and --source-workers apply only to --source=ledger-stream")
+	}
+	if cfg.SourceCacheDir != "" && cfg.SourceCacheMaxBytes == 0 {
+		return cfg, fmt.Errorf("--source-cache-max-bytes must be positive when caching is enabled")
 	}
 	if cfg.Writer != backfillworker.WriterDuckDBAppender && cfg.Writer != backfillworker.WriterArrowParquet {
 		return cfg, fmt.Errorf("--writer must be %s or %s", backfillworker.WriterDuckDBAppender, backfillworker.WriterArrowParquet)

@@ -4,6 +4,10 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 worker_bin="${BACKFILL_WORKER_BIN:-$repo_root/bin/ducklake-backfill-worker}"
 backfill_source="${BACKFILL_SOURCE:-fixture}"
+backfill_stage="${BACKFILL_STAGE:-full}"
+source_buffer_size="${BACKFILL_SOURCE_BUFFER_SIZE:-0}"
+source_workers="${BACKFILL_SOURCE_WORKERS:-0}"
+source_cache_dir="${BACKFILL_SOURCE_CACHE_DIR:-}"
 fixture_manifest="${BACKFILL_FIXTURE_MANIFEST:-${1:-}}"
 concurrency="${BACKFILL_CONCURRENCY:-1}"
 minimum_lps="${BACKFILL_MIN_AGGREGATE_LPS:-0}"
@@ -50,6 +54,24 @@ if [[ -z "$max_pending_row_groups" ]]; then
 fi
 if [[ ! "$max_pending_row_groups" =~ ^[1-9][0-9]*$ || "$max_pending_row_groups" -lt "$parquet_writers" ]]; then
   echo "BACKFILL_MAX_PENDING_ROW_GROUPS must be at least BACKFILL_PARQUET_WRITERS" >&2
+  exit 2
+fi
+
+case "$backfill_stage" in
+  full) ;;
+  source|extract)
+    if [[ "$backfill_source" != "ledger-stream" ]]; then
+      echo "BACKFILL_STAGE=$backfill_stage requires BACKFILL_SOURCE=ledger-stream" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "BACKFILL_STAGE must be source, extract, or full" >&2
+    exit 2
+    ;;
+esac
+if [[ ! "$source_buffer_size" =~ ^[0-9]+$ || ! "$source_workers" =~ ^[0-9]+$ ]]; then
+  echo "BACKFILL_SOURCE_BUFFER_SIZE and BACKFILL_SOURCE_WORKERS must be non-negative integers" >&2
   exit 2
 fi
 
@@ -126,6 +148,9 @@ for ((worker_index = 0; worker_index < concurrency; worker_index++)); do
   command=(
     "$worker_bin"
     --source "$backfill_source"
+    --stage "$backfill_stage"
+    --source-buffer-size "$source_buffer_size"
+    --source-workers "$source_workers"
     --output "$worker_output"
     --start-ledger "$shard_start"
     --end-ledger "$shard_end"
@@ -149,6 +174,9 @@ for ((worker_index = 0; worker_index < concurrency; worker_index++)); do
   )
   if [[ "$backfill_source" == "fixture" ]]; then
     command+=(--fixtures "$fixture_manifest")
+  fi
+  if [[ -n "$source_cache_dir" ]]; then
+    command+=(--source-cache-dir "$source_cache_dir")
   fi
   if [[ -n "$time_bin" ]]; then
     "$time_bin" -f 'max_rss_kib=%M\nuser_seconds=%U\nsystem_seconds=%S' -o "$worker_resource" "${command[@]}" >"$worker_summary" &
@@ -180,19 +208,71 @@ for worker_summary in "$evidence_dir"/worker-*.summary.json; do
     max_rss_kib="$(awk -F= '$1 == "max_rss_kib" { print $2 }' "$worker_resource")"
     max_rss_kib="${max_rss_kib:-0}"
   fi
-  job_evidence="$evidence_dir/$worker_id.job.manifest.json"
-  result_evidence="$evidence_dir/$worker_id.shard-result.manifest.json"
-  cp "$outputs_dir/$worker_id/job.manifest.json" "$job_evidence"
-  cp "$outputs_dir/$worker_id/shard-result.manifest.json" "$result_evidence"
   enriched_summary="$worker_summary.enriched"
-  jq \
-    --argjson max_rss_kib "$max_rss_kib" \
-    --arg job_manifest "$job_evidence" \
-    --arg result_manifest "$result_evidence" \
-    '. + {max_rss_kib: $max_rss_kib, job_manifest: $job_manifest, result_manifest: $result_manifest}' \
-    "$worker_summary" >"$enriched_summary"
+  if [[ "$backfill_stage" == "full" ]]; then
+    job_evidence="$evidence_dir/$worker_id.job.manifest.json"
+    result_evidence="$evidence_dir/$worker_id.shard-result.manifest.json"
+    cp "$outputs_dir/$worker_id/job.manifest.json" "$job_evidence"
+    cp "$outputs_dir/$worker_id/shard-result.manifest.json" "$result_evidence"
+    jq \
+      --argjson max_rss_kib "$max_rss_kib" \
+      --arg job_manifest "$job_evidence" \
+      --arg result_manifest "$result_evidence" \
+      '. + {max_rss_kib: $max_rss_kib, job_manifest: $job_manifest, result_manifest: $result_manifest}' \
+      "$worker_summary" >"$enriched_summary"
+  else
+    jq --argjson max_rss_kib "$max_rss_kib" '. + {max_rss_kib: $max_rss_kib}' \
+      "$worker_summary" >"$enriched_summary"
+  fi
   mv "$enriched_summary" "$worker_summary"
 done
+
+if [[ "$backfill_stage" != "full" ]]; then
+  jq -s \
+    --argjson workers "$concurrency" \
+    --argjson wall_seconds "$wall_seconds" \
+    --arg source "$backfill_source" \
+    --arg stage "$backfill_stage" \
+    --argjson extract_workers "$extract_workers" \
+    --argjson max_inflight_ledgers "$max_inflight_ledgers" \
+    '
+      {
+        workers: $workers,
+        source: $source,
+        stage: $stage,
+        extract_workers: $extract_workers,
+        max_inflight_ledgers: $max_inflight_ledgers,
+        source_buffer_size: (map(.source_buffer_size) | max),
+        source_workers: (map(.source_workers) | max),
+        source_cache_mode: (map(.source_cache_mode) | unique | join(",")),
+        wall_seconds: $wall_seconds,
+        ledgers: (map(.ledgers) | add),
+        input_bytes: (map(.input_bytes) | add),
+        bronze_rows: (map(.bronze_rows) | add),
+        source_digests: (map(.source_digest) | unique),
+        peak_worker_rss_kib: (map(.max_rss_kib) | max),
+        critical_worker_source_seconds: (map(.source_seconds) | max),
+        critical_worker_digest_seconds: (map(.digest_seconds) | max),
+        critical_worker_extraction_seconds: (map(.extraction_seconds) | max),
+        critical_worker_raw_decode_seconds: (map(.raw_decode_seconds) | max),
+        critical_worker_raw_extract_seconds: (map(.raw_extract_seconds) | max),
+        critical_worker_raw_envelope_seconds: (map(.raw_envelope_seconds) | max),
+        critical_worker_raw_project_seconds: (map(.raw_project_seconds) | max),
+        critical_worker_raw_copy_seconds: (map(.raw_copy_seconds) | max),
+        critical_worker_pipeline_wait_seconds: (map(.pipeline_wait_seconds) | max),
+        critical_worker_cache_read_seconds: (map(.source_cache_read_seconds) | max),
+        critical_worker_cache_write_seconds: (map(.source_cache_write_seconds) | max),
+        peak_inflight_ledgers: (map(.peak_inflight_ledgers) | max),
+        peak_ledger_bytes: (map(.peak_ledger_bytes) | max),
+        workers_detail: .
+      }
+      | .aggregate_ledgers_per_second = (.ledgers / .wall_seconds)
+      | .aggregate_input_bytes_per_second = (.input_bytes / .wall_seconds)
+    ' "$evidence_dir"/worker-*.summary.json >"$evidence_dir/aggregate.json"
+  cat "$evidence_dir/aggregate.json"
+  echo "evidence: $evidence_dir" >&2
+  exit 0
+fi
 
 jq -s \
   --argjson workers "$concurrency" \
@@ -209,6 +289,11 @@ jq -s \
     {
       workers: $workers,
       source: $source,
+      stage: "full",
+      source_buffer_size: (map(.source_buffer_size) | max),
+      source_workers: (map(.source_workers) | max),
+      source_cache_mode: (map(.source_cache_mode) | unique | join(",")),
+      source_digests: (map(.source_digest) | unique),
       extract_workers: $extract_workers,
       max_inflight_ledgers: $max_inflight_ledgers,
       parquet_writers: $parquet_writers,

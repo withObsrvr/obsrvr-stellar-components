@@ -175,6 +175,18 @@ The topology is not production-approved until these are complete:
    prefetch/caching and contract-event work are the next measured constraints.
    See
    [`typed-arrow-builder-evidence-2026-08-06.md`](typed-arrow-builder-evidence-2026-08-06.md).
+11. Backfill workers can now measure a source or extraction stage without
+   publishing artifacts, override archive prefetch per run, and serve a fully
+   cached ledger range from local disk. The SDK's default prefetch delivered
+   only 20 ledgers/s of source and left the writer waiting 34.1 of 51.1
+   seconds; 40 buffered ledgers with 16 fetchers doubled end-to-end throughput
+   to 39.45 ledgers/s, and a warm cache reached 42.17. Acquisition saturates
+   near 100 MiB/s on the test host regardless of process count, while the same
+   host reaches 53.6 ledgers/s with the network removed, so the two-process
+   regression is shared source bandwidth rather than CPU contention. Artifact
+   identity was unchanged across every prefetch depth, process count, and cache
+   mode. See
+   [`bounded-source-prefetch-evidence-2026-08-06.md`](bounded-source-prefetch-evidence-2026-08-06.md).
 
 ## Operational constraints and residual risks
 

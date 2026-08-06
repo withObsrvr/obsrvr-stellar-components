@@ -133,6 +133,67 @@ func TestParseConfigRejectsPendingRowGroupsBelowParquetWriters(t *testing.T) {
 	}
 }
 
+func TestParseConfigAcceptsSourceProbeAndPrefetchOverrides(t *testing.T) {
+	cacheDir := t.TempDir()
+	cfg, err := parseConfig([]string{
+		"--source", "ledger-stream",
+		"--stage", "SOURCE",
+		"--output", t.TempDir(),
+		"--start-ledger", "100",
+		"--end-ledger", "101",
+		"--source-buffer-size", "32",
+		"--source-workers", "16",
+		"--source-cache-dir", cacheDir,
+		"--source-cache-max-bytes", "1024",
+	}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parse probe config: %v", err)
+	}
+	if cfg.Stage != "source" || cfg.SourceBufferSize != 32 || cfg.SourceWorkers != 16 {
+		t.Fatalf("probe config = %+v", cfg)
+	}
+	if cfg.SourceCacheDir != cacheDir || cfg.SourceCacheMaxBytes != 1024 {
+		t.Fatalf("cache config = %+v", cfg)
+	}
+}
+
+func TestParseConfigRejectsProbeStagesWithoutALedgerStream(t *testing.T) {
+	for _, stage := range []string{"source", "extract"} {
+		if _, err := parseConfig([]string{
+			"--fixtures", "fixture.manifest.json",
+			"--output", t.TempDir(),
+			"--stage", stage,
+		}, &bytes.Buffer{}); err == nil {
+			t.Fatalf("parseConfig accepted --stage=%s against a fixture source", stage)
+		}
+	}
+}
+
+func TestParseConfigRejectsUnknownStages(t *testing.T) {
+	if _, err := parseConfig([]string{
+		"--source", "ledger-stream",
+		"--output", t.TempDir(),
+		"--start-ledger", "100",
+		"--end-ledger", "101",
+		"--stage", "parquet",
+	}, &bytes.Buffer{}); err == nil {
+		t.Fatal("parseConfig accepted an unknown stage")
+	}
+}
+
+func TestParseConfigDefaultsToArtifactProducingStage(t *testing.T) {
+	cfg, err := parseConfig([]string{
+		"--fixtures", "fixture.manifest.json",
+		"--output", t.TempDir(),
+	}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parse default config: %v", err)
+	}
+	if cfg.Stage != "full" || cfg.SourceCacheDir != "" {
+		t.Fatalf("default stage/cache = %q/%q, want full and no cache", cfg.Stage, cfg.SourceCacheDir)
+	}
+}
+
 func TestSelectedStreamRangeRequiresExplicitBoundedRange(t *testing.T) {
 	for _, cfg := range []config{
 		{LedgerStart: 100},
