@@ -157,6 +157,15 @@ The topology is not production-approved until these are complete:
    interval, making parallel table encoding and direct builders the next
    measured constraint. See
    [`bounded-arrow-pipeline-evidence-2026-08-05.md`](bounded-arrow-pipeline-evidence-2026-08-05.md).
+9. Arrow row-group encoding now runs through per-table ordered queues with
+   global active and pending bounds. On the same 1,000-ledger GCS range, two
+   encoders and four pending row groups reached 35.22 ledgers/s, 43% above the
+   previous synchronous writer baseline. One, two, four, and eight encoder
+   configurations produced identical normalized file identities. Four writers
+   were flat and eight regressed; a two-process probe reached 40.59 aggregate
+   ledgers/s and exposed host CPU contention. Per-table evidence makes typed
+   builders and contract-event sort removal the next measured constraint. See
+   [`parallel-arrow-writer-evidence-2026-08-05.md`](parallel-arrow-writer-evidence-2026-08-05.md).
 
 ## Operational constraints and residual risks
 

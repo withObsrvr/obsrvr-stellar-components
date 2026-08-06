@@ -54,7 +54,23 @@ type StreamResult struct {
 	RawCopiedBytes        uint64
 	PeakInFlightLedgers   int
 	PeakReorderBuffered   int
+	ParquetAdmissionWait  time.Duration
+	ParquetEncodeDuration time.Duration
+	ParquetDrainWait      time.Duration
+	PeakParquetWriters    int
+	PeakPendingRowGroups  int
+	TableWriterStats      map[string]TableWriterStats
 	AppendDuration        time.Duration
+}
+
+type TableWriterStats struct {
+	Rows                 uint64  `json:"rows"`
+	RecordBatches        uint64  `json:"record_batches"`
+	OutputBytes          uint64  `json:"output_bytes"`
+	SortSeconds          float64 `json:"sort_seconds"`
+	BuildSeconds         float64 `json:"build_seconds"`
+	AdmissionWaitSeconds float64 `json:"admission_wait_seconds"`
+	EncodeWorkerSeconds  float64 `json:"encode_worker_seconds"`
 }
 
 type streamingAppender struct {
@@ -347,12 +363,16 @@ func validateStreamingConfig(cfg LedgerBatchConfig, nextBatch LedgerBatchSource,
 	if cfg.DecodeWorkers <= 0 {
 		return fmt.Errorf("decode workers must be positive")
 	}
-	if cfg.RawExtractWorkers < 0 || cfg.MaxInFlightLedgers < 0 {
-		return fmt.Errorf("raw extract workers and max in-flight ledgers cannot be negative")
+	if cfg.RawExtractWorkers < 0 || cfg.MaxInFlightLedgers < 0 || cfg.ParquetWriters < 0 || cfg.MaxPendingRowGroups < 0 {
+		return fmt.Errorf("raw extract and Parquet writer concurrency cannot be negative")
 	}
 	rawWorkers := effectiveRawExtractWorkers(cfg)
 	if nextRaw != nil && cfg.MaxInFlightLedgers > 0 && cfg.MaxInFlightLedgers < rawWorkers {
 		return fmt.Errorf("max in-flight ledgers %d must be at least raw extract workers %d", cfg.MaxInFlightLedgers, rawWorkers)
+	}
+	parquetWriters := effectiveParquetWriters(cfg)
+	if cfg.MaxPendingRowGroups > 0 && cfg.MaxPendingRowGroups < parquetWriters {
+		return fmt.Errorf("max pending row groups %d must be at least parquet writer workers %d", cfg.MaxPendingRowGroups, parquetWriters)
 	}
 	if cfg.WriterMode != "" && cfg.WriterMode != WriterDuckDBAppender && cfg.WriterMode != WriterArrowParquet {
 		return fmt.Errorf("unsupported backfill writer mode %q", cfg.WriterMode)
@@ -386,6 +406,20 @@ func effectiveMaxInFlightLedgers(cfg LedgerBatchConfig) int {
 		return cfg.MaxInFlightLedgers
 	}
 	return effectiveRawExtractWorkers(cfg) * 2
+}
+
+func effectiveParquetWriters(cfg LedgerBatchConfig) int {
+	if cfg.ParquetWriters <= 0 {
+		return 1
+	}
+	return cfg.ParquetWriters
+}
+
+func effectiveMaxPendingRowGroups(cfg LedgerBatchConfig) int {
+	if cfg.MaxPendingRowGroups > 0 {
+		return cfg.MaxPendingRowGroups
+	}
+	return effectiveParquetWriters(cfg) * 2
 }
 
 func validateNextRawLedger(cfg LedgerBatchConfig, accumulator *rawLedgerAccumulator, ledger *RawLedger) error {

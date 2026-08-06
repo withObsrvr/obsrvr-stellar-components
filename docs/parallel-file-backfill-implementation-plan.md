@@ -1,7 +1,7 @@
 # Parallel File Backfill Implementation Plan
 
 **Date:** 2026-08-05
-**Status:** Stage 1 bounded worker and direct raw-XDR/typed-value spike passed; native Arrow/Parquet and registration remain open
+**Status:** Native Arrow worker, bounded extraction, and bounded row-group encoding passed; registration remains open
 **Target stack:** DuckDB 1.5.5 with matching current DuckLake and Quack
 extensions
 
@@ -199,6 +199,15 @@ and reduced throughput. A 1,000-ledger run moved the critical path to the
 single Arrow writer, so the next implementation must measure per-table work
 and add bounded parallel row-group encoding rather than increasing extraction
 concurrency again.
+
+Decision update, 2026-08-05: encode immutable row groups through per-table
+ordered queues, a global encoder bound, and a global pending-record bound. Two
+encoders with four pending row groups improved the 1,000-ledger GCS result to
+35.22 ledgers/s; four encoders were flat and eight regressed. File identities
+matched across every concurrency setting. The resulting per-table evidence
+selects generated typed builders and removal of redundant canonical sorts as
+the next worker optimization. See
+[`parallel-arrow-writer-evidence-2026-08-05.md`](parallel-arrow-writer-evidence-2026-08-05.md).
 
 Partitioned output must avoid small-file explosion. DuckDB's own guidance is
 to keep partitions on the order of at least 100 MB; the exact file target is a

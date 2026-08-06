@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"net/url"
 	"reflect"
 	"sort"
@@ -78,26 +79,43 @@ func TestArrowParquetWriterCoversEveryTableAndMatchesAppenderLogically(t *testin
 	}
 }
 
-func TestArrowParquetWriterIsByteStable(t *testing.T) {
+func TestArrowParquetWriterIsByteStableAcrossWriterConcurrency(t *testing.T) {
 	const sequence = uint32(777001)
-	write := func(outputDir string) []backfillmanifest.File {
-		files, err := WriteLedgerBatchShard(context.Background(), LedgerBatchConfig{
+	write := func(outputDir string, writers, maxPending int) StreamResult {
+		batches := []*componentsv1.LedgerBatch{allTableLedgerBatch(sequence)}
+		index := 0
+		result, err := WriteLedgerBatchStream(context.Background(), LedgerBatchConfig{
 			Parquet: ParquetConfig{
 				OutputDir: outputDir, LedgerStart: sequence, LedgerEnd: sequence,
 				Compression: "zstd", FileTargetBytes: 16 << 20, FileMaxBytes: 32 << 20, RowGroupRows: 2048,
 			},
-			WriterMode: WriterArrowParquet, DecodeWorkers: 2,
+			WriterMode: WriterArrowParquet, DecodeWorkers: 2, ParquetWriters: writers, MaxPendingRowGroups: maxPending,
 			WatermarkWrittenAt: time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC),
-		}, []*componentsv1.LedgerBatch{allTableLedgerBatch(sequence)})
+		}, func() (*componentsv1.LedgerBatch, error) {
+			if index == len(batches) {
+				return nil, io.EOF
+			}
+			batch := batches[index]
+			index++
+			return batch, nil
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		return files
+		return result
 	}
-	first := fileLogicalIdentities(write(t.TempDir()))
-	second := fileLogicalIdentities(write(t.TempDir()))
+	serial := write(t.TempDir(), 1, 2)
+	parallel := write(t.TempDir(), 4, 8)
+	first := fileLogicalIdentities(serial.Files)
+	second := fileLogicalIdentities(parallel.Files)
 	if !reflect.DeepEqual(first, second) {
 		t.Fatalf("Arrow artifacts are not byte-stable:\nfirst=%v\nsecond=%v", first, second)
+	}
+	if parallel.PeakParquetWriters < 1 || parallel.PeakParquetWriters > 4 || parallel.PeakPendingRowGroups > 8 {
+		t.Fatalf("parallel writer bounds = active %d pending %d", parallel.PeakParquetWriters, parallel.PeakPendingRowGroups)
+	}
+	if len(parallel.TableWriterStats) != len(parallel.Files) {
+		t.Fatalf("table writer stats = %d, files = %d", len(parallel.TableWriterStats), len(parallel.Files))
 	}
 }
 

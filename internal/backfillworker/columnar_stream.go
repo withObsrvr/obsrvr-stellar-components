@@ -47,7 +47,15 @@ func writeColumnarLedgerStream(ctx context.Context, cfg LedgerBatchConfig, nextB
 			applyRawPipelineMetrics(&result, rawPipeline.Metrics())
 		}()
 	}
-	columnar := newColumnarShardWriter(cfg.Parquet, absOutputDir)
+	columnar, err := newColumnarShardWriterWithConcurrency(
+		cfg.Parquet,
+		absOutputDir,
+		effectiveParquetWriters(cfg),
+		effectiveMaxPendingRowGroups(cfg),
+	)
+	if err != nil {
+		return StreamResult{}, err
+	}
 	complete := false
 	defer func() {
 		if !complete {
@@ -213,6 +221,13 @@ func writeColumnarLedgerStream(ctx context.Context, cfg LedgerBatchConfig, nextB
 	if err != nil {
 		return StreamResult{}, err
 	}
+	writerMetrics, tableWriterStats := columnar.writerMetrics()
+	result.ParquetAdmissionWait = writerMetrics.AdmissionWait
+	result.ParquetEncodeDuration = writerMetrics.EncodeWorkerDuration
+	result.ParquetDrainWait = writerMetrics.DrainWait
+	result.PeakParquetWriters = writerMetrics.PeakActive
+	result.PeakPendingRowGroups = writerMetrics.PeakPending
+	result.TableWriterStats = tableWriterStats
 	if err := validateCompleteTableCounts(tableCounts, files); err != nil {
 		removeLocalArtifacts(files)
 		return StreamResult{}, err

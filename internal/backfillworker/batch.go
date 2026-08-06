@@ -19,15 +19,17 @@ import (
 )
 
 type LedgerBatchConfig struct {
-	Parquet            ParquetConfig
-	WriterMode         string
-	DecodeWorkers      int
-	RawExtractWorkers  int
-	MaxInFlightLedgers int
-	WatermarkWrittenAt time.Time
-	MaxEncodedBytes    uint64
-	MaxBronzeRows      uint64
-	MemoryLimit        string
+	Parquet             ParquetConfig
+	WriterMode          string
+	DecodeWorkers       int
+	RawExtractWorkers   int
+	MaxInFlightLedgers  int
+	ParquetWriters      int
+	MaxPendingRowGroups int
+	WatermarkWrittenAt  time.Time
+	MaxEncodedBytes     uint64
+	MaxBronzeRows       uint64
+	MemoryLimit         string
 }
 
 const (
