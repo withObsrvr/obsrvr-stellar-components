@@ -30,9 +30,10 @@ make build
   catalog. `--writer=arrow-parquet` uses bounded Arrow row groups with no
   DuckDB staging database; `--writer=duckdb-appender` is the parity oracle and
   rollback. `--source=ledger-stream` reads raw XDR directly from the configured
-  SDK stream, performs one extraction decode, and sends contract events from
-  typed extraction directly to Arrow without `LedgerBatch`, row JSON,
-  reflection, or generic SQL-value conversion. Use
+  SDK stream, performs one extraction decode, and sends contract events,
+  transactions, operations, effects, and token transfers from typed extraction
+  directly to Arrow without `LedgerBatch`, row JSON, reflection, or generic
+  SQL-value conversion. Use
   `make test-file-backfill-benchmark` with `BACKFILL_SOURCE`, an exact range,
   and `BACKFILL_CONCURRENCY` to record aggregate throughput and phase evidence.
 - `postgres-sink`: idempotently writes ledgers, transactions, and operations to Postgres.
@@ -92,7 +93,9 @@ ledgers, and out-of-order results together. See
 [`docs/bounded-arrow-pipeline-evidence-2026-08-05.md`](docs/bounded-arrow-pipeline-evidence-2026-08-05.md)
 for the extraction configuration knee and
 [`docs/parallel-arrow-writer-evidence-2026-08-05.md`](docs/parallel-arrow-writer-evidence-2026-08-05.md)
-for the bounded writer result.
+for the bounded writer result and
+[`docs/typed-arrow-builder-evidence-2026-08-06.md`](docs/typed-arrow-builder-evidence-2026-08-06.md)
+for the generated-builder result.
 
 ## Contracts
 
@@ -120,6 +123,8 @@ See:
   file-worker correctness, throughput, and memory evidence
 - `docs/parallel-arrow-writer-evidence-2026-08-05.md` — bounded parallel
   row-group encoding, determinism, and host-scaling evidence
+- `docs/typed-arrow-builder-evidence-2026-08-06.md` — generated hot-table Arrow
+  builders, byte-identical parity, and updated bottleneck evidence
 - `docs/quickstart.md`
 - `docs/rebuild-plan.md`
 - `docs/architecture.md`

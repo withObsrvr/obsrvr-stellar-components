@@ -42,20 +42,27 @@ type columnarShardWriter struct {
 }
 
 type columnarTableWriter struct {
-	owner          *columnarShardWriter
-	publicName     string
-	tableName      string
-	ledgerColumn   int
-	layout         bronzeColumnar.TypedTableLayout
-	builder        *bronzeColumnar.RecordBuilder
-	contractEvents *bronzeColumnar.ContractEventsBuilder
-	writeQueue     *columnarWriteQueue
-	part           *columnarPart
-	partIndex      int
-	files          []backfillmanifest.File
-	sortNanos      atomic.Int64
-	buildNanos     atomic.Int64
-	rowsAppended   atomic.Uint64
+	owner        *columnarShardWriter
+	publicName   string
+	tableName    string
+	ledgerColumn int
+	layout       bronzeColumnar.TypedTableLayout
+	builder      *bronzeColumnar.RecordBuilder
+	direct       columnarDirectBuilder
+	writeQueue   *columnarWriteQueue
+	part         *columnarPart
+	partIndex    int
+	files        []backfillmanifest.File
+	sortNanos    atomic.Int64
+	buildNanos   atomic.Int64
+	rowsAppended atomic.Uint64
+}
+
+type columnarDirectBuilder interface {
+	Schema() *arrow.Schema
+	Len() int
+	NewRecordBatch() arrow.RecordBatch
+	Release()
 }
 
 type columnarPart struct {
@@ -149,34 +156,240 @@ func (writer *columnarShardWriter) appendContractEvents(sequence uint32, rows []
 	if len(rows) == 0 {
 		return nil
 	}
+	sortStarted := time.Now()
+	bronzeColumnar.SortContractEvents(rows)
+	duration := time.Since(sortStarted)
+	if err := writer.appendSortedContractEvents(sequence, rows); err != nil {
+		return err
+	}
 	table, err := writer.typedTable(bronzeColumnar.ContractEventsTable)
 	if err != nil {
 		return err
 	}
-	if !table.layout.Schema.Equal(bronzeColumnar.ContractEventsSchema) {
-		return fmt.Errorf("generated contract-events schema diverges from Bronze DDL")
+	table.sortNanos.Add(int64(duration))
+	return nil
+}
+
+func (writer *columnarShardWriter) appendExtractedData(sequence uint32, data *extract.LedgerData, overrides bronze.TransactionOverrides) error {
+	if data == nil {
+		return nil
 	}
-	if table.builder.Len() != 0 {
-		return fmt.Errorf("contract-events table mixed generic and direct rows")
+	sortRows := func(tableName string, rowCount int, sort func()) error {
+		if rowCount == 0 {
+			return nil
+		}
+		started := time.Now()
+		sort()
+		table, err := writer.typedTable(tableName)
+		if err != nil {
+			return err
+		}
+		table.sortNanos.Add(int64(time.Since(started)))
+		return nil
 	}
-	if table.contractEvents == nil {
-		table.contractEvents = bronzeColumnar.NewContractEventsBuilder(writer.allocator, int(writer.cfg.RowGroupRows))
+	for _, pending := range []struct {
+		table string
+		rows  int
+		run   func()
+	}{
+		{bronzeColumnar.ContractEventsTable, len(data.ContractEvents), func() { bronzeColumnar.SortContractEvents(data.ContractEvents) }},
+		{bronzeColumnar.TransactionsTable, len(data.Transactions), func() { bronzeColumnar.SortTransactions(data.Transactions) }},
+		{bronzeColumnar.OperationsTable, len(data.Operations), func() { bronzeColumnar.SortOperations(data.Operations) }},
+		{bronzeColumnar.EffectsTable, len(data.Effects), func() { bronzeColumnar.SortEffects(data.Effects) }},
+		{bronzeColumnar.TokenTransfersTable, len(data.TokenTransfers), func() { bronzeColumnar.SortTokenTransfers(data.TokenTransfers) }},
+	} {
+		if err := sortRows(pending.table, pending.rows, pending.run); err != nil {
+			return err
+		}
 	}
-	sortStarted := time.Now()
-	bronzeColumnar.SortContractEvents(rows)
-	table.sortNanos.Add(int64(time.Since(sortStarted)))
+	if err := writer.appendSortedContractEvents(sequence, data.ContractEvents); err != nil {
+		return err
+	}
+	if err := writer.appendTransactions(sequence, data.Transactions, overrides); err != nil {
+		return err
+	}
+	if err := writer.appendOperations(sequence, data.Operations); err != nil {
+		return err
+	}
+	if err := writer.appendEffects(sequence, data.Effects); err != nil {
+		return err
+	}
+	return writer.appendTokenTransfers(sequence, data.TokenTransfers)
+}
+
+func (writer *columnarShardWriter) appendSortedContractEvents(sequence uint32, rows []extract.ContractEventData) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	table, err := writer.typedTable(bronzeColumnar.ContractEventsTable)
+	if err != nil {
+		return err
+	}
+	if err := table.ensureDirect(func() columnarDirectBuilder {
+		return bronzeColumnar.NewContractEventsBuilder(writer.allocator, int(writer.cfg.RowGroupRows))
+	}); err != nil {
+		return err
+	}
+	builder, ok := table.direct.(*bronzeColumnar.ContractEventsBuilder)
+	if !ok {
+		return fmt.Errorf("contract-events table has direct builder %T", table.direct)
+	}
 	for _, row := range rows {
 		if row.LedgerSequence != sequence {
 			return fmt.Errorf("contract event ledger %d does not match source ledger %d", row.LedgerSequence, sequence)
 		}
 		buildStarted := time.Now()
-		if err := table.contractEvents.Append(row); err != nil {
+		if err := builder.Append(row); err != nil {
 			return err
 		}
 		table.buildNanos.Add(int64(time.Since(buildStarted)))
 		table.rowsAppended.Add(1)
-		if uint64(table.contractEvents.Len()) >= writer.cfg.RowGroupRows {
-			if err := table.flushContractEvents(); err != nil {
+		if uint64(builder.Len()) >= writer.cfg.RowGroupRows {
+			if err := table.flushDirect(); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (writer *columnarShardWriter) appendTransactions(sequence uint32, rows []extract.TransactionData, overrides bronze.TransactionOverrides) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	table, err := writer.typedTable(bronzeColumnar.TransactionsTable)
+	if err != nil {
+		return err
+	}
+	if err := table.ensureDirect(func() columnarDirectBuilder {
+		return bronzeColumnar.NewTransactionsBuilder(writer.allocator, int(writer.cfg.RowGroupRows))
+	}); err != nil {
+		return err
+	}
+	builder, ok := table.direct.(*bronzeColumnar.TransactionsBuilder)
+	if !ok {
+		return fmt.Errorf("transactions table has direct builder %T", table.direct)
+	}
+	for _, row := range rows {
+		if row.LedgerSequence != sequence {
+			return fmt.Errorf("transaction ledger %d does not match source ledger %d", row.LedgerSequence, sequence)
+		}
+		started := time.Now()
+		if err := builder.Append(row, overrides[row.TransactionHash]); err != nil {
+			return err
+		}
+		table.buildNanos.Add(int64(time.Since(started)))
+		table.rowsAppended.Add(1)
+		if uint64(builder.Len()) >= writer.cfg.RowGroupRows {
+			if err := table.flushDirect(); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (writer *columnarShardWriter) appendOperations(sequence uint32, rows []extract.OperationData) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	table, err := writer.typedTable(bronzeColumnar.OperationsTable)
+	if err != nil {
+		return err
+	}
+	if err := table.ensureDirect(func() columnarDirectBuilder {
+		return bronzeColumnar.NewOperationsBuilder(writer.allocator, int(writer.cfg.RowGroupRows))
+	}); err != nil {
+		return err
+	}
+	builder, ok := table.direct.(*bronzeColumnar.OperationsBuilder)
+	if !ok {
+		return fmt.Errorf("operations table has direct builder %T", table.direct)
+	}
+	for _, row := range rows {
+		if row.LedgerSequence != sequence {
+			return fmt.Errorf("operation ledger %d does not match source ledger %d", row.LedgerSequence, sequence)
+		}
+		started := time.Now()
+		if err := builder.Append(row); err != nil {
+			return err
+		}
+		table.buildNanos.Add(int64(time.Since(started)))
+		table.rowsAppended.Add(1)
+		if uint64(builder.Len()) >= writer.cfg.RowGroupRows {
+			if err := table.flushDirect(); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (writer *columnarShardWriter) appendEffects(sequence uint32, rows []extract.EffectData) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	table, err := writer.typedTable(bronzeColumnar.EffectsTable)
+	if err != nil {
+		return err
+	}
+	if err := table.ensureDirect(func() columnarDirectBuilder {
+		return bronzeColumnar.NewEffectsBuilder(writer.allocator, int(writer.cfg.RowGroupRows))
+	}); err != nil {
+		return err
+	}
+	builder, ok := table.direct.(*bronzeColumnar.EffectsBuilder)
+	if !ok {
+		return fmt.Errorf("effects table has direct builder %T", table.direct)
+	}
+	for _, row := range rows {
+		if row.LedgerSequence != sequence {
+			return fmt.Errorf("effect ledger %d does not match source ledger %d", row.LedgerSequence, sequence)
+		}
+		started := time.Now()
+		if err := builder.Append(row); err != nil {
+			return err
+		}
+		table.buildNanos.Add(int64(time.Since(started)))
+		table.rowsAppended.Add(1)
+		if uint64(builder.Len()) >= writer.cfg.RowGroupRows {
+			if err := table.flushDirect(); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (writer *columnarShardWriter) appendTokenTransfers(sequence uint32, rows []extract.TokenTransferData) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	table, err := writer.typedTable(bronzeColumnar.TokenTransfersTable)
+	if err != nil {
+		return err
+	}
+	if err := table.ensureDirect(func() columnarDirectBuilder {
+		return bronzeColumnar.NewTokenTransfersBuilder(writer.allocator, int(writer.cfg.RowGroupRows))
+	}); err != nil {
+		return err
+	}
+	builder, ok := table.direct.(*bronzeColumnar.TokenTransfersBuilder)
+	if !ok {
+		return fmt.Errorf("token-transfers table has direct builder %T", table.direct)
+	}
+	for _, row := range rows {
+		if row.LedgerSequence != sequence {
+			return fmt.Errorf("token transfer ledger %d does not match source ledger %d", row.LedgerSequence, sequence)
+		}
+		started := time.Now()
+		if err := builder.Append(row); err != nil {
+			return err
+		}
+		table.buildNanos.Add(int64(time.Since(started)))
+		table.rowsAppended.Add(1)
+		if uint64(builder.Len()) >= writer.cfg.RowGroupRows {
+			if err := table.flushDirect(); err != nil {
 				return err
 			}
 		}
@@ -265,17 +478,12 @@ func (writer *columnarShardWriter) envelopeTable(tableName string, columns, sqlT
 }
 
 func (writer *columnarShardWriter) addTable(publicName, tableName string, ledgerColumn int, layout bronzeColumnar.TypedTableLayout) (*columnarTableWriter, error) {
-	builder, err := bronzeColumnar.NewRecordBuilder(writer.allocator, layout.Schema, int(writer.cfg.RowGroupRows))
-	if err != nil {
-		return nil, err
-	}
 	table := &columnarTableWriter{
 		owner: writer, publicName: publicName, tableName: tableName,
-		ledgerColumn: ledgerColumn, layout: layout, builder: builder,
+		ledgerColumn: ledgerColumn, layout: layout,
 	}
 	table.writeQueue = writer.async.Register(publicName)
 	if table.writeQueue == nil {
-		builder.Release()
 		return nil, fmt.Errorf("register columnar write queue for %s", publicName)
 	}
 	writer.tables[publicName] = table
@@ -283,6 +491,16 @@ func (writer *columnarShardWriter) addTable(publicName, tableName string, ledger
 }
 
 func (table *columnarTableWriter) append(sequence uint32, values []any) error {
+	if table.direct != nil {
+		return fmt.Errorf("table %s mixed generic and direct rows", table.publicName)
+	}
+	if table.builder == nil {
+		builder, err := bronzeColumnar.NewRecordBuilder(table.owner.allocator, table.layout.Schema, int(table.owner.cfg.RowGroupRows))
+		if err != nil {
+			return err
+		}
+		table.builder = builder
+	}
 	if table.ledgerColumn < 0 || table.ledgerColumn >= len(values) {
 		return fmt.Errorf("ledger column index %d is outside %d values", table.ledgerColumn, len(values))
 	}
@@ -305,7 +523,29 @@ func (table *columnarTableWriter) append(sequence uint32, values []any) error {
 	return nil
 }
 
+func (table *columnarTableWriter) ensureDirect(create func() columnarDirectBuilder) error {
+	if table.builder != nil {
+		return fmt.Errorf("table %s mixed generic and direct rows", table.publicName)
+	}
+	if table.direct != nil {
+		return nil
+	}
+	builder := create()
+	if builder == nil {
+		return fmt.Errorf("create direct builder for %s returned nil", table.publicName)
+	}
+	if !schemasLogicallyEqual(builder.Schema(), table.layout.Schema) {
+		builder.Release()
+		return fmt.Errorf("generated direct schema for %s diverges from Bronze DDL", table.publicName)
+	}
+	table.direct = builder
+	return nil
+}
+
 func (table *columnarTableWriter) flush() error {
+	if table.builder == nil {
+		return nil
+	}
 	record := table.builder.NewRecordBatch()
 	if record == nil {
 		return nil
@@ -313,11 +553,11 @@ func (table *columnarTableWriter) flush() error {
 	return table.enqueueRecord(record)
 }
 
-func (table *columnarTableWriter) flushContractEvents() error {
-	if table.contractEvents == nil {
+func (table *columnarTableWriter) flushDirect() error {
+	if table.direct == nil {
 		return nil
 	}
-	record := table.contractEvents.NewRecordBatch()
+	record := table.direct.NewRecordBatch()
 	if record == nil || record.NumRows() == 0 {
 		if record != nil {
 			record.Release()
@@ -597,7 +837,7 @@ func (writer *columnarShardWriter) close() ([]backfillmanifest.File, error) {
 			writer.abort()
 			return nil, err
 		}
-		if err := table.flushContractEvents(); err != nil {
+		if err := table.flushDirect(); err != nil {
 			writer.abort()
 			return nil, err
 		}
@@ -616,9 +856,9 @@ func (writer *columnarShardWriter) close() ([]backfillmanifest.File, error) {
 			table.builder.Release()
 			table.builder = nil
 		}
-		if table.contractEvents != nil {
-			table.contractEvents.Release()
-			table.contractEvents = nil
+		if table.direct != nil {
+			table.direct.Release()
+			table.direct = nil
 		}
 	}
 	slices.SortFunc(writer.files, func(left, right backfillmanifest.File) int {
@@ -638,9 +878,9 @@ func (writer *columnarShardWriter) abort() {
 			table.builder.Release()
 			table.builder = nil
 		}
-		if table.contractEvents != nil {
-			table.contractEvents.Release()
-			table.contractEvents = nil
+		if table.direct != nil {
+			table.direct.Release()
+			table.direct = nil
 		}
 		if table.part != nil {
 			_ = table.part.writer.Close()

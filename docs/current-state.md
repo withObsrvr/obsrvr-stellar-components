@@ -1,6 +1,6 @@
 # Current State
 
-**As of:** 2026-08-04
+**As of:** 2026-08-06
 **Status:** Local write-path and two-server replica gates passed; production deployment remains open.
 
 This is the canonical status document for the Quack/DuckLake work. Historical
@@ -166,6 +166,15 @@ The topology is not production-approved until these are complete:
    ledgers/s and exposed host CPU contention. Per-table evidence makes typed
    builders and contract-event sort removal the next measured constraint. See
    [`parallel-arrow-writer-evidence-2026-08-05.md`](parallel-arrow-writer-evidence-2026-08-05.md).
+10. Generated Arrow builders now consume typed transactions, operations,
+   effects, and token transfers without reflected `[]any` projection. On the
+   same 1,000-ledger GCS range, raw projection fell 78%, foreground append fell
+   13.5%, and one worker reached 37.32 ledgers/s, 6% above the preceding
+   writer result. All 22 normalized Parquet identities matched exactly. A
+   two-process retune became source-bound rather than builder-bound, so source
+   prefetch/caching and contract-event work are the next measured constraints.
+   See
+   [`typed-arrow-builder-evidence-2026-08-06.md`](typed-arrow-builder-evidence-2026-08-06.md).
 
 ## Operational constraints and residual risks
 

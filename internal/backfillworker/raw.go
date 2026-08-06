@@ -26,30 +26,32 @@ type RawLedgerOptions struct {
 	MaterializedAt       time.Time
 	ProjectWorkers       int
 	DirectContractEvents bool
+	DirectColumnarTables bool
 }
 
 // RawLedger is one ledger after direct extraction. SourceXDR follows the
 // ownership of the input passed to DecodeRawLedger: the sequential path keeps
 // the source borrow, while the concurrent pipeline passes an owned copy.
 type RawLedger struct {
-	NetworkPassphrase  string
-	LedgerSequence     uint32
-	ClosedAtUnix       int64
-	SchemaVersion      string
-	ExtractionVersion  string
-	TransactionCount   int
-	OperationCount     int
-	Rows               []bronze.DecodedRow
-	BronzeRowCount     int
-	ExtractedData      *extract.LedgerData
-	SourceXDR          []byte
-	ViewDuration       time.Duration
-	DecodeDuration     time.Duration
-	ExtractDuration    time.Duration
-	PinDuration        time.Duration
-	EnvelopeDuration   time.Duration
-	ProjectDuration    time.Duration
-	ProcessingDuration time.Duration
+	NetworkPassphrase    string
+	LedgerSequence       uint32
+	ClosedAtUnix         int64
+	SchemaVersion        string
+	ExtractionVersion    string
+	TransactionCount     int
+	OperationCount       int
+	Rows                 []bronze.DecodedRow
+	BronzeRowCount       int
+	ExtractedData        *extract.LedgerData
+	TransactionOverrides bronze.TransactionOverrides
+	SourceXDR            []byte
+	ViewDuration         time.Duration
+	DecodeDuration       time.Duration
+	ExtractDuration      time.Duration
+	PinDuration          time.Duration
+	EnvelopeDuration     time.Duration
+	ProjectDuration      time.Duration
+	ProcessingDuration   time.Duration
 }
 
 type rawLedgerAccumulator struct {
@@ -161,7 +163,18 @@ func DecodeRawLedger(raw []byte, opts RawLedgerOptions) (*RawLedger, error) {
 	projectStarted := time.Now()
 	rowCount := bronze.LedgerDataRowCount(data)
 	var rows []bronze.DecodedRow
-	if opts.DirectContractEvents {
+	if opts.DirectColumnarTables {
+		rows = bronze.ProjectLedgerDataExceptWithWorkers(
+			data,
+			overrides,
+			opts.ProjectWorkers,
+			columnar.ContractEventsTable,
+			columnar.TransactionsTable,
+			columnar.OperationsTable,
+			columnar.EffectsTable,
+			columnar.TokenTransfersTable,
+		)
+	} else if opts.DirectContractEvents {
 		rows = bronze.ProjectLedgerDataExceptWithWorkers(data, overrides, opts.ProjectWorkers, columnar.ContractEventsTable)
 	} else {
 		rows = bronze.ProjectLedgerDataWithWorkers(data, overrides, opts.ProjectWorkers)
@@ -174,24 +187,25 @@ func DecodeRawLedger(raw []byte, opts RawLedgerOptions) (*RawLedger, error) {
 	projectDuration := time.Since(projectStarted)
 
 	return &RawLedger{
-		NetworkPassphrase:  opts.NetworkPassphrase,
-		LedgerSequence:     view.Sequence,
-		ClosedAtUnix:       view.ClosedAt.Unix(),
-		SchemaVersion:      opts.SchemaVersion,
-		ExtractionVersion:  opts.ExtractionVersion,
-		TransactionCount:   input.LCM.CountTransactions(),
-		OperationCount:     operationCount,
-		Rows:               rows,
-		BronzeRowCount:     rowCount,
-		ExtractedData:      data,
-		SourceXDR:          raw,
-		ViewDuration:       viewDuration,
-		DecodeDuration:     decodeDuration,
-		ExtractDuration:    extractDuration,
-		PinDuration:        pinDuration,
-		EnvelopeDuration:   envelopeDuration,
-		ProjectDuration:    projectDuration,
-		ProcessingDuration: time.Since(processingStarted),
+		NetworkPassphrase:    opts.NetworkPassphrase,
+		LedgerSequence:       view.Sequence,
+		ClosedAtUnix:         view.ClosedAt.Unix(),
+		SchemaVersion:        opts.SchemaVersion,
+		ExtractionVersion:    opts.ExtractionVersion,
+		TransactionCount:     input.LCM.CountTransactions(),
+		OperationCount:       operationCount,
+		Rows:                 rows,
+		BronzeRowCount:       rowCount,
+		ExtractedData:        data,
+		TransactionOverrides: overrides,
+		SourceXDR:            raw,
+		ViewDuration:         viewDuration,
+		DecodeDuration:       decodeDuration,
+		ExtractDuration:      extractDuration,
+		PinDuration:          pinDuration,
+		EnvelopeDuration:     envelopeDuration,
+		ProjectDuration:      projectDuration,
+		ProcessingDuration:   time.Since(processingStarted),
 	}, nil
 }
 
