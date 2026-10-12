@@ -1,9 +1,13 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -22,14 +26,8 @@ func main() {
 	failures := prometheus.NewCounter(prometheus.CounterOpts{Name: "obsrvr_stellar_processor_transform_errors_total", Help: "Ledger normalization failures."})
 	registry.MustRegister(received, transformed, failures)
 	// The SDK owns HEALTH_PORT; use a distinct port for processor metrics.
-	if addr := os.Getenv("PROCESSOR_METRICS_ADDR"); addr != "" {
-		mux := http.NewServeMux()
-		mux.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
-		go func() {
-			if err := http.ListenAndServe(addr, mux); err != nil {
-				log.Printf("processor metrics server: %v", err)
-			}
-		}()
+	if err := startProcessorMetricsServer(os.Getenv("PROCESSOR_METRICS_ADDR"), registry); err != nil {
+		log.Fatalf("start processor metrics endpoint: %v", err)
 	}
 	stellar.Run(stellar.ProcessorConfig{
 		ProcessorName: "Stellar Ledger Processor",
@@ -49,6 +47,33 @@ func main() {
 			return batch, nil
 		},
 	})
+}
+
+// startProcessorMetricsServer binds the metrics listener synchronously so a
+// misconfigured or occupied port is a startup failure rather than a process
+// that runs without the scrape target its deployment checks expect.
+func startProcessorMetricsServer(addr string, gatherer prometheus.Gatherer) error {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return nil
+	}
+	if !strings.Contains(addr, ":") {
+		addr = ":" + addr
+	}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", addr, err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{}))
+	server := &http.Server{Handler: mux}
+	go func() {
+		log.Printf("processor metrics endpoint listening on %s", addr)
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("processor metrics endpoint failed: %v", err)
+		}
+	}()
+	return nil
 }
 
 func getenv(key, fallback string) string {
