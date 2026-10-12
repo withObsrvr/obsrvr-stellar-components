@@ -77,6 +77,9 @@ func (s *DuckLakeSink) writeBatchIngest(batch *componentsv1.LedgerBatch) error {
 		s.resetIngestStream()
 		return fmt.Errorf("send ledger %d to ingest service: %w", batch.LedgerSequence, err)
 	}
+	if s.metrics != nil {
+		s.metrics.lastSentLedger.Set(float64(batch.LedgerSequence))
+	}
 	ack, err := stream.Recv()
 	if err != nil {
 		s.resetIngestStream()
@@ -89,6 +92,8 @@ func (s *DuckLakeSink) writeBatchIngest(batch *componentsv1.LedgerBatch) error {
 	roundTrip := time.Since(start)
 	if s.metrics != nil {
 		s.metrics.ingestRPCRoundTrip.Observe(roundTrip.Seconds())
+		s.metrics.lastAckLedger.Set(float64(batch.LedgerSequence))
+		s.metrics.lastAckTime.Set(float64(time.Now().Unix()))
 	}
 	log.Printf("ingest-rpc committed ledger %d in %s (replayed=%t)",
 		batch.LedgerSequence, roundTrip.Round(time.Millisecond), ack.Replayed)

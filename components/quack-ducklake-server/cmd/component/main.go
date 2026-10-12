@@ -381,7 +381,10 @@ func startHealthServer(ctx context.Context, addr string, db *sql.DB, attachName,
 func newServerHTTPHandler(db *sql.DB, attachName, quackURI string, gatherer prometheus.Gatherer, checkpoints *checkpointController, checkpointAdminToken string) http.Handler {
 	quackAddr := quackTCPAddress(quackURI)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/live", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok\n"))
+	})
+	readiness := func(w http.ResponseWriter, r *http.Request) {
 		queryCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
 		var one int
@@ -403,7 +406,10 @@ func newServerHTTPHandler(db *sql.DB, attachName, quackURI string, gatherer prom
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
-	})
+	}
+	mux.HandleFunc("/ready", readiness)
+	mux.HandleFunc("/health", readiness)
+	mux.HandleFunc("/healthz", readiness) // legacy Nomad check
 	if gatherer != nil {
 		mux.Handle("/metrics", promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{}))
 	}

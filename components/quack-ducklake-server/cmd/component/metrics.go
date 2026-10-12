@@ -23,6 +23,9 @@ type serverMetrics struct {
 	ingestOverBudget      prometheus.Counter
 	ingestInflight        prometheus.Gauge
 	ingestLastLedger      prometheus.Gauge
+	ingestReceivedLedger  prometheus.Gauge
+	ingestCommittedLedger prometheus.Gauge
+	ingestCommitTime      prometheus.Gauge
 	checkpointDuration    *prometheus.HistogramVec
 	checkpointTotal       *prometheus.CounterVec
 	checkpointDeferred    *prometheus.CounterVec
@@ -57,6 +60,9 @@ func newServerMetrics(registerer prometheus.Registerer, catalogPath string) *ser
 			Name: "obsrvr_ducklake_ingest_last_ledger",
 			Help: "Latest successfully acknowledged ledger sequence.",
 		}),
+		ingestReceivedLedger:  prometheus.NewGauge(prometheus.GaugeOpts{Name: "obsrvr_ducklake_ingest_last_received_ledger", Help: "Last live ledger received by the ingest server; not a durable claim."}),
+		ingestCommittedLedger: prometheus.NewGauge(prometheus.GaugeOpts{Name: "obsrvr_ducklake_ingest_last_committed_ledger", Help: "Last ledger durably committed (initialized from ingest_watermarks)."}),
+		ingestCommitTime:      prometheus.NewGauge(prometheus.GaugeOpts{Name: "obsrvr_ducklake_ingest_last_commit_timestamp_seconds", Help: "Unix time of the last successful commit in this process; zero after restart until a new commit."}),
 		checkpointDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "obsrvr_ducklake_checkpoint_duration_seconds",
 			Help:    "DuckDB catalog checkpoint duration by trigger and result.",
@@ -87,6 +93,9 @@ func newServerMetrics(registerer prometheus.Registerer, catalogPath string) *ser
 		m.ingestOverBudget,
 		m.ingestInflight,
 		m.ingestLastLedger,
+		m.ingestReceivedLedger,
+		m.ingestCommittedLedger,
+		m.ingestCommitTime,
 		m.checkpointDuration,
 		m.checkpointTotal,
 		m.checkpointDeferred,

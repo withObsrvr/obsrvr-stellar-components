@@ -2,13 +2,10 @@
 
 Date: 2026-07-02
 
-Current dependency:
-
-```text
-github.com/withObsrvr/flowctl-sdk v0.1.3
-```
-
-`v0.1.3` aligns the SDK and standalone examples with `go-stellar-sdk v0.7.1`.
+Current dependency in this checkout: `github.com/withObsrvr/flowctl-sdk v0.1.4`.
+That tag changes `pkg/source` stream/error handling, **not**
+`pkg/consumer` or `pkg/processor`. The error-aware runtime target below
+remains open. `v0.1.3` aligns the SDK and standalone examples with `go-stellar-sdk v0.7.1`.
 The exported `pkg/` runtime is unchanged from `v0.1.2`; this release does not
 contain the delivery, backpressure, registration, or health behavior described
 below.
@@ -19,7 +16,7 @@ components inherit it without reimplementing the same protections.
 
 ## Target Release
 
-Target: a future runtime release after `v0.1.3` (version not yet assigned)
+Target: a future runtime release after `v0.1.4` (version not yet assigned)
 
 Required changes:
 

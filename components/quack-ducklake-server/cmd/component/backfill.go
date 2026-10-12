@@ -197,6 +197,8 @@ func (s *ingestServer) commitMicroBatch(ctx context.Context, batches []*componen
 			s.forceReplay = false
 			if s.metrics != nil {
 				s.metrics.ingestLastLedger.Set(float64(descriptor.LedgerEnd))
+				s.metrics.ingestCommittedLedger.Set(float64(descriptor.LedgerEnd))
+				s.metrics.ingestCommitTime.Set(float64(time.Now().Unix()))
 			}
 			log.Printf("backfill phases ledgers %d-%d: decode %s, staging %s, preface %s, transfer %s, commit %s, cleanup %s",
 				descriptor.LedgerStart,

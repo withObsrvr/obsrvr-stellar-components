@@ -101,6 +101,25 @@ func ConfigFromEnv() Config {
 	}
 }
 
+// ConfigFromEnvStrict rejects invalid numeric values rather than accepting the
+// legacy ConfigFromEnv fallback. Use this for service startup.
+func ConfigFromEnvStrict() (Config, error) {
+	for _, key := range []string{"LEDGERS_PER_FILE", "FILES_PER_PARTITION", "BUFFER_SIZE", "NUM_WORKERS"} {
+		if value, ok := os.LookupEnv(key); ok {
+			n, err := strconv.ParseUint(value, 10, 32)
+			if err != nil || n == 0 {
+				return Config{}, fmt.Errorf("%s must be a positive uint32", key)
+			}
+		}
+	}
+	cfg := ConfigFromEnv()
+	// New only constructs the stream; it does not start acquisition.
+	if _, err := New(cfg); err != nil {
+		return Config{}, fmt.Errorf("invalid backend configuration: %w", err)
+	}
+	return cfg, nil
+}
+
 // New validates cfg and returns a reusable stream. Each RawLedgers invocation
 // owns the underlying backend and tears it down on completion, cancellation,
 // error, or an early break.

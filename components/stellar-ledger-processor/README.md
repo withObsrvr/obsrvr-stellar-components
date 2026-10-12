@@ -12,6 +12,7 @@ Optional environment:
 
 - `PORT`, default `:50051`
 - `HEALTH_PORT`, default `8088`
+- `PROCESSOR_METRICS_ADDR`, optional separate HTTP address (for example `:8091`) exposing `/metrics`; see [progress semantics](../../../docs/progress-observability.md).
 - `ENABLE_FLOWCTL`, default `false`
 - `FLOWCTL_ENDPOINT`
 - `COMPONENT_ID`
