@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"net"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,27 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 )
+
+func TestServerHealthRoutesSeparateLivenessAndReadiness(t *testing.T) {
+	db, err := sql.Open("duckdb", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	handler := newServerHTTPHandler(db, "missing_catalog", "", nil, nil, "")
+	for _, tc := range []struct {
+		path string
+		code int
+	}{
+		{"/live", 200}, {"/ready", 503}, {"/health", 503}, {"/healthz", 503},
+	} {
+		r := httptest.NewRecorder()
+		handler.ServeHTTP(r, httptest.NewRequest("GET", tc.path, nil))
+		if r.Code != tc.code {
+			t.Errorf("%s status = %d, want %d", tc.path, r.Code, tc.code)
+		}
+	}
+}
 
 func TestValidateConfigRequiresExplicitInsecureForPlaintext(t *testing.T) {
 	cfg := validTestConfig()
@@ -206,6 +228,8 @@ func TestMetricsUseIsolatedRegistryAndExposeFileGauges(t *testing.T) {
 
 	registry := prometheus.NewRegistry()
 	metrics := newServerMetrics(registry, catalogPath)
+	metrics.ingestReceivedLedger.Set(124)
+	metrics.ingestCommittedLedger.Set(123)
 	srv := &ingestServer{metrics: metrics}
 	srv.observeAcknowledged(123, false, ingestPhaseDurations{
 		decode:   10 * time.Millisecond,
@@ -229,6 +253,8 @@ func TestMetricsUseIsolatedRegistryAndExposeFileGauges(t *testing.T) {
 		`obsrvr_ducklake_ingest_batches_total{replayed="false",result="success"} 1`,
 		`obsrvr_ducklake_ingest_over_budget_total 1`,
 		`obsrvr_ducklake_ingest_last_ledger 123`,
+		`obsrvr_ducklake_ingest_last_received_ledger 124`,
+		`obsrvr_ducklake_ingest_last_committed_ledger 123`,
 		`obsrvr_ducklake_checkpoint_duration_seconds_count{result="success",trigger="idle"} 0`,
 		`obsrvr_ducklake_checkpoint_total{result="error",trigger="manual"} 0`,
 		`obsrvr_ducklake_checkpoint_deferred_total{reason="ingest_active"} 0`,

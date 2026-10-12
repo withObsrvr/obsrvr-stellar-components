@@ -36,6 +36,7 @@ job "obsrvr-flowctl-runner-local" {
       port "source_health" {}
       port "processor_grpc" {}
       port "processor_health" {}
+      port "processor_metrics" {}
       port "sink_grpc" {}
       port "sink_health" {}
     }
@@ -92,6 +93,26 @@ job "obsrvr-flowctl-runner-local" {
         name     = "stellar-ledger-processor-health-tcp"
         type     = "tcp"
         port     = "processor_health"
+        interval = "10s"
+        timeout  = "2s"
+      }
+    }
+
+    service {
+      name     = "flowctl-stellar-ledger-processor-metrics-local"
+      provider = "nomad"
+      port     = "processor_metrics"
+
+      tags = [
+        "component=stellar-ledger-processor",
+        "prometheus",
+      ]
+
+      check {
+        name     = "stellar-ledger-processor-metrics-http"
+        type     = "http"
+        path     = "/metrics"
+        port     = "processor_metrics"
         interval = "10s"
         timeout  = "2s"
       }
@@ -185,6 +206,7 @@ spec:
         NETWORK_PASSPHRASE: "Public Global Stellar Network ; September 2015"
         PORT: ":${NOMAD_PORT_processor_grpc}"
         HEALTH_PORT: "${NOMAD_PORT_processor_health}"
+        PROCESSOR_METRICS_ADDR: ":${NOMAD_PORT_processor_metrics}"
         ENABLE_FLOWCTL: "true"
         FLOWCTL_ENDPOINT: "127.0.0.1:${NOMAD_PORT_control}"
 

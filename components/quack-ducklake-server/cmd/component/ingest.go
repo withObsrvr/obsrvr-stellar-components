@@ -86,6 +86,7 @@ func newIngestServer(ctx context.Context, db *sql.DB, attachName, token string, 
 	}
 	if s.metrics != nil {
 		s.metrics.ingestLastLedger.Set(float64(s.highWatermark))
+		s.metrics.ingestCommittedLedger.Set(float64(s.highWatermark))
 	}
 	log.Printf("ingest service ready; high watermark %d", s.highWatermark)
 	return s, nil
@@ -179,8 +180,11 @@ func (s *ingestServer) IngestLedgerBatches(stream componentsv1.BronzeIngestServi
 		if err != nil {
 			return err
 		}
-		if req.Batch == nil {
+		if req == nil || req.Batch == nil {
 			return status.Error(codes.InvalidArgument, "batch is required")
+		}
+		if req.Batch.LedgerSequence == 0 || req.Batch.NetworkPassphrase == "" {
+			return status.Error(codes.InvalidArgument, "ledger_sequence and network_passphrase are required")
 		}
 		if err := s.ingestOne(stream, req.Batch); err != nil {
 			return err
@@ -211,6 +215,7 @@ func (s *ingestServer) ingestOne(stream componentsv1.BronzeIngestService_IngestL
 	if s.metrics != nil {
 		s.metrics.ingestInflight.Inc()
 		defer s.metrics.ingestInflight.Dec()
+		s.metrics.ingestReceivedLedger.Set(float64(batch.LedgerSequence))
 	}
 
 	replayed, phases, err := s.commitBatch(stream.Context(), batch)
@@ -296,6 +301,10 @@ func (s *ingestServer) commitBatch(ctx context.Context, batch *componentsv1.Ledg
 				s.highWatermark = batch.LedgerSequence
 			}
 			s.forceReplay = false
+			if s.metrics != nil {
+				s.metrics.ingestCommittedLedger.Set(float64(s.highWatermark))
+				s.metrics.ingestCommitTime.Set(float64(time.Now().Unix()))
+			}
 			return replay, phases, nil
 		}
 		// A concurrent maintenance flush can abort the transaction; after any

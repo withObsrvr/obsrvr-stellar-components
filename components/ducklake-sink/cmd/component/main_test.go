@@ -47,6 +47,92 @@ func TestHandleLedgerBatchEventRetriesWriteFailures(t *testing.T) {
 	}
 }
 
+func TestSinkReadyRequiresIngestEndpoint(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &DuckLakeSink{ingestMode: true, ingestEndpoint: listener.Addr().String()}
+	handler := newSinkHTTPHandler(sink, nil)
+	check := func(path string, want int) {
+		t.Helper()
+		r := httptest.NewRecorder()
+		handler.ServeHTTP(r, httptest.NewRequest("GET", path, nil))
+		if r.Code != want {
+			t.Fatalf("%s status = %d, want %d", path, r.Code, want)
+		}
+	}
+	check("/ready", 200)
+	_ = listener.Close()
+	check("/ready", 503)
+	check("/live", 200)
+}
+
+func TestSinkHealthRoutesSeparateLivenessAndReadiness(t *testing.T) {
+	sink := &DuckLakeSink{}
+	sink.recordWriteHealth(42, errors.New("storage failed"))
+	handler := newSinkHTTPHandler(sink, nil)
+	for _, tc := range []struct {
+		path string
+		code int
+	}{
+		{"/live", 200}, {"/ready", 503}, {"/health", 503}, {"/healthz", 503},
+	} {
+		r := httptest.NewRecorder()
+		handler.ServeHTTP(r, httptest.NewRequest("GET", tc.path, nil))
+		if r.Code != tc.code {
+			t.Errorf("%s status = %d, want %d", tc.path, r.Code, tc.code)
+		}
+	}
+}
+
+func TestHandleLedgerBatchEventRejectsInvalidInputWithoutWriting(t *testing.T) {
+	writer := &retryWriter{}
+	cases := []struct {
+		name  string
+		event *flowctlv1.Event
+	}{
+		{"nil", nil},
+		{"empty payload", &flowctlv1.Event{Type: contracts.LedgerBatchEventType}},
+		{"missing passphrase", batchEventForTest(t, 123, "")},
+		{"missing sequence", batchEventForTest(t, 0, "testnet")},
+		{"cursor mismatch", func() *flowctlv1.Event {
+			e := batchEventForTest(t, 123, "testnet")
+			e.StellarCursor = &flowctlv1.StellarCursor{LedgerSequence: 124}
+			return e
+		}()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := handleLedgerBatchEvent(context.Background(), tc.event, writer); err == nil {
+				t.Fatal("invalid input accepted")
+			}
+		})
+	}
+	if writer.calls != 0 {
+		t.Fatalf("invalid batches reached writer %d times", writer.calls)
+	}
+}
+
+func TestHandleLedgerBatchEventPreservesCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	writer := &retryWriter{}
+	err := handleLedgerBatchEvent(ctx, batchEventForTest(t, 123, "testnet"), writer)
+	if !errors.Is(err, context.Canceled) || writer.calls != 0 {
+		t.Fatalf("cancellation: err=%v calls=%d", err, writer.calls)
+	}
+}
+
+func batchEventForTest(t *testing.T, sequence uint32, passphrase string) *flowctlv1.Event {
+	t.Helper()
+	payload, err := proto.Marshal(&componentsv1.LedgerBatch{LedgerSequence: sequence, NetworkPassphrase: passphrase})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &flowctlv1.Event{Type: contracts.LedgerBatchEventType, Payload: payload}
+}
+
 func TestDuckLakeSinkMaterializesTypedBronzeTables(t *testing.T) {
 	tmp := t.TempDir()
 	sink, err := NewDuckLakeSink(DuckLakeConfig{
@@ -760,6 +846,8 @@ func TestSinkMetricsUseIsolatedRegistry(t *testing.T) {
 	metrics := newSinkMetrics(registry)
 	metrics.ingestRPCRoundTrip.Observe((250 * time.Millisecond).Seconds())
 	metrics.ingestRetries.Inc()
+	metrics.lastSentLedger.Set(42)
+	metrics.lastAckLedger.Set(41)
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest("GET", "/metrics", nil)
@@ -771,6 +859,8 @@ func TestSinkMetricsUseIsolatedRegistry(t *testing.T) {
 	for _, want := range []string{
 		"obsrvr_ducklake_ingest_rpc_round_trip_seconds_count 1",
 		"obsrvr_ducklake_ingest_retries_total 1",
+		"obsrvr_ducklake_sink_last_sent_ledger 42",
+		"obsrvr_ducklake_sink_last_acknowledged_ledger 41",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("metrics missing %q:\n%s", want, body)

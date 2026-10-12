@@ -7,11 +7,11 @@ require (
 	github.com/duckdb/duckdb-go/v2 v2.10505.0
 	github.com/lib/pq v1.10.9
 	github.com/prometheus/client_golang v1.23.2
-	github.com/stellar/go-stellar-sdk v0.7.1
+	github.com/stellar/go-stellar-sdk v0.7.3
 	github.com/withObsrvr/flow-proto v0.1.3
-	github.com/withObsrvr/flowctl-sdk v0.1.3
+	github.com/withObsrvr/flowctl-sdk v0.1.4
 	github.com/withObsrvr/stellar-extract v0.1.6
-	github.com/withObsrvr/stellar-raw-ledger-origin/source v0.0.0-20260805204803-a92ba11cc452
+	github.com/withObsrvr/stellar-raw-ledger-origin/source v0.2.5
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
@@ -101,7 +101,7 @@ require (
 	github.com/segmentio/go-loggly v0.5.1-0.20171222203950-eb91657e62b2 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/spiffe/go-spiffe/v2 v2.6.0 // indirect
-	github.com/stellar/go-xdr v0.0.0-20260529210834-0bf8f4956364 // indirect
+	github.com/stellar/go-xdr v0.0.0-20260806060815-dc590f17552a // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect

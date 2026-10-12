@@ -11,6 +11,9 @@ var ingestRPCLatencyBuckets = []float64{
 type sinkMetrics struct {
 	ingestRPCRoundTrip prometheus.Histogram
 	ingestRetries      prometheus.Counter
+	lastSentLedger     prometheus.Gauge
+	lastAckLedger      prometheus.Gauge
+	lastAckTime        prometheus.Gauge
 }
 
 func newSinkMetrics(registerer prometheus.Registerer) *sinkMetrics {
@@ -24,7 +27,10 @@ func newSinkMetrics(registerer prometheus.Registerer) *sinkMetrics {
 			Name: "obsrvr_ducklake_ingest_retries_total",
 			Help: "DuckLake sink write retries attempted after a failed send or uncertain acknowledgement.",
 		}),
+		lastSentLedger: prometheus.NewGauge(prometheus.GaugeOpts{Name: "obsrvr_ducklake_sink_last_sent_ledger", Help: "Last ledger successfully sent to the ingest stream (not necessarily committed)."}),
+		lastAckLedger:  prometheus.NewGauge(prometheus.GaugeOpts{Name: "obsrvr_ducklake_sink_last_acknowledged_ledger", Help: "Last ledger acknowledged by the ingest service."}),
+		lastAckTime:    prometheus.NewGauge(prometheus.GaugeOpts{Name: "obsrvr_ducklake_sink_last_acknowledged_timestamp_seconds", Help: "Unix time of the last ingest acknowledgement."}),
 	}
-	registerer.MustRegister(m.ingestRPCRoundTrip, m.ingestRetries)
+	registerer.MustRegister(m.ingestRPCRoundTrip, m.ingestRetries, m.lastSentLedger, m.lastAckLedger, m.lastAckTime)
 	return m
 }

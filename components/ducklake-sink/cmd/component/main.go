@@ -84,10 +84,19 @@ func main() {
 		ComponentID:  getenv("COMPONENT_ID", "ducklake-sink"),
 		InputTypes:   []string{contracts.LedgerBatchEventType},
 		OnEvent: func(ctx context.Context, event *flowctlv1.Event) error {
-			writeGate <- struct{}{}
+			select {
+			case writeGate <- struct{}{}:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 			defer func() { <-writeGate }()
 
 			if err := handleLedgerBatchEvent(ctx, event, sink); err != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return err
+				}
+				// The current SDK drops handler errors; until the error-aware
+				// runtime is released, exit rather than acknowledging a failed write.
 				log.Printf("fatal ledger batch handling error: %v", err)
 				os.Exit(1)
 			}
@@ -105,6 +114,9 @@ type ingestRetryObserver interface {
 }
 
 func handleLedgerBatchEvent(ctx context.Context, event *flowctlv1.Event, sink ledgerBatchWriter) error {
+	if event == nil {
+		return fmt.Errorf("ledger batch event is nil")
+	}
 	if event.Type != contracts.LedgerBatchEventType {
 		return nil
 	}
@@ -112,9 +124,18 @@ func handleLedgerBatchEvent(ctx context.Context, event *flowctlv1.Event, sink le
 	if err := proto.Unmarshal(event.Payload, &batch); err != nil {
 		return fmt.Errorf("unmarshal ledger batch: %w", err)
 	}
+	if batch.LedgerSequence == 0 || batch.NetworkPassphrase == "" {
+		return fmt.Errorf("invalid ledger batch: ledger_sequence and network_passphrase are required")
+	}
+	if cursor := event.GetStellarCursor(); cursor != nil && cursor.LedgerSequence != uint64(batch.LedgerSequence) {
+		return fmt.Errorf("ledger batch cursor %d does not match payload ledger %d", cursor.LedgerSequence, batch.LedgerSequence)
+	}
 	var lastErr error
 	backoff := writeRetryBackoff
 	for attempt := 1; attempt <= 3; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("write ledger batch %d canceled: %w", batch.LedgerSequence, err)
+		}
 		if err := sink.WriteBatch(&batch); err != nil {
 			lastErr = err
 			log.Printf("write ledger batch %d failed on attempt %d/3: %v", batch.LedgerSequence, attempt, err)
@@ -606,7 +627,10 @@ func startSinkHealthServer(port string, sink *DuckLakeSink, gatherer prometheus.
 
 func newSinkHTTPHandler(sink *DuckLakeSink, gatherer prometheus.Gatherer) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/live", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok\n"))
+	})
+	readiness := func(w http.ResponseWriter, r *http.Request) {
 		snapshot := sink.healthSnapshot(time.Now().UTC())
 		status := http.StatusOK
 		if !snapshot.Healthy {
@@ -627,7 +651,23 @@ func newSinkHTTPHandler(sink *DuckLakeSink, gatherer prometheus.Gatherer) http.H
 			snapshot.LastWriteAge.Seconds(),
 			snapshot.LastError,
 		)
+	}
+	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
+		if sink.ingestMode {
+			// A bounded transport check catches an unavailable ingest server at
+			// startup, before the first write. An authenticated write can still
+			// fail, so this is not a durability or authorization guarantee.
+			conn, err := net.DialTimeout("tcp", sink.ingestEndpoint, 500*time.Millisecond)
+			if err != nil {
+				http.Error(w, "ingest endpoint unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			_ = conn.Close()
+		}
+		readiness(w, r)
 	})
+	mux.HandleFunc("/health", readiness)
+	mux.HandleFunc("/healthz", readiness) // legacy Nomad check
 	if gatherer != nil {
 		mux.Handle("/metrics", promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{}))
 	}

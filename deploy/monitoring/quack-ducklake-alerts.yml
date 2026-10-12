@@ -1,6 +1,24 @@
 groups:
   - name: quack-ducklake-production-gate
     rules:
+      # These process-local gauges are for a single primary ingest stream.
+      # They are not durable checkpoints; investigate with ingest_watermarks.
+      - alert: DuckLakeReceiveCommitDivergence
+        expr: obsrvr_ducklake_ingest_last_received_ledger{nomad_service="quack-ducklake-metrics"} - on (job, instance) obsrvr_ducklake_ingest_last_committed_ledger{nomad_service="quack-ducklake-metrics"} > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: DuckLake has received a ledger that has not committed for 2 minutes
+
+      - alert: DuckLakeStaleCommitWithPendingWork
+        expr: (obsrvr_ducklake_ingest_last_received_ledger{nomad_service="quack-ducklake-metrics"} - on (job, instance) obsrvr_ducklake_ingest_last_committed_ledger{nomad_service="quack-ducklake-metrics"} > 0) and on (job, instance) (obsrvr_ducklake_ingest_last_commit_timestamp_seconds{nomad_service="quack-ducklake-metrics"} > 0 and time() - obsrvr_ducklake_ingest_last_commit_timestamp_seconds{nomad_service="quack-ducklake-metrics"} > 120)
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: DuckLake has pending work and its last successful commit is over 2 minutes old
+
       - alert: DuckLakeIngestOverBudget
         expr: increase(obsrvr_ducklake_ingest_over_budget_total{nomad_service="quack-ducklake-metrics"}[5m]) > 0
         for: 0m
